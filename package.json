@@ -1,0 +1,19 @@
+{
+  "name": "auto-audio-input-switcher",
+  "version": "0.1.0",
+  "description": "Automatyczne przełączanie domyślnego mikrofonu w Windows wg obecności użytkownika (mmWave USB radar + Electron Tray)",
+  "main": "main.js",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "dependencies": {
+    "serialport": "^12.0.0"
+  }
+}
