@@ -11,6 +11,7 @@ let tray = null;
 let settingsWindow = null;
 let controller = null;
 let snapshot = null;
+let radarIssueToastShown = false;
 
 const STATE_LABEL = { desk: 'Przy biurku', away: 'Poza biurkiem' };
 const MODE_LABEL = { auto: 'Auto (radar)', desk: 'QuadCast 2', headset: 'Słuchawki' };
@@ -34,6 +35,60 @@ function resolveConfigPath() {
 function resolveBinDir() {
   if (app.isPackaged) return path.join(process.resourcesPath, 'bin');
   return path.join(__dirname, '..', '..', 'bin');
+}
+
+function createAudioController() {
+  return new AudioController({
+    binDir: resolveBinDir(),
+    toolsDir: path.join(app.getPath('userData'), 'tools'),
+    config: controller ? controller.config : null
+  });
+}
+
+// ---------- samoleczenie ----------
+
+/**
+ * Po nieudanym przełączeniu próbuje wykryć prawidłową nazwę urządzenia
+ * i ponawia przełączenie. Zwraca poprawioną nazwę albo null.
+ */
+async function autoHealDeviceName(state) {
+  if (!controller.config.get('autoDetectDevices')) return null;
+  const devices = await controller.audio.listRecordingDevices();
+  if (!devices.length) return null;
+  const rec = controller.audio.resolveNames(devices);
+  const key = state === 'desk' ? 'micDeskName' : 'micHeadsetName';
+  const desired = state === 'desk' ? rec.micDeskName : rec.micHeadsetName;
+  const current = controller.config.get(key);
+  if (desired && desired !== current && devices.some((d) => d.name === desired)) {
+    controller.config.set(key, desired);
+    const res = await controller.audio.setDefaultRecordingDevice(desired);
+    if (res.ok) return desired;
+  }
+  return null;
+}
+
+/**
+ * Przy starcie sprawdza, czy nazwy z konfiguracji istnieją na liście
+ * urządzeń; jeśli nie — automatycznie je poprawia.
+ */
+async function autoDetectOnStartup() {
+  if (!controller.config.get('autoDetectDevices')) return;
+  const devices = await controller.audio.listRecordingDevices();
+  if (!devices.length) return;
+  const rec = controller.audio.resolveNames(devices);
+  let changed = false;
+  if (rec.micDeskName && !devices.some((d) => d.name === controller.config.get('micDeskName')) && devices.some((d) => d.name === rec.micDeskName)) {
+    controller.config.set('micDeskName', rec.micDeskName);
+    changed = true;
+  }
+  if (rec.micHeadsetName && !devices.some((d) => d.name === controller.config.get('micHeadsetName')) && devices.some((d) => d.name === rec.micHeadsetName)) {
+    controller.config.set('micHeadsetName', rec.micHeadsetName);
+    changed = true;
+  }
+  if (changed) {
+    pushEvent('toast', { message: 'Automatycznie poprawiono nazwy urządzeń audio' });
+    refreshSnapshot();
+  }
 }
 
 // ---------- snapshot / events ----------
@@ -201,13 +256,42 @@ function registerIpc() {
     return buildSnapshot();
   });
   ipcMain.handle('config:update', (_e, patch) => {
+    const prev = {
+      mockMode: controller.config.get('mockMode'),
+      baudRate: controller.config.get('baudRate')
+    };
     for (const [key, value] of Object.entries(patch || {})) {
       if (key in controller.config.data) controller.config.set(key, value);
     }
     if (typeof patch?.autoStart === 'boolean') applyAutoStart(patch.autoStart);
     applyConfig();
-    refreshSnapshot();
+    const radarNeedsRestart = patch && (
+      ('mockMode' in patch && patch.mockMode !== prev.mockMode) ||
+      ('baudRate' in patch && patch.baudRate !== prev.baudRate)
+    );
+    if (radarNeedsRestart) {
+      restartRadar();
+    } else {
+      refreshSnapshot();
+    }
     return buildSnapshot();
+  });
+  ipcMain.handle('devices:detect', async () => {
+    const devices = await controller.audio.listRecordingDevices();
+    const recommended = controller.audio.resolveNames(devices);
+    let applied = false;
+    if (devices.length) {
+      const fix = (key, want) => {
+        if (want && !devices.some((d) => d.name === controller.config.get(key)) && devices.some((d) => d.name === want)) {
+          controller.config.set(key, want);
+          applied = true;
+        }
+      };
+      fix('micDeskName', recommended.micDeskName);
+      fix('micHeadsetName', recommended.micHeadsetName);
+    }
+    refreshSnapshot();
+    return { devices, recommended, applied };
   });
   ipcMain.handle('config:reset', () => {
     for (const [key, value] of Object.entries(DEFAULTS)) {
@@ -232,17 +316,23 @@ async function restartRadar() {
 
 function applyConfig() {
   controller.radar.config = controller.config;
-  controller.audio = new AudioController(resolveBinDir());
+  controller.audio = createAudioController();
+  controller.audio.on('toolStatus', (msg) => pushEvent('toast', { message: msg }));
 }
 
 app.setAppUserModelId('com.monratis.autoaudio');
 
 app.whenReady().then(() => {
   const config = new Config(resolveConfigPath());
-  const audio = new AudioController(resolveBinDir());
   const radar = new RadarListener(config);
+  const audio = new AudioController({
+    binDir: resolveBinDir(),
+    toolsDir: path.join(app.getPath('userData'), 'tools'),
+    config
+  });
 
   controller = new AppController(radar, audio, config);
+  audio.on('toolStatus', (msg) => pushEvent('toast', { message: msg }));
   applyAutoStart(config.get('autoStart'));
 
   controller.on('switch', ({ state, device }) => {
@@ -250,11 +340,26 @@ app.whenReady().then(() => {
     pushEvent('toast', { message: `Przełączono mikrofon: ${device}` });
     refreshSnapshot();
   });
-  controller.on('switched', ({ state, ok }) => {
-    if (!ok) pushEvent('toast', { error: true, message: 'Nie udało się ustawić mikrofonu' });
+  controller.on('switched', async ({ state, ok }) => {
+    if (!ok) {
+      const healed = await autoHealDeviceName(state);
+      if (healed) {
+        pushEvent('toast', { message: `Poprawiono nazwę urządzenia: ${healed}` });
+      } else {
+        pushEvent('toast', { error: true, message: 'Nie udało się ustawić mikrofonu' });
+      }
+    }
     refreshSnapshot();
   });
-  controller.on('radarStatus', () => refreshSnapshot());
+  controller.on('radarStatus', (s) => {
+    if (s && s.connected === true) {
+      radarIssueToastShown = false;
+    } else if (s && s.error && !radarIssueToastShown) {
+      radarIssueToastShown = true;
+      pushEvent('toast', { error: true, message: 'Radar niedostępny — ponawiam połączenie…' });
+    }
+    refreshSnapshot();
+  });
   controller.on('error', (err) => {
     console.error('[main] error:', err.message);
     pushEvent('toast', { error: true, message: `Błąd: ${err.message}` });
@@ -269,7 +374,7 @@ app.whenReady().then(() => {
   registerIpc();
   createSettingsWindow();
   refreshSnapshot();
-  controller.start();
+  controller.start().then(() => autoDetectOnStartup());
 });
 
 app.on('before-quit', () => { app.isQuitting = true; });

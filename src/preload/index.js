@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('api', {
   setMode: (mode) => ipcRenderer.invoke('state:mode', mode),
   setPort: (port) => ipcRenderer.invoke('ports:set', port),
   updateConfig: (patch) => ipcRenderer.invoke('config:update', patch),
+  detectDevices: () => ipcRenderer.invoke('devices:detect'),
   resetConfig: () => ipcRenderer.invoke('config:reset'),
   closeWindow: () => ipcRenderer.send('window:close'),
   onEvent: (cb) => {

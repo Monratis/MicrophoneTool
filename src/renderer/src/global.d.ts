@@ -27,6 +27,8 @@ export interface Snapshot {
     timeoutDeskMs: number;
     mockMode: boolean;
     autoStart: boolean;
+    autoDetectDevices: boolean;
+    autoDownloadTools: boolean;
   };
 }
 
@@ -37,12 +39,19 @@ export interface PushEvent {
   error?: boolean;
 }
 
+interface DetectResult {
+  devices: { name: string; isDefault: boolean }[];
+  recommended: { micDeskName: string; micHeadsetName: string };
+  applied: boolean;
+}
+
 interface Api {
   getState: () => Promise<Snapshot>;
   getPorts: () => Promise<SerialPortInfo[]>;
   setMode: (mode: Snapshot['mode']) => Promise<Snapshot>;
   setPort: (port: string) => Promise<Snapshot>;
   updateConfig: (patch: Partial<Snapshot['config']>) => Promise<Snapshot>;
+  detectDevices: () => Promise<DetectResult>;
   resetConfig: () => Promise<Snapshot>;
   closeWindow: () => void;
   onEvent: (cb: (e: PushEvent) => void) => () => void;

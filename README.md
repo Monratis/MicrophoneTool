@@ -50,6 +50,12 @@ Wynik: `dist/Auto Audio Switch <wersja>.exe` — pojedynczy przenośny plik
   - nazwy urządzeń audio, czasy histerezy, baud rate
   - tryb mock (symulacja radaru bez sprzętu)
 - **Autostart** — włącz/wyłącz start wraz z systemem (ukryty w tray).
+- **Samoleczenie (auto-heal)**:
+  - brak `SoundVolumeView.exe` → automatyczne pobranie z nirsoft.net do `%APPDATA%/tools`
+  - błędna nazwa mikrofonu → automatyczne wykrycie listy urządzeń i poprawka nazwy + ponowienie
+  - port COM niedostępny / odpięty USB → automatyczne ponawianie połączenia (backoff 5–30 s)
+  - zmiana mock/baud w UI → automatyczny restart radaru
+  - wykrywanie nazw na starcie, gdy te z konfiguracji nie istnieją
 
 ## Konfiguracja (`config.json`)
 
@@ -66,6 +72,8 @@ plik jest kopiowany do katalogu obok exe (`resources/`). Pola:
 | `timeoutDeskMs`    | `300`                                | debounce wejścia (pojawienie się)       |
 | `mockMode`         | `true`                               | symulacja radaru bez urządzenia         |
 | `autoStart`        | `false`                              | start z systemem (ukryty)               |
+| `autoDetectDevices`| `true`                               | auto-poprawa nazw urządzeń              |
+| `autoDownloadTools`| `true`                               | auto-pobranie SoundVolumeView z sieci   |
 
 Nazwy urządzeń sprawdzisz: `bin/SoundVolumeView.exe` — kolumna `Default`, wiersze
 urządzeń nagrywających (`Recording`). Nazwa musi być dokładna.
@@ -78,13 +86,14 @@ przetestować bez sprzętu (przełącza mikrofon co 15s).
 ## Struktura
 
 ```
-src/main/index.js        proces główny Electron: tray, okno, IPC, autostart
+src/main/index.js        proces główny Electron: tray, okno, IPC, autostart, samoleczenie
 src/main/config.js       konfiguracja + domyślne wartości
-src/main/audioController.js  wywołanie SoundVolumeView.exe /SetDefault
-src/main/radarListener.js    port COM, parser JSON/MR60BHA2, histereza
+src/main/audioController.js  kontroler audio (auto-ensure narzędzia, wykrywanie nazw)
+src/main/soundVolumeView.js  pobieranie narzędzia, eksport urządzeń (CSV), /SetDefault
+src/main/radarListener.js    port COM, parser JSON/MR60BHA2, histereza, auto-reconnect
 src/main/appController.js    stan maszyny: tryb auto/manual + przełączanie
 src/preload/index.js     bridge IPC (contextBridge)
 src/renderer/            panel ustawień (React + TS)
-bin/SoundVolumeView.exe  narzędzie NirSoft (do umieszczenia)
+bin/SoundVolumeView.exe  narzędzie NirSoft (opcjonalnie, inaczej auto-pobrane)
 electron.vite.config.mjs konfiguracja builda
 ```

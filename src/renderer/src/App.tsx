@@ -142,6 +142,27 @@ export default function App() {
     }
   }, [form, pushToast]);
 
+  const [deviceInfo, setDeviceInfo] = useState('');
+
+  const detectDevices = useCallback(async () => {
+    setDeviceInfo('Wykrywanie…');
+    const r = await window.api.detectDevices();
+    if (r.devices.length === 0) {
+      setDeviceInfo('Nie znaleziono urządzeń nagrywających.');
+      return;
+    }
+    if (r.applied) {
+      setForm((f) =>
+        f ? { ...f, micDeskName: r.recommended.micDeskName, micHeadsetName: r.recommended.micHeadsetName } : f
+      );
+      pushToast('Poprawiono nazwy urządzeń audio');
+    }
+    const list = r.devices.map((d) => d.name).slice(0, 4).join(' · ');
+    setDeviceInfo(
+      `Znaleziono ${r.devices.length} urządzeń nagrywających${r.applied ? ' — nazwy poprawione' : ''}.${r.devices.length ? `\n${list}` : ''}`
+    );
+  }, [pushToast]);
+
   if (!snap || !form) {
     return <div className="app" style={{ display: 'grid', placeItems: 'center', color: 'var(--muted)' }}>Wczytywanie…</div>;
   }
@@ -221,6 +242,30 @@ export default function App() {
               role="switch"
               aria-checked={form.autoStart}
               onClick={() => patchForm({ autoStart: !form.autoStart })}
+            />
+          </div>
+          <div className="toggle-row" style={{ marginTop: 10 }}>
+            <div className="label">
+              Auto-poprawa nazw urządzeń
+              <small>przy błędzie przełączenia nazwy są wykrywane i poprawiane same</small>
+            </div>
+            <button
+              className="switch"
+              role="switch"
+              aria-checked={form.autoDetectDevices}
+              onClick={() => patchForm({ autoDetectDevices: !form.autoDetectDevices })}
+            />
+          </div>
+          <div className="toggle-row" style={{ marginTop: 10 }}>
+            <div className="label">
+              Auto-pobieranie SoundVolumeView
+              <small>pobiera narzędzie z nirsoft.net, gdy go brakuje</small>
+            </div>
+            <button
+              className="switch"
+              role="switch"
+              aria-checked={form.autoDownloadTools}
+              onClick={() => patchForm({ autoDownloadTools: !form.autoDownloadTools })}
             />
           </div>
         </section>
@@ -307,6 +352,17 @@ export default function App() {
               onChange={(e) => patchForm({ micHeadsetName: e.target.value })}
             />
             <p className="hint">Nazwa dokładnie jak w SoundVolumeView.</p>
+          </div>
+          <div className="field">
+            <label>Automatyczne wykrywanie</label>
+            <div className="port-line">
+              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={detectDevices}>
+                Wykryj urządzenia nagrywające
+              </button>
+            </div>
+            {deviceInfo && (
+              <p className="port-hint" style={{ whiteSpace: 'pre-line' }}>{deviceInfo}</p>
+            )}
           </div>
         </section>
 

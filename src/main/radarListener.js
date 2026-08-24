@@ -32,6 +32,9 @@ export default class RadarListener extends EventEmitter {
     this._running = false;
     this._mockInterval = null;
     this._mockState = false;
+    this._reconnectTimer = null;
+    this._reconnectAttempts = 0;
+    this._lastPortName = null;
   }
 
   async _loadSerialPort() {
@@ -55,29 +58,63 @@ export default class RadarListener extends EventEmitter {
 
   /**
    * Rozpoczyna nasłuch. W trybie mock symuluje cykl obecności.
+   * Brak urządzenia / błąd portu -> automatyczne ponawianie prób połączenia.
    */
   async start() {
     this._running = true;
+    this._reconnectAttempts = 0;
     if (this.config.get('mockMode')) {
       return this._startMock();
     }
+    await this._openPort();
+  }
+
+  async _openPort() {
+    if (!this._running) return;
     try {
       const SerialPort = await this._loadSerialPort();
-      const portName = await this._resolvePort();
+      const portName = this._lastPortName || await this._resolvePort();
       if (!portName) {
-        this.emit('error', new Error('Nie znaleziono portu COM radaru (VID/PID Seeed Studio)'));
+        this.emit('status', { connected: false, error: 'brak portu' });
+        this._scheduleReconnect();
         return;
       }
-      this.port = new SerialPort({
+      this._lastPortName = portName;
+      const port = new SerialPort({
         path: portName,
         baudRate: this.config.get('baudRate')
       });
-      this.port.on('open', () => this.emit('status', { port: portName, connected: true }));
-      this.port.on('error', (err) => this.emit('error', err));
-      this.port.on('data', (chunk) => this._onData(chunk));
+      this.port = port;
+      port.on('open', () => {
+        this._reconnectAttempts = 0;
+        this.emit('status', { port: portName, connected: true });
+      });
+      port.on('data', (chunk) => this._onData(chunk));
+      port.on('error', (err) => {
+        this.emit('status', { connected: false, error: err.message });
+        this._scheduleReconnect();
+      });
+      port.on('close', () => {
+        if (this._running) this._scheduleReconnect();
+      });
     } catch (err) {
-      this.emit('error', err);
+      this.emit('status', { connected: false, error: err.message });
+      this._scheduleReconnect();
     }
+  }
+
+  /**
+   * Automatyczne ponowienie połączenia z narastającym odstępem (5s -> 30s).
+   */
+  _scheduleReconnect() {
+    if (!this._running || this.config.get('mockMode') || this._reconnectTimer) return;
+    const delay = Math.min(30000, 5000 * Math.pow(1.5, this._reconnectAttempts++));
+    console.warn(`[radar] port niedostępny, ponawiam za ${Math.round(delay / 1000)}s`);
+    this.emit('status', { connected: false, nextReconnectMs: delay });
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this._openPort();
+    }, delay);
   }
 
   /**
@@ -87,13 +124,18 @@ export default class RadarListener extends EventEmitter {
     this._running = false;
     clearTimeout(this.deskTimer);
     clearTimeout(this.awayTimer);
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
     if (this._mockInterval) {
       clearInterval(this._mockInterval);
       this._mockInterval = null;
     }
     if (this.port && this.port.isOpen) {
-      await new Promise((resolve) => this.port.close(resolve));
+      const p = this.port;
       this.port = null;
+      await new Promise((resolve) => p.close(resolve));
     }
   }
 

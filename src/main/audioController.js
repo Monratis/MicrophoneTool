@@ -1,36 +1,50 @@
-import { execFile } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import path from 'node:path';
+import SoundVolumeView from './soundVolumeView';
 
 /**
- * Steruje domyślnym urządzeniem nagrywającym w systemie Windows
- * przez wywołanie narzędzia SoundVolumeView.exe (NirSoft) z ./bin/.
+ * Kontroler audio: deleguje do SoundVolumeView, sam zajmuje się
+ * zapewnieniem binarki (auto-pobranie), wykrywaniem i dobieraniem nazw.
  */
-export default class AudioController {
-  constructor(binDir) {
+export default class AudioController extends EventEmitter {
+  constructor({ binDir, toolsDir, config }) {
+    super();
     this.binDir = binDir;
-    this.exePath = path.join(this.binDir, 'SoundVolumeView.exe');
+    this.toolsDir = toolsDir;
+    this.config = config;
+    this.svv = new SoundVolumeView({ binDir, toolsDir, config });
+    this.svv.onStatus((msg) => this.emit('toolStatus', msg));
   }
 
   /**
    * Ustawia domyślne urządzenie nagrywające.
-   * @param {string} deviceName nazwa urządzenia dokładnie jak w SoundVolumeView
    * @returns {Promise<{ok: boolean, stdout: string, stderr: string}>}
    */
   setDefaultRecordingDevice(deviceName) {
     if (!deviceName) {
       return Promise.resolve({ ok: false, stdout: '', stderr: 'empty device name' });
     }
-    return new Promise((resolve) => {
-      const args = ['/SetDefault', deviceName, 'all'];
-      execFile(this.exePath, args, { windowsHide: true }, (error, stdout, stderr) => {
-        const ok = !error;
-        if (!ok) {
-          console.error(`[audio] SetDefault failed for "${deviceName}":`, error ? error.message : stderr);
-        } else {
-          console.log(`[audio] Default recording device -> "${deviceName}"`);
-        }
-        resolve({ ok, stdout, stderr });
-      });
-    });
+    return this.svv.setDefault(deviceName);
+  }
+
+  /**
+   * Lista urządzeń nagrywających wykrytych przez SoundVolumeView.
+   */
+  listRecordingDevices() {
+    return this.svv.listRecordingDevices();
+  }
+
+  /**
+   * Dobiera nazwy mikrofonów biurkowego i słuchawek.
+   */
+  resolveNames(devices) {
+    return this.svv.resolveNames(devices);
+  }
+
+  /**
+   * Ścieżka oczekiwanej binarki (do celów informacyjnych).
+   */
+  binaryPath() {
+    return this.svv.exePath;
   }
 }

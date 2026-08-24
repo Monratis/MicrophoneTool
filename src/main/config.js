@@ -9,7 +9,9 @@ export const DEFAULTS = {
   timeoutAwayMs: 3000,
   timeoutDeskMs: 300,
   mockMode: true,
-  autoStart: false
+  autoStart: false,
+  autoDetectDevices: true,
+  autoDownloadTools: true
 };
 
 export default class Config {

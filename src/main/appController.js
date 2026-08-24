@@ -15,6 +15,7 @@ export default class AppController extends EventEmitter {
     this.mode = 'auto';
     this.currentDevice = null; // 'desk' | 'headset' | null
     this.switching = false;
+    this._pendingState = null;
 
     radar.on('desk', () => this._onRadarState('desk'));
     radar.on('away', () => this._onRadarState('away'));
@@ -51,7 +52,12 @@ export default class AppController extends EventEmitter {
   }
 
   async _applyDevice(state) {
-    if (this.switching || this.currentDevice === state) return;
+    if (this.currentDevice === state) return;
+    if (this.switching) {
+      // przełączenie w toku — zapamiętaj najnowsze żądanie i wykonaj po zakończeniu
+      this._pendingState = state;
+      return;
+    }
     this.switching = true;
     this.currentDevice = state;
     const name = state === 'desk'
@@ -65,6 +71,11 @@ export default class AppController extends EventEmitter {
       this.emit('error', err);
     } finally {
       this.switching = false;
+      if (this._pendingState && this._pendingState !== this.currentDevice) {
+        const pending = this._pendingState;
+        this._pendingState = null;
+        this._applyDevice(pending);
+      }
     }
   }
 }
