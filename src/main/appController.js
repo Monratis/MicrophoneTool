@@ -1,14 +1,12 @@
-'use strict';
-
-const { EventEmitter } = require('events');
+import { EventEmitter } from 'node:events';
 
 /**
  * Spina radar z kontrolerem audio. Tryby:
- *  'auto'   - przełączanie wg stanu radaru
- *  'desk'   - wymuszenie mikrofonu biurkowego
- *  'headset' - wymuszenie mikrofonu słuchawek
+ *  'auto'     - przełączanie wg stanu radaru
+ *  'desk'     - wymuszenie mikrofonu biurkowego
+ *  'headset'  - wymuszenie mikrofonu słuchawek
  */
-class AppController extends EventEmitter {
+export default class AppController extends EventEmitter {
   constructor(radar, audio, config) {
     super();
     this.radar = radar;
@@ -70,5 +68,3 @@ class AppController extends EventEmitter {
     }
   }
 }
-
-module.exports = AppController;

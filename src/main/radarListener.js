@@ -1,6 +1,4 @@
-'use strict';
-
-const { EventEmitter } = require('events');
+import { EventEmitter } from 'node:events';
 
 const SEEED_VID_PIDS = [
   { vid: 0x2886, pid: 0x802d }, // Seeed Studio XIAO ESP32-C6
@@ -21,14 +19,12 @@ const SEEED_VID_PIDS = [
  *  - 'status' zmiana stanu wewnętrznego: { presence, state, since }
  *  - 'error'  błąd portu
  */
-class RadarListener extends EventEmitter {
-  constructor(config, { lazyRequire = true } = {}) {
+export default class RadarListener extends EventEmitter {
+  constructor(config) {
     super();
     this.config = config;
-    this.lazyRequire = lazyRequire;
     this.port = null;
     this.SerialPort = null;
-    this.parser = null;
     this.presence = false;
     this.state = null; // 'desk' | 'away'
     this.deskTimer = null;
@@ -38,13 +34,23 @@ class RadarListener extends EventEmitter {
     this._mockState = false;
   }
 
-  _loadSerialPort() {
-    if (this.SerialPort) return this.SerialPort;
-    if (this.lazyRequire) {
-      // eslint-disable-next-line global-require
-      this.SerialPort = require('serialport').SerialPort;
+  async _loadSerialPort() {
+    if (!this.SerialPort) {
+      const m = await import('serialport');
+      this.SerialPort = m.SerialPort || m.default.SerialPort;
     }
     return this.SerialPort;
+  }
+
+  static async listPorts() {
+    try {
+      const m = await import('serialport');
+      const SerialPort = m.SerialPort || m.default.SerialPort;
+      return await SerialPort.list();
+    } catch (err) {
+      console.error('[radar] listPorts error:', err.message);
+      return [];
+    }
   }
 
   /**
@@ -56,11 +62,7 @@ class RadarListener extends EventEmitter {
       return this._startMock();
     }
     try {
-      const SerialPort = this._loadSerialPort();
-      if (!SerialPort) {
-        this.emit('error', new Error('serialport nie jest zainstalowany'));
-        return;
-      }
+      const SerialPort = await this._loadSerialPort();
       const portName = await this._resolvePort();
       if (!portName) {
         this.emit('error', new Error('Nie znaleziono portu COM radaru (VID/PID Seeed Studio)'));
@@ -91,6 +93,7 @@ class RadarListener extends EventEmitter {
     }
     if (this.port && this.port.isOpen) {
       await new Promise((resolve) => this.port.close(resolve));
+      this.port = null;
     }
   }
 
@@ -103,9 +106,7 @@ class RadarListener extends EventEmitter {
       return configured;
     }
     try {
-      const { SerialPort } = this._loadSerialPort();
-      const { list } = require('serialport');
-      const ports = await list();
+      const ports = await RadarListener.listPorts();
       const match = ports.find((p) =>
         SEEED_VID_PIDS.some((id) => Number(p.vendorId) === id.vid && Number(p.productId) === id.pid)
       );
@@ -118,15 +119,6 @@ class RadarListener extends EventEmitter {
       console.error('[radar] enumerate ports error:', err.message);
     }
     return null;
-  }
-
-  static async listPorts() {
-    try {
-      const { list } = require('serialport');
-      return await list();
-    } catch (err) {
-      return [];
-    }
   }
 
   _onData(chunk) {
@@ -227,5 +219,3 @@ class RadarListener extends EventEmitter {
     this.setPresence(present);
   }
 }
-
-module.exports = RadarListener;

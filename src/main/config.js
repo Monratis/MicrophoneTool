@@ -1,9 +1,7 @@
-'use strict';
+import fs from 'node:fs';
+import path from 'node:path';
 
-const fs = require('fs');
-const path = require('path');
-
-const DEFAULTS = {
+export const DEFAULTS = {
   port: 'auto',
   baudRate: 115200,
   micDeskName: 'Microphone (HyperX QuadCast 2)',
@@ -14,7 +12,7 @@ const DEFAULTS = {
   autoStart: false
 };
 
-class Config {
+export default class Config {
   constructor(filePath) {
     this.filePath = filePath;
     this.data = { ...DEFAULTS };
@@ -52,5 +50,3 @@ class Config {
     this.save();
   }
 }
-
-module.exports = Config;

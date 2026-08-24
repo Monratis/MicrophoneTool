@@ -1,15 +1,13 @@
-'use strict';
-
-const { execFile } = require('child_process');
-const path = require('path');
+import { execFile } from 'node:child_process';
+import path from 'node:path';
 
 /**
  * Steruje domyślnym urządzeniem nagrywającym w systemie Windows
  * przez wywołanie narzędzia SoundVolumeView.exe (NirSoft) z ./bin/.
  */
-class AudioController {
+export default class AudioController {
   constructor(binDir) {
-    this.binDir = binDir || path.join(__dirname, '..', 'bin');
+    this.binDir = binDir;
     this.exePath = path.join(this.binDir, 'SoundVolumeView.exe');
   }
 
@@ -36,5 +34,3 @@ class AudioController {
     });
   }
 }
-
-module.exports = AudioController;

@@ -3,8 +3,8 @@
   "baudRate": 115200,
   "micDeskName": "Microphone (HyperX QuadCast 2)",
   "micHeadsetName": "Microphone (Headset)",
-  "timeoutAwayMs": 200,
-  "timeoutDeskMs": 50,
-  "mockMode": false,
+  "timeoutAwayMs": 3000,
+  "timeoutDeskMs": 300,
+  "mockMode": true,
   "autoStart": false
 }
