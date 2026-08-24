@@ -7,10 +7,14 @@
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"if (Test-Path 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe') { & 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe' /nologo /optimize /out:bin\\AudioSwitcher.exe src\\native\\AudioSwitcher.cs } else { csc /nologo /optimize /out:bin\\AudioSwitcher.exe src\\native\\AudioSwitcher.cs }\"",
+    "build": "npm run build:native && electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit",
-    "package:win": "electron-vite build && electron-builder --win --config.win.signAndEditExecutable=false",
+    "package:app": "node scripts/build.mjs app",
+    "package:installer": "node scripts/build.mjs installer",
+    "package:win": "node scripts/build.mjs app",
+    "package:all": "node scripts/build.mjs all",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
@@ -33,6 +37,9 @@
   "build": {
     "appId": "com.monratis.autoaudio",
     "productName": "Auto Audio Switch",
+    "npmRebuild": false,
+    "compression": "normal",
+    "icon": "build/icon.ico",
     "directories": {
       "output": "dist"
     },
@@ -56,9 +63,20 @@
       "node_modules/@serialport/**"
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
-        "portable"
+        "portable",
+        "nsis"
       ]
+    },
+    "portable": {
+      "artifactName": "${productName} (Portable).exe"
+    },
+    "nsis": {
+      "artifactName": "${productName} Setup ${version}.exe",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
     }
   }
 }

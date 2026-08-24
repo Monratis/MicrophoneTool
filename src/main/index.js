@@ -1,35 +1,73 @@
-import { app, BrowserWindow, Menu, Tray, nativeImage, ipcMain } from 'electron';
+import { app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, Notification, globalShortcut, shell } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 
 import Config, { DEFAULTS } from './config';
 import RadarListener from './radarListener';
 import AudioController from './audioController';
 import AppController from './appController';
+import AppUpdater from './updater';
+
+// Performance App Flags
+app.commandLine.appendSwitch('disable-http-cache');
+app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling');
+
+// Single instance lock
+const gotSingleLock = app.requestSingleInstanceLock();
+if (!gotSingleLock) {
+  app.quit();
+  process.exit(0);
+}
 
 let tray = null;
 let settingsWindow = null;
 let controller = null;
+let updater = null;
 let snapshot = null;
 let radarIssueToastShown = false;
 
-const STATE_LABEL = { desk: 'Przy biurku', away: 'Poza biurkiem' };
-const MODE_LABEL = { auto: 'Auto (radar)', desk: 'QuadCast 2', headset: 'Słuchawki' };
+const STATE_LABEL = { desk: 'Przy biurku (Stacjonarny)', away: 'Poza biurkiem (Mobilny)' };
+const MODE_LABEL = { auto: 'Auto (radar)', desk: 'Stacjonarny', headset: 'Mobilny' };
 
-// ---------- paths ----------
+// ---------- paths & appdata ----------
+
+const APP_DATA_FOLDER = 'Audio Switcher';
+
+function getAppDataDir() {
+  const base = process.env.APPDATA || (app.isReady() ? app.getPath('appData') : null) || path.join(os.homedir(), 'AppData', 'Roaming');
+  return path.join(base, APP_DATA_FOLDER);
+}
+
+const appDataDir = getAppDataDir();
+try {
+  fs.mkdirSync(appDataDir, { recursive: true });
+  app.setPath('userData', appDataDir);
+} catch (err) {
+  console.warn('[main] setup appDataDir warning:', err.message);
+}
 
 function resolveConfigPath() {
+  const appDataConfig = path.join(appDataDir, 'config.json');
+
   if (!app.isPackaged) {
     const dev = path.join(__dirname, '..', '..', 'config.json');
     if (fs.existsSync(dev)) return dev;
   }
-  // portable: konfiguracja trwała obok exe (przenośność między uruchomieniami)
-  const exeDir = path.join(path.dirname(process.execPath), 'config.json');
-  if (app.isPackaged && fs.existsSync(exeDir)) return exeDir;
-  // wbudowana kopia startowa (szablon)
-  const bundled = app.isPackaged ? path.join(process.resourcesPath, 'config.json') : null;
-  if (bundled && fs.existsSync(bundled)) return bundled;
-  return path.join(app.getPath('userData'), 'config.json');
+
+  // W wersji portable / produkcyjnej zawsze dbamy o obecność configu w %APPDATA%/Audio Switcher
+  if (!fs.existsSync(appDataConfig)) {
+    const bundled = app.isPackaged ? path.join(process.resourcesPath, 'config.json') : null;
+    if (bundled && fs.existsSync(bundled)) {
+      try {
+        fs.copyFileSync(bundled, appDataConfig);
+      } catch (err) {
+        console.error('[config] failed to copy default config to %appdata%:', err.message);
+      }
+    }
+  }
+
+  return appDataConfig;
 }
 
 function resolveBinDir() {
@@ -40,63 +78,15 @@ function resolveBinDir() {
 function createAudioController() {
   return new AudioController({
     binDir: resolveBinDir(),
-    toolsDir: path.join(app.getPath('userData'), 'tools'),
+    toolsDir: path.join(appDataDir, 'tools'),
     config: controller ? controller.config : null
   });
-}
-
-// ---------- samoleczenie ----------
-
-/**
- * Po nieudanym przełączeniu próbuje wykryć prawidłową nazwę urządzenia
- * i ponawia przełączenie. Zwraca poprawioną nazwę albo null.
- */
-async function autoHealDeviceName(state) {
-  if (!controller.config.get('autoDetectDevices')) return null;
-  const devices = await controller.audio.listRecordingDevices();
-  if (!devices.length) return null;
-  const rec = controller.audio.resolveNames(devices);
-  const key = state === 'desk' ? 'micDeskName' : 'micHeadsetName';
-  const desired = state === 'desk' ? rec.micDeskName : rec.micHeadsetName;
-  const current = controller.config.get(key);
-  if (desired && desired !== current && devices.some((d) => d.name === desired)) {
-    controller.config.set(key, desired);
-    const res = await controller.audio.setDefaultRecordingDevice(desired);
-    if (res.ok) return desired;
-  }
-  return null;
-}
-
-/**
- * Przy starcie sprawdza, czy nazwy z konfiguracji istnieją na liście
- * urządzeń; jeśli nie — automatycznie je poprawia.
- */
-async function autoDetectOnStartup() {
-  if (!controller.config.get('autoDetectDevices')) return;
-  const devices = await controller.audio.listRecordingDevices();
-  if (!devices.length) return;
-  const rec = controller.audio.resolveNames(devices);
-  let changed = false;
-  if (rec.micDeskName && !devices.some((d) => d.name === controller.config.get('micDeskName')) && devices.some((d) => d.name === rec.micDeskName)) {
-    controller.config.set('micDeskName', rec.micDeskName);
-    changed = true;
-  }
-  if (rec.micHeadsetName && !devices.some((d) => d.name === controller.config.get('micHeadsetName')) && devices.some((d) => d.name === rec.micHeadsetName)) {
-    controller.config.set('micHeadsetName', rec.micHeadsetName);
-    changed = true;
-  }
-  if (changed) {
-    pushEvent('toast', { message: 'Automatycznie poprawiono nazwy urządzeń audio' });
-    refreshSnapshot();
-  }
 }
 
 // ---------- snapshot / events ----------
 
 function buildSnapshot() {
-  const radarConnected = controller.config.get('mockMode')
-    ? true
-    : Boolean(controller.radar.port && controller.radar.port.isOpen);
+  const radarConnected = Boolean(controller.radar.port && controller.radar.port.isOpen);
   return {
     mode: controller.mode,
     state: controller.currentDevice,
@@ -123,9 +113,23 @@ function refreshSnapshot() {
 
 function pushEvent(type, payload) {
   for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) {
+    if (!win.isDestroyed() && (type.startsWith('toast') || type.startsWith('updater') || win.isVisible())) {
       win.webContents.send('push:event', { type, ...payload });
     }
+  }
+}
+
+function showWindowsNotification(title, body) {
+  if (Notification.isSupported() && controller && controller.config.get('notifications')) {
+    try {
+      const iconPath = path.join(__dirname, '..', '..', 'build', 'icon.png');
+      new Notification({
+        title,
+        body,
+        icon: fs.existsSync(iconPath) ? iconPath : undefined,
+        silent: true
+      }).show();
+    } catch (_) {}
   }
 }
 
@@ -143,23 +147,28 @@ function getAutoStart() {
   if (app.isPackaged) {
     return app.getLoginItemSettings().openAtLogin;
   }
-  // w dev tylko zapis w configu
   return Boolean(controller && controller.config.get('autoStart'));
 }
 
-// ---------- tray ----------
+// ---------- tray icons (crisp 32x32 PNG bitmaps) ----------
+
+const TRAY_PNG_DESK = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAXUlEQVR4nO3SQQoAIAgEwJ7Ql3tWr6trWBpCKtUueFN2DqaEkORamuWElosIr3IWAYDmmAsAAJgDdhl3AAAgBEAx7wEkkPYWgDsB4U8YDjg5AEwAT8Sy3Ashln+ZDoqHy6bNXpYkAAAAAElFTkSuQmCC';
+const TRAY_PNG_AWAY = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAg0lEQVR4nO3TMQ6AMAwDwO78f+WXzCA2hCCNncaAiKVuNL5WtLXKKcs8rZnr0XIToSq/RbCD9kgBnqQAmAwDRBIGoCfzfu8CIMXoXhjAvhAaEDm9Z0Y6oPcvFMAE9DazgOMc+Q3IX0EBhgOspAAQDHo73wNkrAK8D6BEXJarEGb5L7MBuujMYhVrKjAAAAAASUVORK5CYII=';
+const TRAY_PNG_DEF  = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAXUlEQVR4nO3SQQoAIAgEwB7bE/pFj65rWBpCKtUueFN2DqaEkORSm+WElosIr3IWAYDmmAsAAJgDdhl3AAAgBEAx7wEkkPYWgDsB4U8YDjg5AEwAT8Sy3Ashln+ZDs1pCdFUvqKZAAAAAElFTkSuQmCC';
+
+function makePngIcon(dataUrl) {
+  const img = nativeImage.createFromDataURL(dataUrl);
+  return img;
+}
+
+const TRAY_ICONS = {
+  desk: makePngIcon(TRAY_PNG_DESK),
+  away: makePngIcon(TRAY_PNG_AWAY),
+  default: makePngIcon(TRAY_PNG_DEF)
+};
 
 function trayIcon(state) {
-  const color = state === 'desk' ? '#34d399' : (state === 'away' ? '#f59e0b' : '#8b93a3');
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24">
-    <rect width="24" height="24" rx="6" fill="${color}"/>
-    <circle cx="12" cy="10" r="5" fill="#0d0f14"/>
-    <circle cx="12" cy="10" r="2.6" fill="#fff"/>
-    <rect x="5" y="17.5" width="14" height="2.6" rx="1.3" fill="#0d0f14"/>
-  </svg>`;
-  const img = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`);
-  img.setTemplateImage(false);
-  return img;
+  return TRAY_ICONS[state] || TRAY_ICONS.default;
 }
 
 function refreshTray() {
@@ -171,6 +180,16 @@ function refreshTray() {
     { label: `Port: ${s.config.port || 'auto'}`, enabled: false },
     { type: 'separator' },
     { label: 'Ustawienia…', click: () => showSettings() },
+    {
+      label: 'Wycisz / Odcisz mikrofon (Ctrl+Shift+M)',
+      click: async () => {
+        const res = await controller.audio.toggleMute();
+        const isMuted = res?.isMuted;
+        pushEvent('toast', { message: isMuted ? 'Mikrofon wyciszony 🔇' : 'Mikrofon aktywny 🎙️' });
+        showWindowsNotification('Auto Audio Switch', isMuted ? 'Mikrofon został wyciszony 🔇' : 'Wyciszenie wyłączone 🎙️');
+        refreshSnapshot();
+      }
+    },
     { type: 'separator' },
     {
       label: 'Tryb automatyczny (radar)',
@@ -179,18 +198,19 @@ function refreshTray() {
       click: () => controller.setMode('auto')
     },
     {
-      label: 'Wymuś mikrofon: QuadCast 2',
+      label: '🎙️ Wymuś mikrofon stacjonarny',
       type: 'radio',
       checked: s.mode === 'desk',
       click: () => controller.setMode('desk')
     },
     {
-      label: 'Wymuś mikrofon: Słuchawki',
+      label: '🎧 Wymuś mikrofon mobilny',
       type: 'radio',
       checked: s.mode === 'headset',
       click: () => controller.setMode('headset')
     },
     { type: 'separator' },
+    { label: 'Sprawdź aktualizacje…', click: () => { showSettings(); if (updater) updater.checkForUpdates(); } },
     { label: 'Odśwież / wykryj port COM', click: () => restartRadar() },
     { label: 'Wyjdź', click: () => app.quit() }
   ]);
@@ -205,27 +225,34 @@ function showSettings() {
   if (!settingsWindow || settingsWindow.isDestroyed()) {
     createSettingsWindow();
   }
-  settingsWindow.show();
-  settingsWindow.focus();
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.webContents.send('push:event', { type: 'snapshot', snapshot: buildSnapshot() });
+    settingsWindow.show();
+    settingsWindow.focus();
+  }
 }
 
 function createSettingsWindow() {
+  const iconPath = path.join(__dirname, '..', '..', 'build', 'icon.ico');
+  const winIcon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : trayIcon('away');
+
   settingsWindow = new BrowserWindow({
-    width: 470,
-    height: 740,
-    minWidth: 470,
+    width: 490,
+    height: 780,
+    minWidth: 480,
     minHeight: 640,
     show: false,
     frame: false,
     resizable: true,
     skipTaskbar: true,
     backgroundColor: '#0d0f14',
-    icon: trayIcon(controller ? controller.currentDevice : 'away'),
+    icon: winIcon,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       sandbox: false,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: true
     }
   });
 
@@ -257,7 +284,6 @@ function registerIpc() {
   });
   ipcMain.handle('config:update', (_e, patch) => {
     const prev = {
-      mockMode: controller.config.get('mockMode'),
       baudRate: controller.config.get('baudRate')
     };
     for (const [key, value] of Object.entries(patch || {})) {
@@ -266,7 +292,6 @@ function registerIpc() {
     if (typeof patch?.autoStart === 'boolean') applyAutoStart(patch.autoStart);
     applyConfig();
     const radarNeedsRestart = patch && (
-      ('mockMode' in patch && patch.mockMode !== prev.mockMode) ||
       ('baudRate' in patch && patch.baudRate !== prev.baudRate)
     );
     if (radarNeedsRestart) {
@@ -276,22 +301,23 @@ function registerIpc() {
     }
     return buildSnapshot();
   });
+  ipcMain.handle('devices:list', async () => {
+    return await controller.audio.listRecordingDevices(true);
+  });
   ipcMain.handle('devices:detect', async () => {
-    const devices = await controller.audio.listRecordingDevices();
+    const devices = await controller.audio.listRecordingDevices(true);
     const recommended = controller.audio.resolveNames(devices);
-    let applied = false;
-    if (devices.length) {
-      const fix = (key, want) => {
-        if (want && !devices.some((d) => d.name === controller.config.get(key)) && devices.some((d) => d.name === want)) {
-          controller.config.set(key, want);
-          applied = true;
-        }
-      };
-      fix('micDeskName', recommended.micDeskName);
-      fix('micHeadsetName', recommended.micHeadsetName);
-    }
+    return { devices, recommended };
+  });
+  ipcMain.handle('audio:toggleMute', async (_e, target) => {
+    const res = await controller.audio.toggleMute(target);
     refreshSnapshot();
-    return { devices, recommended, applied };
+    return res;
+  });
+  ipcMain.handle('audio:setMute', async (_e, { target, mute }) => {
+    const res = await controller.audio.setMute(target, mute);
+    refreshSnapshot();
+    return res;
   });
   ipcMain.handle('config:reset', () => {
     for (const [key, value] of Object.entries(DEFAULTS)) {
@@ -303,6 +329,29 @@ function registerIpc() {
     refreshSnapshot();
     return buildSnapshot();
   });
+
+  ipcMain.handle('config:openDir', () => {
+    shell.openPath(appDataDir);
+    return true;
+  });
+  ipcMain.handle('audio:testDevice', async (_e, name) => {
+    await controller.audio.setDefaultRecordingDevice(name);
+    refreshSnapshot();
+    return buildSnapshot();
+  });
+  ipcMain.handle('display:sleep', async () => {
+    return await controller.audio.sleepDisplay();
+  });
+  ipcMain.handle('display:wake', async () => {
+    return await controller.audio.wakeDisplay();
+  });
+
+  // Updater IPC
+  ipcMain.handle('updater:check', async () => updater ? updater.checkForUpdates() : { available: false });
+  ipcMain.handle('updater:download', async () => updater ? updater.downloadUpdate() : null);
+  ipcMain.handle('updater:install', async () => updater ? updater.quitAndInstall() : null);
+  ipcMain.handle('updater:status', () => updater ? updater.getStatus() : null);
+
   ipcMain.on('window:close', () => { if (settingsWindow) settingsWindow.hide(); });
 }
 
@@ -327,27 +376,35 @@ app.whenReady().then(() => {
   const radar = new RadarListener(config);
   const audio = new AudioController({
     binDir: resolveBinDir(),
-    toolsDir: path.join(app.getPath('userData'), 'tools'),
+    toolsDir: path.join(appDataDir, 'tools'),
     config
   });
 
   controller = new AppController(radar, audio, config);
+  updater = new AppUpdater({ onEvent: (ev) => pushEvent(ev.type, ev), config });
+
   audio.on('toolStatus', (msg) => pushEvent('toast', { message: msg }));
   applyAutoStart(config.get('autoStart'));
 
-  controller.on('switch', ({ state, device }) => {
+  controller.on('switch', ({ state, device, unconfigured }) => {
+    if (unconfigured) {
+      console.log('[main] switch: mikrofony nie zostały jeszcze skonfigurowane przez użytkownika');
+      return;
+    }
     console.log(`[main] switch -> ${state}: ${device}`);
+    pushEvent('switch', { state, device });
     pushEvent('toast', { message: `Przełączono mikrofon: ${device}` });
+    showWindowsNotification('Auto Audio Switch', `Aktywny mikrofon: ${device}`);
     refreshSnapshot();
   });
-  controller.on('switched', async ({ state, ok }) => {
-    if (!ok) {
-      const healed = await autoHealDeviceName(state);
-      if (healed) {
-        pushEvent('toast', { message: `Poprawiono nazwę urządzenia: ${healed}` });
-      } else {
-        pushEvent('toast', { error: true, message: 'Nie udało się ustawić mikrofonu' });
-      }
+  controller.on('displayState', (disp) => {
+    pushEvent('toast', {
+      message: disp === 'sleep' ? '🖥️ Ekrany uśpione (brak obecności)' : '🖥️ Ekrany wybudzone'
+    });
+  });
+  controller.on('switched', async ({ state, device, ok }) => {
+    if (!ok && device) {
+      pushEvent('toast', { error: true, message: `Nie udało się aktywować mikrofonu: ${device}` });
     }
     refreshSnapshot();
   });
@@ -374,10 +431,37 @@ app.whenReady().then(() => {
   registerIpc();
   createSettingsWindow();
   refreshSnapshot();
-  controller.start().then(() => autoDetectOnStartup());
+  controller.start();
+
+  // Global hotkey: Ctrl+Shift+M (lub Cmd+Shift+M) -> szybkie wyciszenie/odciszenie
+  try {
+    globalShortcut.register('CommandOrControl+Shift+M', async () => {
+      const res = await controller.audio.toggleMute();
+      const isMuted = res?.isMuted;
+      pushEvent('toast', { message: isMuted ? 'Mikrofon wyciszony 🔇' : 'Mikrofon aktywny 🎙️' });
+      showWindowsNotification('Auto Audio Switch', isMuted ? 'Mikrofon został wyciszony 🔇' : 'Wyciszenie mikrofonu wyłączone 🎙️');
+      refreshSnapshot();
+    });
+  } catch (err) {
+    console.warn('[main] globalShortcut register error:', err.message);
+  }
+
+  // Ciche sprawdzenie aktualizacji w tle po 5 sekundach od uruchomienia
+  setTimeout(() => {
+    if (updater) {
+      updater.checkForUpdates().catch(() => {});
+    }
+  }, 5000);
 });
 
-app.on('before-quit', () => { app.isQuitting = true; });
+app.on('second-instance', () => {
+  showSettings();
+});
+
+app.on('before-quit', () => {
+  app.isQuitting = true;
+  globalShortcut.unregisterAll();
+});
 
 // Aplikacja działa w tray — zamknięcie okien nie kończy procesu.
 app.on('window-all-closed', () => {

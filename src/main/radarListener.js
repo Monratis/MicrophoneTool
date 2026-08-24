@@ -1,23 +1,17 @@
 import { EventEmitter } from 'node:events';
 
-const SEEED_VID_PIDS = [
+const KNOWN_VID_PIDS = [
   { vid: 0x2886, pid: 0x802d }, // Seeed Studio XIAO ESP32-C6
-  { vid: 0x303a, pid: 0x1001 }  // Espressif ESP32-C6 USB
+  { vid: 0x303a, pid: 0x1001 }, // Espressif ESP32-C6 Native USB JTAG/Serial
+  { vid: 0x303a, pid: 0x1002 }, // Espressif ESP32-C6 CDC
+  { vid: 0x1a86, pid: 0x7523 }, // CH340
+  { vid: 0x1a86, pid: 0x55d4 }, // CH9102 / CH343
+  { vid: 0x10c4, pid: 0xea60 }  // CP210x
 ];
 
 /**
- * Nasłuch portu szeregowego radaru mmWave (Seeed MR60BHA2 na XIAO ESP32-C6).
- *
- * Parsuje dwa formaty danych:
- *  1. JSON per linia z firmware ESP32: {"presence":1,"distance":1.1}
- *  2. Surowe ramki binarne MR60BHA2 (nagłówek 0x53 0x59)
- *
- * Emituje zdarzenia:
- *  - 'desk'   po wykryciu obecności (debounce wejściowy, timeoutDeskMs)
- *  - 'away'   po zaniku obecności   (histereza wyjścia, timeoutAwayMs)
- *  - 'raw'    każda odebrana ramka/linia
- *  - 'status' zmiana stanu wewnętrznego: { presence, state, since }
- *  - 'error'  błąd portu
+ * Nasłuch portu szeregowego radaru mmWave 60GHz (Seeed MR60BHA2 + XIAO ESP32-C6).
+ * Obsługuje ramki binarne Seeed TinyFrame (0x53 0x59), pakiety JSON oraz strumienie tekstowe.
  */
 export default class RadarListener extends EventEmitter {
   constructor(config) {
@@ -30,11 +24,11 @@ export default class RadarListener extends EventEmitter {
     this.deskTimer = null;
     this.awayTimer = null;
     this._running = false;
-    this._mockInterval = null;
-    this._mockState = false;
     this._reconnectTimer = null;
     this._reconnectAttempts = 0;
     this._lastPortName = null;
+    this._lineBuffer = '';
+    this._rawBuffer = Buffer.alloc(0);
   }
 
   async _loadSerialPort() {
@@ -56,16 +50,9 @@ export default class RadarListener extends EventEmitter {
     }
   }
 
-  /**
-   * Rozpoczyna nasłuch. W trybie mock symuluje cykl obecności.
-   * Brak urządzenia / błąd portu -> automatyczne ponawianie prób połączenia.
-   */
   async start() {
     this._running = true;
     this._reconnectAttempts = 0;
-    if (this.config.get('mockMode')) {
-      return this._startMock();
-    }
     await this._openPort();
   }
 
@@ -82,7 +69,7 @@ export default class RadarListener extends EventEmitter {
       this._lastPortName = portName;
       const port = new SerialPort({
         path: portName,
-        baudRate: this.config.get('baudRate')
+        baudRate: this.config.get('baudRate') || 115200
       });
       this.port = port;
       port.on('open', () => {
@@ -103,13 +90,10 @@ export default class RadarListener extends EventEmitter {
     }
   }
 
-  /**
-   * Automatyczne ponowienie połączenia z narastającym odstępem (5s -> 30s).
-   */
   _scheduleReconnect() {
-    if (!this._running || this.config.get('mockMode') || this._reconnectTimer) return;
-    const delay = Math.min(30000, 5000 * Math.pow(1.5, this._reconnectAttempts++));
-    console.warn(`[radar] port niedostępny, ponawiam za ${Math.round(delay / 1000)}s`);
+    if (!this._running || this._reconnectTimer) return;
+    const delay = 2500;
+    this._lastPortName = null;
     this.emit('status', { connected: false, nextReconnectMs: delay });
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
@@ -117,9 +101,6 @@ export default class RadarListener extends EventEmitter {
     }, delay);
   }
 
-  /**
-   * Zatrzymuje nasłuch i czyści timery.
-   */
   async stop() {
     this._running = false;
     clearTimeout(this.deskTimer);
@@ -128,10 +109,6 @@ export default class RadarListener extends EventEmitter {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
-    if (this._mockInterval) {
-      clearInterval(this._mockInterval);
-      this._mockInterval = null;
-    }
     if (this.port && this.port.isOpen) {
       const p = this.port;
       this.port = null;
@@ -139,9 +116,6 @@ export default class RadarListener extends EventEmitter {
     }
   }
 
-  /**
-   * Wybiera port: konfiguracyjny, albo autodetekcja po VID/PID Seeed/Espressif.
-   */
   async _resolvePort() {
     const configured = this.config.get('port');
     if (configured && configured !== 'auto') {
@@ -149,12 +123,23 @@ export default class RadarListener extends EventEmitter {
     }
     try {
       const ports = await RadarListener.listPorts();
+      // 1. Dopasowanie po VID/PID
       const match = ports.find((p) =>
-        SEEED_VID_PIDS.some((id) => Number(p.vendorId) === id.vid && Number(p.productId) === id.pid)
+        KNOWN_VID_PIDS.some((id) =>
+          (p.vendorId && parseInt(p.vendorId, 16) === id.vid) &&
+          (!id.pid || (p.productId && parseInt(p.productId, 16) === id.pid))
+        )
       );
       if (match) return match.path;
+
+      // 2. Dopasowanie po nazwie producenta
+      const mfgMatch = ports.find((p) =>
+        /seeed|espressif|esp32|silicon labs|ch340|ch9102|ftdi/i.test(p.manufacturer || '')
+      );
+      if (mfgMatch) return mfgMatch.path;
+
       if (ports.length > 0) {
-        console.warn('[radar] brak znanego VID/PID, używam pierwszego portu:', ports[0].path);
+        console.warn('[radar] brak znanego VID/PID, wybieram port:', ports[0].path);
         return ports[0].path;
       }
     } catch (err) {
@@ -164,50 +149,131 @@ export default class RadarListener extends EventEmitter {
   }
 
   _onData(chunk) {
-    const text = chunk.toString('utf8');
-    this.emit('raw', text);
+    if (this.listenerCount('raw') > 0) {
+      this.emit('raw', chunk.toString('utf8'));
+    }
 
-    // Tryb JSON (firmware ESP32)
-    for (const line of text.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      if (trimmed.startsWith('{')) {
+    // 1. Akumulacja i skanowanie ramek binarnych 0x53 0x59 (Seeed MR60BHA2)
+    this._rawBuffer = Buffer.concat([this._rawBuffer, chunk]);
+    this._scanBinaryFrames();
+
+    // 2. Przetwarzanie linii tekstowych i JSON
+    this._lineBuffer += chunk.toString('utf8');
+    let idx;
+    while ((idx = this._lineBuffer.indexOf('\n')) >= 0) {
+      const line = this._lineBuffer.slice(0, idx).trim();
+      this._lineBuffer = this._lineBuffer.slice(idx + 1);
+      if (!line) continue;
+
+      // JSON format
+      if (line.charCodeAt(0) === 123) {
         try {
-          const json = JSON.parse(trimmed);
-          if (typeof json.presence === 'number' || typeof json.presence === 'boolean') {
+          const json = JSON.parse(line);
+          if (typeof json.presence !== 'undefined') {
             this.setPresence(Boolean(Number(json.presence)));
             continue;
           }
-        } catch (_) {
-          /* nie-JSON */
+          if (typeof json.occupied !== 'undefined') {
+            this.setPresence(Boolean(Number(json.occupied)));
+            continue;
+          }
+          if (typeof json.target !== 'undefined') {
+            this.setPresence(Boolean(Number(json.target)));
+            continue;
+          }
+        } catch (_) {}
+      }
+
+      // Hex string format
+      if (/^(53\s*59)/i.test(line)) {
+        const hex = line.replace(/[^0-9a-fA-F]/g, '');
+        if (hex.length >= 8) {
+          this._parseBinaryFrame(Buffer.from(hex, 'hex'));
+          continue;
         }
       }
-      this._parseBinaryFrame(Buffer.from(trimmed, 'hex'));
+
+      // Plain text formats
+      if (/^(presence|someone|occupied|target:\s*1|desk)/i.test(line)) {
+        if (/0|false|nobody|away|empty/i.test(line)) {
+          this.setPresence(false);
+        } else {
+          this.setPresence(true);
+        }
+      } else if (/^(nobody|away|unoccupied|target:\s*0|empty)/i.test(line)) {
+        this.setPresence(false);
+      }
+    }
+
+    if (this._lineBuffer.length > 4096) {
+      this._lineBuffer = '';
     }
   }
 
-  /**
-   * Parser ramki binarnej MR60BHA2: 53 59 len data... crc
-   * Funkcja 0x01 (informacje o obecności) -> bajt obecności na pozycji 1 payloadu.
-   */
+  _scanBinaryFrames() {
+    while (this._rawBuffer.length >= 4) {
+      const start = this._rawBuffer.indexOf(Buffer.from([0x53, 0x59]));
+      if (start === -1) {
+        // brak nagłówka, zostaw ostatni bajt w razie ucięcia
+        this._rawBuffer = this._rawBuffer.slice(-1);
+        break;
+      }
+      if (start > 0) {
+        this._rawBuffer = this._rawBuffer.slice(start);
+      }
+      if (this._rawBuffer.length < 4) break;
+
+      // Seeed TinyFrame format: 0x53 0x59 [Control/Cmd] [Len] ...
+      const len = this._rawBuffer[3] || this._rawBuffer[2];
+      const frameLen = Math.max(4, Math.min(len + 4, 32));
+
+      if (this._rawBuffer.length < frameLen) {
+        // Czekaj na pełną ramkę
+        break;
+      }
+
+      const frame = this._rawBuffer.slice(0, frameLen);
+      this._parseBinaryFrame(frame);
+      this._rawBuffer = this._rawBuffer.slice(frameLen);
+    }
+
+    if (this._rawBuffer.length > 1024) {
+      this._rawBuffer = Buffer.alloc(0);
+    }
+  }
+
   _parseBinaryFrame(buf) {
-    if (buf.length < 4) return;
-    if (buf[0] !== 0x53 || buf[1] !== 0x59) return;
-    const len = buf[2];
-    const dataEnd = 3 + len;
-    if (buf.length < dataEnd) return;
-    const data = buf.subarray(3, dataEnd - 1); // ostatni bajt to checksum
-    if (data.length < 2) return;
-    const func = data[0];
-    if (func === 0x01 && data.length >= 2) {
-      this.setPresence(data[1] === 0x01);
+    if (buf.length < 4 || buf[0] !== 0x53 || buf[1] !== 0x59) return;
+
+    // Obsługa różnych wariantów ramek MR60BHA2:
+    for (let i = 2; i < buf.length - 1; i++) {
+      // 1. Standardowy kod obecności 0x80 (Human presence) -> 0x01 (Presence status)
+      if (buf[i] === 0x80 && buf[i + 1] === 0x01 && i + 2 < buf.length) {
+        const val = buf[i + 2];
+        this.setPresence(val === 0x01);
+        return;
+      }
+      // 2. Kod obecności 0x01 0x01 (Presence status)
+      if (buf[i] === 0x01 && buf[i + 1] === 0x01 && i + 2 < buf.length) {
+        const val = buf[i + 2];
+        this.setPresence(val === 0x01);
+        return;
+      }
+      // 3. Kod celu 0x0F 0x09 (Target detected)
+      if (buf[i] === 0x0F && buf[i + 1] === 0x09 && i + 2 < buf.length) {
+        const val = buf[i + 2];
+        this.setPresence(val === 0x01);
+        return;
+      }
+      // 4. Ruch ciała 0x80 0x02 (Movement: 1=moving, 2=stationary, 0=none)
+      if (buf[i] === 0x80 && buf[i + 1] === 0x02 && i + 2 < buf.length) {
+        const val = buf[i + 2];
+        this.setPresence(val === 0x01 || val === 0x02);
+        return;
+      }
     }
   }
 
-  /**
-   * Wstrzykuje stan obecności; realizuje debounce wejścia (0.3s)
-   * i histerezę wyjścia (3s).
-   */
   setPresence(present) {
     if (this.presence === present) return;
     this.presence = present;
@@ -232,32 +298,5 @@ export default class RadarListener extends EventEmitter {
     this.state = state;
     this.emit(state, Date.now());
     this.emit('status', { presence: this.presence, state, since: Date.now() });
-  }
-
-  // ------- Mock (brak urządzeń) -------
-
-  _startMock() {
-    console.log('[radar] MOCK MODE: symulacja obecności co 30s (15s przy biurku / 15s poza)');
-    this._mockState = true;
-    this.setPresence(true);
-    this._mockInterval = setInterval(() => {
-      this._mockState = !this._mockState;
-      this.setPresence(this._mockState);
-    }, 15000);
-    return Promise.resolve();
-  }
-
-  /**
-   * Ręczne wstrzyknięcie ramki (do testów bez urządzenia).
-   */
-  injectRaw(data) {
-    this._onData(Buffer.isBuffer(data) ? data : Buffer.from(data));
-  }
-
-  /**
-   * Ręczne wymuszenie stanu obecności (do testów / debugu).
-   */
-  injectPresence(present) {
-    this.setPresence(present);
   }
 }

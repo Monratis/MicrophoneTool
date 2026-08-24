@@ -35,6 +35,20 @@ export default class AudioController extends EventEmitter {
   }
 
   /**
+   * Przełącza wyciszenie mikrofonu.
+   */
+  toggleMute(target) {
+    return this.svv.toggleMute(target);
+  }
+
+  /**
+   * Ustawia wyciszenie mikrofonu.
+   */
+  setMute(target, mute) {
+    return this.svv.setMute(target, mute);
+  }
+
+  /**
    * Dobiera nazwy mikrofonów biurkowego i słuchawek.
    */
   resolveNames(devices) {
@@ -42,9 +56,23 @@ export default class AudioController extends EventEmitter {
   }
 
   /**
+   * Wyłącza/usypia połączone monitory.
+   */
+  sleepDisplay() {
+    return this.svv.sleepDisplay();
+  }
+
+  /**
+   * Wybudza połączone monitory.
+   */
+  wakeDisplay() {
+    return this.svv.wakeDisplay();
+  }
+
+  /**
    * Ścieżka oczekiwanej binarki (do celów informacyjnych).
    */
   binaryPath() {
-    return this.svv.exePath;
+    return this.svv.nativeExePath;
   }
 }
