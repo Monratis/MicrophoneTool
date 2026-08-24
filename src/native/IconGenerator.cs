@@ -23,67 +23,66 @@ namespace IconGen
                 g.Clear(Color.Transparent);
 
                 // Background rounded squircle with gradient
-                using (var path = CreateRoundedRectangle(12, 12, 232, 232, 54))
+                using (var path = CreateRoundedRectangle(10, 10, 236, 236, 52))
                 using (var gradBrush = new LinearGradientBrush(
                     new PointF(0, 0),
                     new PointF(256, 256),
-                    Color.FromArgb(255, 18, 24, 38),   // Dark Navy / Slate
-                    Color.FromArgb(255, 10, 14, 23)))   // Deep Dark
+                    Color.FromArgb(255, 15, 23, 42),   // Dark Slate #0f172a
+                    Color.FromArgb(255, 30, 41, 59)))   // Slate #1e293b
                 {
                     g.FillPath(gradBrush, path);
 
-                    // Outer glowing border
-                    using (var borderPen = new Pen(Color.FromArgb(120, 52, 211, 153), 4f))
+                    // Outer glowing emerald border
+                    using (var borderPen = new Pen(Color.FromArgb(255, 16, 185, 129), 6f))
                     {
                         g.DrawPath(borderPen, path);
                     }
                 }
 
-                // Audio wave accents in background
-                using (var wavePen = new Pen(Color.FromArgb(40, 52, 211, 153), 3f))
+                // Audio wave accents
+                using (var wavePen = new Pen(Color.FromArgb(180, 52, 211, 153), 4.5f))
                 {
                     wavePen.StartCap = LineCap.Round;
                     wavePen.EndCap = LineCap.Round;
-                    g.DrawArc(wavePen, 38, 70, 180, 116, 130, 100);
-                    g.DrawArc(wavePen, 38, 70, 180, 116, 310, 100);
+                    g.DrawArc(wavePen, 34, 66, 188, 124, 135, 90);
+                    g.DrawArc(wavePen, 34, 66, 188, 124, 315, 90);
                 }
 
-                // Center microphone body with emerald gradient
+                // Center microphone body with vibrant emerald gradient
                 using (var micGrad = new LinearGradientBrush(
-                    new PointF(96, 48),
-                    new PointF(160, 140),
-                    Color.FromArgb(255, 52, 211, 153),  // Emerald green
-                    Color.FromArgb(255, 16, 185, 129))) // Deep emerald
+                    new PointF(96, 44),
+                    new PointF(160, 144),
+                    Color.FromArgb(255, 52, 211, 153),  // Emerald #34d399
+                    Color.FromArgb(255, 5, 150, 105)))  // Deep emerald #059669
                 {
-                    // Microphone capsule
-                    using (var micPath = CreateRoundedRectangle(94, 48, 68, 100, 34))
+                    using (var micPath = CreateRoundedRectangle(92, 44, 72, 104, 36))
                     {
                         g.FillPath(micGrad, micPath);
                     }
                 }
 
-                // Inner microphone grille detail
-                using (var grillePen = new Pen(Color.FromArgb(160, 13, 15, 20), 3f))
+                // Microphone grille lines
+                using (var grillePen = new Pen(Color.FromArgb(200, 15, 23, 42), 3.5f))
                 {
                     grillePen.StartCap = LineCap.Round;
                     grillePen.EndCap = LineCap.Round;
-                    g.DrawLine(grillePen, 110, 75, 146, 75);
-                    g.DrawLine(grillePen, 106, 92, 150, 92);
-                    g.DrawLine(grillePen, 110, 109, 146, 109);
+                    g.DrawLine(grillePen, 110, 72, 146, 72);
+                    g.DrawLine(grillePen, 104, 90, 152, 90);
+                    g.DrawLine(grillePen, 110, 108, 146, 108);
                 }
 
-                // Microphone cradle / U-bracket
-                using (var cradlePen = new Pen(Color.FromArgb(255, 241, 245, 249), 10f))
+                // Microphone cradle / stand
+                using (var cradlePen = new Pen(Color.FromArgb(255, 255, 255, 255), 11f))
                 {
                     cradlePen.StartCap = LineCap.Round;
                     cradlePen.EndCap = LineCap.Round;
-                    g.DrawArc(cradlePen, 72, 68, 112, 100, 0, 180);
+                    g.DrawArc(cradlePen, 68, 66, 120, 104, 0, 180);
 
                     // Stem down
-                    g.DrawLine(cradlePen, 128, 168, 128, 196);
+                    g.DrawLine(cradlePen, 128, 170, 128, 202);
 
-                    // Base horizontal bar
-                    g.DrawLine(cradlePen, 98, 196, 158, 196);
+                    // Base bar
+                    g.DrawLine(cradlePen, 94, 202, 162, 202);
                 }
 
                 // Save PNG
@@ -91,9 +90,14 @@ namespace IconGen
                 bmp.Save(pngPath, ImageFormat.Png);
                 Console.WriteLine("Saved: " + pngPath);
 
-                // Save ICO
+                // Also save to resources/
+                string resIcon = Path.Combine("resources", "icon.png");
+                Directory.CreateDirectory("resources");
+                bmp.Save(resIcon, ImageFormat.Png);
+
+                // Save standard Windows ICO (with 256, 128, 64, 48, 32, 16)
                 string icoPath = Path.Combine(outDir, "icon.ico");
-                SaveAsIcon(bmp, icoPath);
+                SaveAsMultiResIcon(bmp, icoPath);
                 Console.WriteLine("Saved: " + icoPath);
             }
         }
@@ -110,19 +114,18 @@ namespace IconGen
             return path;
         }
 
-        private static void SaveAsIcon(Bitmap src, string filePath)
+        private static void SaveAsMultiResIcon(Bitmap src, string filePath)
         {
             int[] sizes = new int[] { 256, 128, 64, 48, 32, 16 };
             using (var ms = new MemoryStream())
             using (var bw = new BinaryWriter(ms))
             {
-                // ICONDIR header
                 bw.Write((short)0);      // Reserved
                 bw.Write((short)1);      // Type: 1 = ICO
                 bw.Write((short)sizes.Length); // Image count
 
                 int offset = 6 + (16 * sizes.Length);
-                byte[][] pngBuffers = new byte[sizes.Length][];
+                byte[][] rawBuffers = new byte[sizes.Length][];
 
                 for (int i = 0; i < sizes.Length; i++)
                 {
@@ -137,8 +140,17 @@ namespace IconGen
 
                         using (var imgMs = new MemoryStream())
                         {
-                            resized.Save(imgMs, ImageFormat.Png);
-                            pngBuffers[i] = imgMs.ToArray();
+                            if (sz == 256)
+                            {
+                                // 256x256 as PNG
+                                resized.Save(imgMs, ImageFormat.Png);
+                            }
+                            else
+                            {
+                                // Standard Win32 DIB format (BITMAPINFOHEADER + BGRA raw bytes + AND mask)
+                                WriteDibIcon(resized, imgMs);
+                            }
+                            rawBuffers[i] = imgMs.ToArray();
                         }
                     }
 
@@ -149,17 +161,60 @@ namespace IconGen
                     bw.Write((byte)0);                    // Reserved
                     bw.Write((short)1);                   // Color planes
                     bw.Write((short)32);                  // Bits per pixel
-                    bw.Write((int)pngBuffers[i].Length);  // Image bytes
+                    bw.Write((int)rawBuffers[i].Length);  // Image bytes
                     bw.Write((int)offset);                // Offset of image data
-                    offset += pngBuffers[i].Length;
+                    offset += rawBuffers[i].Length;
                 }
 
                 for (int i = 0; i < sizes.Length; i++)
                 {
-                    bw.Write(pngBuffers[i]);
+                    bw.Write(rawBuffers[i]);
                 }
 
                 File.WriteAllBytes(filePath, ms.ToArray());
+            }
+        }
+
+        private static void WriteDibIcon(Bitmap bmp, Stream output)
+        {
+            using (var bw = new BinaryWriter(output))
+            {
+                int w = bmp.Width;
+                int h = bmp.Height;
+
+                // BITMAPINFOHEADER (40 bytes)
+                bw.Write(40);            // biSize
+                bw.Write(w);             // biWidth
+                bw.Write(h * 2);         // biHeight (XOR + AND mask height)
+                bw.Write((short)1);      // biPlanes
+                bw.Write((short)32);     // biBitCount
+                bw.Write(0);             // biCompression: BI_RGB
+                bw.Write(w * h * 4);     // biSizeImage
+                bw.Write(0);             // biXPelsPerMeter
+                bw.Write(0);             // biYPelsPerMeter
+                bw.Write(0);             // biClrUsed
+                bw.Write(0);             // biClrImportant
+
+                // XOR mask (bottom-up BGRA)
+                for (int y = h - 1; y >= 0; y--)
+                {
+                    for (int x = 0; x < w; x++)
+                    {
+                        Color c = bmp.GetPixel(x, y);
+                        bw.Write(c.B);
+                        bw.Write(c.G);
+                        bw.Write(c.R);
+                        bw.Write(c.A);
+                    }
+                }
+
+                // AND mask (1 bit per pixel, bottom-up, DWORD padded)
+                int andRowBytes = ((w + 31) / 32) * 4;
+                byte[] andRow = new byte[andRowBytes];
+                for (int y = 0; y < h; y++)
+                {
+                    bw.Write(andRow);
+                }
             }
         }
     }
