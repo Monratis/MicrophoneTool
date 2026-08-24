@@ -12,8 +12,9 @@
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit",
     "package:app": "node scripts/build.mjs app",
+    "package:portable": "node scripts/build.mjs portable",
     "package:installer": "node scripts/build.mjs installer",
-    "package:win": "node scripts/build.mjs app",
+    "package:win": "node scripts/build.mjs all",
     "package:all": "node scripts/build.mjs all",
     "postinstall": "electron-builder install-app-deps"
   },
@@ -29,6 +30,7 @@
     "electron": "^33.0.0",
     "electron-builder": "^25.0.0",
     "electron-vite": "^3.0.0",
+    "rcedit": "^5.0.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.6.3",
@@ -55,6 +57,10 @@
         ]
       },
       {
+        "from": "resources",
+        "to": "resources"
+      },
+      {
         "from": "config.json",
         "to": "config.json"
       }
@@ -74,6 +80,8 @@
     },
     "nsis": {
       "artifactName": "${productName} Setup ${version}.exe",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true

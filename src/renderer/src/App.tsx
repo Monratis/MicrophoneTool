@@ -863,6 +863,19 @@ export default function App() {
             />
           </div>
 
+          <div className="toggle-row" style={{ marginTop: 10 }}>
+            <div className="label">
+              🎮 Integracja z Discord (Płynny strumień głosu)
+              <small>błyskawicznie synchronizuje silnik audio Discorda przy zmianie mikrofonu, eliminując zacięcia i okienka</small>
+            </div>
+            <button
+              className="switch"
+              role="switch"
+              aria-checked={form.discordIntegration ?? true}
+              onClick={() => patchForm({ discordIntegration: !(form.discordIntegration ?? true) })}
+            />
+          </div>
+
           <div className="field" style={{ marginTop: 12 }}>
             <label>Globalny skrót klawiszowy wyciszenia</label>
             <input

@@ -15,6 +15,8 @@ export const DEFAULTS = {
   switchMicOnDesk: true,        // Przełącz na mikrofon stacjonarny po powrocie
   muteBehaviorOnAway: 'none',   // 'none' | 'mute_stationary' | 'mute_all'
   unmuteOnDesk: true,           // Automatycznie odcisz po powrocie do biurka
+  // Integracja z Discordem
+  discordIntegration: true,     // Błyskawiczne odświeżanie strumienia głosu w Discordzie
   // Zachowania ekranów
   sleepMonitorsOnAway: false,   // Usypiaj monitory po odejściu
   sleepMonitorsDelayMs: 15000,  // Czas oczekiwania przed uśpieniem ekranów (ms)

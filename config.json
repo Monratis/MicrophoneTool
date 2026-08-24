@@ -9,6 +9,7 @@
   "switchMicOnDesk": true,
   "muteBehaviorOnAway": "none",
   "unmuteOnDesk": true,
+  "discordIntegration": true,
   "sleepMonitorsOnAway": false,
   "sleepMonitorsDelayMs": 15000,
   "wakeMonitorsOnDesk": true,

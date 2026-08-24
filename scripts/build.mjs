@@ -4,11 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const cpus = os.cpus().length || 4;
-const mode = process.argv[2] || 'app'; // 'app' (unpacked dir), 'portable' (single exe), 'installer' (NSIS), 'all' (all targets)
+const mode = process.argv[2] || 'all'; // 'portable', 'installer', 'all'
 
 console.log(`[build] Hardware: ${cpus} CPU threads (${os.cpus()[0]?.model || 'Processor'})`);
 
-// 1. Build native AudioSwitcher if missing or outdated
+// 1. Build native AudioSwitcher
 const binDir = path.join(process.cwd(), 'bin');
 const nativeCs = path.join(process.cwd(), 'src', 'native', 'AudioSwitcher.cs');
 const nativeExe = path.join(binDir, 'AudioSwitcher.exe');
@@ -22,10 +22,9 @@ if (!fs.existsSync(nativeExe) || fs.statSync(nativeCs).mtimeMs > fs.statSync(nat
   execSync(`${cscCmd} /nologo /optimize /out:"${nativeExe}" "${nativeCs}"`, { stdio: 'inherit' });
 }
 
-// 2. Generate app & tray icons
-const iconIco = path.join(process.cwd(), 'build', 'icon.ico');
+// 2. Generate app icons (.ico / .png) & crisp PNG tray icons
 const iconCs = path.join(process.cwd(), 'src', 'native', 'IconGenerator.cs');
-if (!fs.existsSync(iconIco) && fs.existsSync(iconCs)) {
+if (fs.existsSync(iconCs)) {
   console.log('[build] Generating app icons (.ico / .png)...');
   const csc = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe';
   const cscCmd = fs.existsSync(csc) ? `"${csc}"` : 'csc';
@@ -35,24 +34,19 @@ if (!fs.existsSync(iconIco) && fs.existsSync(iconCs)) {
   try { fs.unlinkSync(iconGenExe); } catch (_) {}
 }
 
-const trayDesk = path.join(process.cwd(), 'resources', 'tray-desk.png');
-if (!fs.existsSync(trayDesk)) {
-  console.log('[build] Generating crisp PNG tray icons...');
-  execSync('node scripts/generate-tray-icons.mjs', { stdio: 'inherit' });
-}
+console.log('[build] Generating crisp PNG tray icons...');
+execSync('node scripts/generate-tray-icons.mjs', { stdio: 'inherit' });
 
 // 3. Vite Build
 console.log('[build] Building Vite frontend & Electron bundles...');
 execSync('npx electron-vite build', { stdio: 'inherit' });
 
 // 4. Packaging
-let targetFlag = '--win dir';
+let targetFlag = '--win portable nsis';
 if (mode === 'portable') {
   targetFlag = '--win portable';
 } else if (mode === 'installer') {
   targetFlag = '--win nsis';
-} else if (mode === 'all') {
-  targetFlag = '--win portable nsis dir';
 }
 
 console.log(`[build] Packaging application (${mode} -> ${targetFlag})...`);
@@ -67,13 +61,24 @@ execSync(builderCmd, {
   }
 });
 
+// 5. Copy release binaries to releases/ folder for GitHub repo
+const releasesDir = path.join(process.cwd(), 'releases');
+fs.mkdirSync(releasesDir, { recursive: true });
+
+const portableSrc = path.join(process.cwd(), 'dist', 'Auto Audio Switch (Portable).exe');
+const installerSrc = path.join(process.cwd(), 'dist', 'Auto Audio Switch Setup 0.2.0.exe');
+const latestYml = path.join(process.cwd(), 'dist', 'latest.yml');
+
+if (fs.existsSync(portableSrc)) {
+  fs.copyFileSync(portableSrc, path.join(releasesDir, 'Auto Audio Switch (Portable).exe'));
+}
+if (fs.existsSync(installerSrc)) {
+  fs.copyFileSync(installerSrc, path.join(releasesDir, 'Auto Audio Switch Setup 0.2.0.exe'));
+}
+if (fs.existsSync(latestYml)) {
+  fs.copyFileSync(latestYml, path.join(releasesDir, 'latest.yml'));
+}
+
 console.log('\n[build] SUCCESS! Result:');
-if (mode === 'app' || mode === 'all') {
-  console.log(' -> Unpacked App EXE: dist/win-unpacked/Auto Audio Switch.exe');
-}
-if (mode === 'portable' || mode === 'all') {
-  console.log(' -> Portable Single EXE: dist/Auto Audio Switch (Portable).exe');
-}
-if (mode === 'installer' || mode === 'all') {
-  console.log(' -> Installer Setup: dist/Auto Audio Switch Setup 0.2.0.exe');
-}
+console.log(' -> releases/Auto Audio Switch (Portable).exe');
+console.log(' -> releases/Auto Audio Switch Setup 0.2.0.exe');

@@ -38,6 +38,7 @@ export interface Snapshot {
     switchMicOnDesk?: boolean;
     muteBehaviorOnAway?: 'none' | 'mute_stationary' | 'mute_all';
     unmuteOnDesk?: boolean;
+    discordIntegration?: boolean;
     sleepMonitorsOnAway?: boolean;
     sleepMonitorsDelayMs?: number;
     wakeMonitorsOnDesk?: boolean;

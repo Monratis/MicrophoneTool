@@ -8,6 +8,7 @@ import RadarListener from './radarListener';
 import AudioController from './audioController';
 import AppController from './appController';
 import AppUpdater from './updater';
+import DiscordIntegration from './discordIntegration';
 
 // Performance App Flags
 app.commandLine.appendSwitch('disable-http-cache');
@@ -379,8 +380,9 @@ app.whenReady().then(() => {
     toolsDir: path.join(appDataDir, 'tools'),
     config
   });
+  const discord = new DiscordIntegration(config);
 
-  controller = new AppController(radar, audio, config);
+  controller = new AppController(radar, audio, config, discord);
   updater = new AppUpdater({ onEvent: (ev) => pushEvent(ev.type, ev), config });
 
   audio.on('toolStatus', (msg) => pushEvent('toast', { message: msg }));

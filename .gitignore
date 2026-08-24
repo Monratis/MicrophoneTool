@@ -1,9 +1,5 @@
 node_modules/
-dist/*
-!dist/Auto Audio Switch (Portable).exe
-!dist/Auto Audio Switch Setup *.exe
-!dist/Auto Audio Switch Setup *.exe.blockmap
-!dist/latest.yml
+dist/
 out/
 *.log
 config.json.user

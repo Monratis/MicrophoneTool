@@ -1,18 +1,19 @@
 import { EventEmitter } from 'node:events';
 
 /**
- * Spina radar z kontrolerem audio oraz konfigurowalnymi zachowaniami stacjonarnymi/mobilnymi.
+ * Spina radar z kontrolerem audio, integracją z Discordem oraz konfigurowalnymi zachowaniami stacjonarnymi/mobilnymi.
  * Tryby:
  *  'auto'     - automatyczne przełączanie wg stanu radaru
  *  'desk'     - wymuszenie mikrofonu stacjonarnego (biurko)
  *  'headset'  - wymuszenie mikrofonu mobilnego (słuchawki)
  */
 export default class AppController extends EventEmitter {
-  constructor(radar, audio, config) {
+  constructor(radar, audio, config, discord = null) {
     super();
     this.radar = radar;
     this.audio = audio;
     this.config = config;
+    this.discord = discord;
     this.mode = 'auto';
     this.currentDevice = null; // 'desk' | 'headset' | null
     this.switching = false;
@@ -27,12 +28,17 @@ export default class AppController extends EventEmitter {
   }
 
   async start() {
+    if (this.discord) {
+      this.discord.start();
+    }
     await this.radar.start();
-    // Nie wymuszaj sztucznego przełączania na starcie bez sygnału z radaru
   }
 
   async stop() {
     this._clearDisplaySleepTimer();
+    if (this.discord) {
+      this.discord.stop();
+    }
     await this.radar.stop();
   }
 
@@ -131,6 +137,11 @@ export default class AppController extends EventEmitter {
           if (stationaryMic) await this.audio.setMute(stationaryMic, true);
           if (mobileMic) await this.audio.setMute(mobileMic, true);
         }
+      }
+
+      // Natychmiastowa synchronizacja z Discordem
+      if (this.discord) {
+        this.discord.notifyDeviceChanged(targetMic);
       }
 
       this.emit('switched', { state, device: targetMic, ok });
