@@ -27,6 +27,28 @@ export interface Snapshot {
     pendingState: 'desk' | 'away';
     port: string;
   };
+  telemetry?: {
+    presence?: boolean;
+    distanceCm?: number;
+    heartRate?: number;
+    breathRate?: number;
+    detectedPerson?: 'me' | 'other' | 'pet' | 'unknown';
+    autoTuning?: {
+      enabled: boolean;
+      mode: 'learning' | 'tracking' | 'idle';
+      speed: 'balanced' | 'fast' | 'conservative';
+      noiseFloor: number; // 0-100%
+      samplesCount: number;
+      adaptedDistanceCenter: number;
+      adaptedDistanceMin: number;
+      adaptedDistanceMax: number;
+      adaptedHeartRateAvg: number;
+      adaptedBreathRateAvg: number;
+      stabilityScore: number; // 0-100%
+      lastAdaptedAt: number;
+    };
+    lastUpdate?: number;
+  };
   config: {
     port: string;
     baudRate: number;
@@ -34,11 +56,35 @@ export interface Snapshot {
     micHeadsetName: string;
     timeoutAwayMs: number;
     timeoutDeskMs: number;
+    radarDistanceGateEnabled?: boolean;
+    radarMinDistanceCm?: number;
+    radarMaxDistanceCm?: number;
+    radarSensitivity?: number;
+    radarAutoTuningEnabled?: boolean;
+    radarAutoTuningSpeed?: 'balanced' | 'fast' | 'conservative';
+    radarAutoTuningNoiseFloor?: number;
+    radarLearnedDistanceCenter?: number;
+    radarLearnedDistanceVariance?: number;
+    radarLearnedHeartRate?: number;
+    radarLearnedBreathRate?: number;
+    petFilterEnabled?: boolean;
+    biometricsEnabled?: boolean;
+    userHeartRateMin?: number;
+    userHeartRateMax?: number;
+    userSeatingDistanceMin?: number;
+    userSeatingDistanceMax?: number;
+    personMismatchAction?: 'ignore' | 'switch_anyway' | 'notify_only';
     switchMicOnAway?: boolean;
     switchMicOnDesk?: boolean;
     muteBehaviorOnAway?: 'none' | 'mute_stationary' | 'mute_all';
     unmuteOnDesk?: boolean;
     discordIntegration?: boolean;
+    signalrgbEnabled?: boolean;
+    signalrgbPort?: number;
+    signalrgbAwayAction?: 'solid_color' | 'turn_off' | 'dim';
+    signalrgbAwayColor?: string;
+    signalrgbAwayBrightness?: number;
+    signalrgbRestoreOnDesk?: boolean;
     sleepMonitorsOnAway?: boolean;
     sleepMonitorsDelayMs?: number;
     wakeMonitorsOnDesk?: boolean;
@@ -51,6 +97,7 @@ export interface Snapshot {
     autoDownloadTools: boolean;
     globalShortcut?: string;
     githubRepo?: string;
+    githubToken?: string;
   };
 }
 
@@ -74,16 +121,18 @@ export interface UpdaterStatus {
 }
 
 export interface PushEvent {
-  type: 'snapshot' | 'toast' | 'switch' | 'updater:status' | 'updater:progress' | string;
+  type: 'snapshot' | 'toast' | 'switch' | 'updater:status' | 'updater:progress' | 'sensor:flash-progress' | 'sensor:flash-complete' | string;
   snapshot?: Snapshot;
   message?: string;
   error?: boolean;
   percent?: number;
   speed?: string;
+  stage?: string;
   status?: string;
   state?: string;
   device?: string;
   updateInfo?: UpdaterStatus['updateInfo'];
+  [key: string]: any;
 }
 
 interface DetectResult {
@@ -107,13 +156,29 @@ interface Api {
   wakeDisplay: () => Promise<any>;
   openConfigDir: () => Promise<boolean>;
   resetConfig: () => Promise<Snapshot>;
+  resetAutoTuning: () => Promise<any>;
   closeWindow: () => void;
 
-  // GitHub Auto Updater
+  // SignalRGB Integration
+  signalrgbProbe: () => Promise<{ connected: boolean; status?: number; data?: any }>;
+  signalrgbTestAway: () => Promise<boolean>;
+  signalrgbTestDesk: () => Promise<boolean>;
+
+  // GitHub Auto Updater & Token
+  openGitHubTokenPage: () => Promise<boolean>;
   checkForUpdates: () => Promise<{ available: boolean; updateInfo?: any; error?: string; currentVersion: string }>;
   downloadUpdate: () => Promise<{ ok: boolean; file?: string }>;
   installUpdate: () => Promise<void>;
   getUpdaterStatus: () => Promise<UpdaterStatus>;
+
+  // Sensor USB Firmware Flasher & Recovery
+  checkSensorFirmware: () => Promise<{ available: boolean; version?: string; name?: string; size?: number; error?: string; message?: string }>;
+  flashSensorFromGitHub: () => Promise<{ ok: boolean; port?: string }>;
+  flashSensorFromFile: () => Promise<{ ok?: boolean; canceled?: boolean; port?: string }>;
+
+  // Diagnostic Logs
+  getLogs: () => Promise<string[]>;
+  clearLogs: () => Promise<boolean>;
 
   onEvent: (cb: (e: PushEvent) => void) => () => void;
 }

@@ -1,8 +1,8 @@
 version: 0.2.0
 files:
-  - url: Auto-Audio-Switch-Setup-0.2.0.exe
-    sha512: Jkdc7N7doSQ3CzUOPWWBSRBFDOEgr+lkjachajWWxwZWMRQlpH3xlC/haaChOCLR2gocoOFoWDG56oMjkGYmqg==
-    size: 94024464
-path: Auto-Audio-Switch-Setup-0.2.0.exe
-sha512: Jkdc7N7doSQ3CzUOPWWBSRBFDOEgr+lkjachajWWxwZWMRQlpH3xlC/haaChOCLR2gocoOFoWDG56oMjkGYmqg==
-releaseDate: '2026-08-24T20:42:43.954Z'
+  - url: Auto Audio Switch Setup 0.2.0.exe
+    sha512: bXm7ZkNQ04xESdcQ59g6O1V7hjOCi9AemkcniFhTzNvGcs5LnP7gCizq+1xS13ayITyZruQTzjgMF9YQS8j4nQ==
+    size: 105213234
+path: Auto Audio Switch Setup 0.2.0.exe
+sha512: bXm7ZkNQ04xESdcQ59g6O1V7hjOCi9AemkcniFhTzNvGcs5LnP7gCizq+1xS13ayITyZruQTzjgMF9YQS8j4nQ==
+releaseDate: '2026-08-24T21:49:58.119Z'

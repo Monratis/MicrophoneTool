@@ -10,6 +10,28 @@ export const DEFAULTS = {
   // Czas reakcji
   timeoutAwayMs: 3000,
   timeoutDeskMs: 300,
+  // Zaawansowana kontrola sensora i strefa fotela (Spatial Distance Gate)
+  radarDistanceGateEnabled: true,// Ogranicz wykrywanie tylko do strefy fotela
+  radarMinDistanceCm: 40,       // Minimalna odległość (cm)
+  radarMaxDistanceCm: 110,      // Maksymalna odległość (cm) — odcina osoby w tle pokoju
+  radarSensitivity: 80,         // Czułość sensora (0-100)
+  // Filtr zwierząt domowych (Kot / Pies)
+  petFilterEnabled: true,       // Automatycznie odfiltrowuje i ignoruje kota/psa na bazie oddechu (>22 RPM) i tętna (>125 BPM)
+  // Biometria i rozróżnianie osób (Ty vs Narzeczona/Inni)
+  biometricsEnabled: false,     // Rozróżnianie tożsamości na bazie tętna i odległości
+  userHeartRateMin: 55,         // Twoje tętno spoczynkowe min (BPM)
+  userHeartRateMax: 78,         // Twoje tętno spoczynkowe max (BPM)
+  userSeatingDistanceMin: 60,   // Twoja typowa odległość od monitora min (cm)
+  userSeatingDistanceMax: 90,   // Twoja typowa odległość od monitora max (cm)
+  // Auto-Tuning i samouczenie się parametrów otoczenia (Dynamic Real-Time Adaptation)
+  radarAutoTuningEnabled: true, // Automatyczne dopasowywanie do pozycji fotela, szumu tła i biometrii
+  radarAutoTuningSpeed: 'balanced', // 'balanced' | 'fast' | 'conservative'
+  radarAutoTuningNoiseFloor: 0, // Wyuczony poziom szumu otoczenia (%)
+  radarLearnedDistanceCenter: 0,// Wyuczony środek odległości fotela (cm)
+  radarLearnedDistanceVariance: 0,// Wyuczone odchylenie odległości (cm)
+  radarLearnedHeartRate: 0,     // Wyuczone tętno spoczynkowe (BPM)
+  radarLearnedBreathRate: 0,    // Wyuczony oddech spoczynkowy (RPM)
+  personMismatchAction: 'ignore', // 'ignore' | 'switch_anyway' | 'notify_only'
   // Zachowania audio i przełączania
   switchMicOnAway: true,        // Przełącz na mikrofon mobilny po odejściu
   switchMicOnDesk: true,        // Przełącz na mikrofon stacjonarny po powrocie
@@ -17,6 +39,13 @@ export const DEFAULTS = {
   unmuteOnDesk: true,           // Automatycznie odcisz po powrocie do biurka
   // Integracja z Discordem
   discordIntegration: true,     // Błyskawiczne odświeżanie strumienia głosu w Discordzie
+  // Integracja z SignalRGB (oświetlenie / klawiatura / obudowa)
+  signalrgbEnabled: false,      // Czy włączona integracja z SignalRGB
+  signalrgbPort: 16038,         // Port HTTP API SignalRGB (domyślnie 16038)
+  signalrgbAwayAction: 'solid_color', // 'solid_color' | 'turn_off' | 'dim'
+  signalrgbAwayColor: '#f59e0b',// Kolor po odejściu (np. bursztynowy / pomarańczowy)
+  signalrgbAwayBrightness: 0,   // Poziom przyciemnienia po odejściu (0 - 100)
+  signalrgbRestoreOnDesk: true, // Automatyczne przywracanie profilu po powrocie do biurka
   // Zachowania ekranów
   sleepMonitorsOnAway: false,   // Usypiaj monitory po odejściu
   sleepMonitorsDelayMs: 15000,  // Czas oczekiwania przed uśpieniem ekranów (ms)
@@ -31,7 +60,8 @@ export const DEFAULTS = {
   autoStart: false,
   autoDownloadTools: true,
   globalShortcut: 'CommandOrControl+Shift+M',
-  githubRepo: 'Monratis/MicrophoneTool'
+  githubRepo: 'Monratis/MicrophoneTool',
+  githubToken: process.env.GITHUB_TOKEN || '' // PAT dla prywatnych repo — env GITHUB_TOKEN lub %APPDATA% config
 };
 
 export default class Config {

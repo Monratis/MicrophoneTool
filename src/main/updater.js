@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import https from 'node:https';
 
 const GITHUB_REPO = 'Monratis/MicrophoneTool';
+const DEFAULT_GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 
 function compareSemver(v1, v2) {
   const clean1 = (v1 || '').replace(/^v/i, '').trim();
@@ -31,7 +32,6 @@ export default class AppUpdater {
     this.status = 'idle'; // 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
     this.updateInfo = null;
     this.downloadedFilePath = null;
-    this._downloadAbort = null;
   }
 
   emit(type, payload = {}) {
@@ -50,7 +50,7 @@ export default class AppUpdater {
   }
 
   /**
-   * Sprawdza dostępność nowej wersji na GitHub Releases.
+   * Sprawdza dostępność nowej wersji na GitHub Releases (obsługuje repozytoria publiczne i prywatne).
    */
   async checkForUpdates() {
     this.status = 'checking';
@@ -88,8 +88,10 @@ export default class AppUpdater {
           publishedAt: release.published_at,
           url: release.html_url,
           asset: targetAsset ? {
+            id: targetAsset.id,
             name: targetAsset.name,
             size: targetAsset.size,
+            apiUrl: targetAsset.url,
             downloadUrl: targetAsset.browser_download_url
           } : null
         };
@@ -112,17 +114,27 @@ export default class AppUpdater {
 
   async _fetchLatestRelease() {
     const repo = (this.config && this.config.get('githubRepo')) || GITHUB_REPO;
+    const token = (this.config && this.config.get('githubToken')) || DEFAULT_GITHUB_TOKEN;
     const url = `https://api.github.com/repos/${repo}/releases/latest`;
+
+    const headers = {
+      'User-Agent': `AutoAudioSwitch/${this.currentVersion}`,
+      'Accept': 'application/vnd.github.v3+json'
+    };
+    if (token && token.trim()) {
+      headers['Authorization'] = `Bearer ${token.trim()}`;
+    }
+
     const res = await fetch(url, {
-      headers: {
-        'User-Agent': `AutoAudioSwitch/${this.currentVersion}`,
-        'Accept': 'application/vnd.github.v3+json'
-      },
+      headers,
       signal: AbortSignal.timeout(10000)
     });
 
     if (res.status === 404) {
       return null;
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`GitHub API HTTP ${res.status}: Wymagany poprawny token PAT do prywatnego repozytorium`);
     }
     if (!res.ok) {
       throw new Error(`GitHub API HTTP ${res.status}`);
@@ -132,10 +144,10 @@ export default class AppUpdater {
   }
 
   /**
-   * Pobiera plik aktualizacji z raportowaniem postępu na żywo.
+   * Pobiera plik aktualizacji z raportowaniem postępu na żywo (działa dla publicznych i prywatnych repo).
    */
   async downloadUpdate() {
-    if (!this.updateInfo || !this.updateInfo.asset || !this.updateInfo.asset.downloadUrl) {
+    if (!this.updateInfo || !this.updateInfo.asset) {
       throw new Error('Brak pliku aktualizacji do pobrania');
     }
 
@@ -143,6 +155,7 @@ export default class AppUpdater {
     this.emit('status', this.getStatus());
 
     const asset = this.updateInfo.asset;
+    const token = (this.config && this.config.get('githubToken')) || DEFAULT_GITHUB_TOKEN;
     const tempDir = path.join(os.tmpdir(), 'AutoAudioSwitch-Update');
     fs.mkdirSync(tempDir, { recursive: true });
 
@@ -156,22 +169,34 @@ export default class AppUpdater {
       const totalBytes = asset.size || 0;
       let startTime = Date.now();
 
-      const downloadUrl = asset.downloadUrl;
+      // Dla prywatnych repo użyj API Asset URL z nagłówkiem application/octet-stream
+      const isPrivate = Boolean(token && token.trim());
+      const initialUrl = (isPrivate && asset.apiUrl) ? asset.apiUrl : asset.downloadUrl;
 
-      const fetchWithRedirects = (currentUrl) => {
-        const req = https.get(currentUrl, {
-          headers: {
-            'User-Agent': `AutoAudioSwitch/${this.currentVersion}`
-          }
-        }, (res) => {
-          // Obsługa przekierowań (301, 302, 307)
+      const fetchWithRedirects = (currentUrl, isRedirect = false) => {
+        const headers = {
+          'User-Agent': `AutoAudioSwitch/${this.currentVersion}`
+        };
+
+        // Dołącz autoryzację tylko do domeny api.github.com (nigdy do AWS S3 po redirectzie)
+        if (isPrivate && !isRedirect) {
+          headers['Authorization'] = `Bearer ${token.trim()}`;
+          headers['Accept'] = 'application/octet-stream';
+        }
+
+        const req = https.get(currentUrl, { headers }, (res) => {
+          // Obsługa przekierowań (301, 302, 307) np. z GitHub API do AWS S3
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            fetchWithRedirects(res.headers.location);
+            fetchWithRedirects(res.headers.location, true);
             return;
           }
 
           if (res.statusCode !== 200) {
-            reject(new Error(`HTTP ${res.statusCode}`));
+            fileStream.close();
+            this.status = 'error';
+            const errMsg = `Błąd pobierania HTTP ${res.statusCode}${res.statusCode === 401 || res.statusCode === 404 ? ' (sprawdź uprawnienia GitHub Token)' : ''}`;
+            this.emit('status', { ...this.getStatus(), error: errMsg });
+            reject(new Error(errMsg));
             return;
           }
 
@@ -214,7 +239,7 @@ export default class AppUpdater {
         });
       };
 
-      fetchWithRedirects(downloadUrl);
+      fetchWithRedirects(initialUrl);
     });
   }
 

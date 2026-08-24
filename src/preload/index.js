@@ -18,12 +18,29 @@ contextBridge.exposeInMainWorld('api', {
   openConfigDir: () => ipcRenderer.invoke('config:openDir'),
   resetConfig: () => ipcRenderer.invoke('config:reset'),
   closeWindow: () => ipcRenderer.send('window:close'),
+  // Radar Auto-Tuning
+  resetAutoTuning: () => ipcRenderer.invoke('radar:resetAutoTuning'),
 
-  // GitHub Auto Updater
+  // SignalRGB Integration
+  signalrgbProbe: () => ipcRenderer.invoke('signalrgb:probe'),
+  signalrgbTestAway: () => ipcRenderer.invoke('signalrgb:testAway'),
+  signalrgbTestDesk: () => ipcRenderer.invoke('signalrgb:testDesk'),
+
+  // GitHub Auto Updater & Token
+  openGitHubTokenPage: () => ipcRenderer.invoke('github:openTokenPage'),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
   downloadUpdate: () => ipcRenderer.invoke('updater:download'),
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   getUpdaterStatus: () => ipcRenderer.invoke('updater:status'),
+
+  // Sensor USB Firmware Flasher & Recovery
+  checkSensorFirmware: () => ipcRenderer.invoke('sensor:checkFirmware'),
+  flashSensorFromGitHub: () => ipcRenderer.invoke('sensor:flashFromGitHub'),
+  flashSensorFromFile: () => ipcRenderer.invoke('sensor:flashFromFile'),
+
+  // Diagnostic Logs
+  getLogs: () => ipcRenderer.invoke('logs:get'),
+  clearLogs: () => ipcRenderer.invoke('logs:clear'),
 
   onEvent: (cb) => {
     const listener = (_e, payload) => cb(payload);

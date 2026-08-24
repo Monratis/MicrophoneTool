@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, Notification, globalShortcut, shell } from 'electron';
+import { app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, Notification, globalShortcut, shell, dialog } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -8,7 +8,9 @@ import RadarListener from './radarListener';
 import AudioController from './audioController';
 import AppController from './appController';
 import AppUpdater from './updater';
+import SensorFlasher from './sensorFlasher';
 import DiscordIntegration from './discordIntegration';
+import SignalRGBIntegration from './signalrgbIntegration';
 
 // Performance App Flags
 app.commandLine.appendSwitch('disable-http-cache');
@@ -25,11 +27,47 @@ let tray = null;
 let settingsWindow = null;
 let controller = null;
 let updater = null;
+let sensorFlasher = null;
+let signalrgb = null;
 let snapshot = null;
 let radarIssueToastShown = false;
 
 const STATE_LABEL = { desk: 'Przy biurku (Stacjonarny)', away: 'Poza biurkiem (Mobilny)' };
 const MODE_LABEL = { auto: 'Auto (radar)', desk: 'Stacjonarny', headset: 'Mobilny' };
+
+// ---------- Debug Logs Ring Buffer ----------
+const logBuffer = [];
+const MAX_LOG_LINES = 500;
+
+function appendLog(category, message) {
+  const ts = new Date().toLocaleTimeString('pl-PL', { hour12: false });
+  const entry = `[${ts}] [${category}] ${message}`;
+  logBuffer.push(entry);
+  if (logBuffer.length > MAX_LOG_LINES) {
+    logBuffer.shift();
+  }
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.webContents.send('push:event', { type: 'log:entry', entry });
+  }
+}
+
+// Intercept process logs
+const origConsoleLog = console.log;
+const origConsoleWarn = console.warn;
+const origConsoleError = console.error;
+
+console.log = (...args) => {
+  origConsoleLog(...args);
+  appendLog('APP', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
+console.warn = (...args) => {
+  origConsoleWarn(...args);
+  appendLog('WARN', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
+console.error = (...args) => {
+  origConsoleError(...args);
+  appendLog('ERROR', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
 
 // ---------- paths & appdata ----------
 
@@ -38,6 +76,28 @@ const APP_DATA_FOLDER = 'Audio Switcher';
 function getAppDataDir() {
   const base = process.env.APPDATA || (app.isReady() ? app.getPath('appData') : null) || path.join(os.homedir(), 'AppData', 'Roaming');
   return path.join(base, APP_DATA_FOLDER);
+}
+
+// Sprzątanie staroć po sobie: pobrane instalatory aktualizacji i skrypty restartu
+// zostawiane wcześniej w %TEMP% nigdy nie były usuwane (setki MB śmieci).
+function cleanupStaleUpdateFiles() {
+  const targets = [
+    path.join(os.tmpdir(), 'AutoAudioSwitch-Update'),
+    path.join(os.tmpdir(), 'update_restart.bat')
+  ];
+  for (const t of targets) {
+    try {
+      fs.rmSync(t, { recursive: true, force: true, maxRetries: 2 });
+    } catch (_) {}
+  }
+}
+
+// Ikona aplikacji: w dev z build/, w paczce z resources/ (extraResources)
+function resolveAppIcon() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'resources', 'icon.png');
+  }
+  return path.join(__dirname, '..', '..', 'build', 'icon.png');
 }
 
 const appDataDir = getAppDataDir();
@@ -102,6 +162,12 @@ function buildSnapshot() {
         : controller.radar.state,
       port: controller.config.get('port')
     },
+    telemetry: controller.radar.telemetry || {
+      distanceCm: 0,
+      heartRate: 0,
+      breathRate: 0,
+      detectedPerson: 'unknown'
+    },
     config: { ...controller.config.data }
   };
 }
@@ -123,7 +189,7 @@ function pushEvent(type, payload) {
 function showWindowsNotification(title, body) {
   if (Notification.isSupported() && controller && controller.config.get('notifications')) {
     try {
-      const iconPath = path.join(__dirname, '..', '..', 'build', 'icon.png');
+      const iconPath = resolveAppIcon();
       new Notification({
         title,
         body,
@@ -234,14 +300,16 @@ function showSettings() {
 }
 
 function createSettingsWindow() {
-  const iconPath = path.join(__dirname, '..', '..', 'build', 'icon.ico');
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'resources', 'icon.png')
+    : path.join(__dirname, '..', '..', 'build', 'icon.ico');
   const winIcon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : trayIcon('away');
 
   settingsWindow = new BrowserWindow({
-    width: 490,
-    height: 780,
-    minWidth: 480,
-    minHeight: 640,
+    width: 780,
+    height: 860,
+    minWidth: 640,
+    minHeight: 680,
     show: false,
     frame: false,
     resizable: true,
@@ -347,11 +415,58 @@ function registerIpc() {
     return await controller.audio.wakeDisplay();
   });
 
-  // Updater IPC
+  // SignalRGB IPC
+  ipcMain.handle('signalrgb:probe', async () => signalrgb ? signalrgb.probe() : { connected: false });
+  ipcMain.handle('signalrgb:testAway', async () => { if (signalrgb) await signalrgb.onAway(); return true; });
+  ipcMain.handle('signalrgb:testDesk', async () => { if (signalrgb) await signalrgb.onDesk(); return true; });
+
+  // GitHub Token Page & Updater IPC
+  ipcMain.handle('github:openTokenPage', () => {
+    shell.openExternal('https://github.com/settings/tokens/new?scopes=repo&description=AutoAudioSwitch-Updater');
+    return true;
+  });
   ipcMain.handle('updater:check', async () => updater ? updater.checkForUpdates() : { available: false });
   ipcMain.handle('updater:download', async () => updater ? updater.downloadUpdate() : null);
   ipcMain.handle('updater:install', async () => updater ? updater.quitAndInstall() : null);
   ipcMain.handle('updater:status', () => updater ? updater.getStatus() : null);
+  // Radar Auto-Tuning IPC
+  ipcMain.handle('radar:resetAutoTuning', () => {
+    if (controller && controller.radar) {
+      const status = controller.radar.resetAutoTuning();
+      refreshSnapshot();
+      return status;
+    }
+    return null;
+  });
+
+  // Sensor USB Firmware Flasher & Emergency Recovery IPC
+  ipcMain.handle('sensor:checkFirmware', async () => {
+    return sensorFlasher ? sensorFlasher.checkGitHubFirmware() : { available: false };
+  });
+  ipcMain.handle('sensor:flashFromGitHub', async () => {
+    if (!sensorFlasher) throw new Error('Sensor Flasher nie został zainicjalizowany');
+    const check = await sensorFlasher.checkGitHubFirmware();
+    if (!check.available) throw new Error(check.message || 'Brak pliku firmware .bin na GitHubie');
+    const binPath = await sensorFlasher.downloadFirmware(check);
+    return await sensorFlasher.flashFirmware(binPath);
+  });
+  ipcMain.handle('sensor:flashFromFile', async () => {
+    if (!sensorFlasher) throw new Error('Sensor Flasher nie został zainicjalizowany');
+    const { canceled, filePaths } = await dialog.showOpenDialog(settingsWindow, {
+      title: 'Wybierz skompilowany plik firmware ESP32-C6 (.bin)',
+      filters: [{ name: 'Firmware Binary (*.bin)', extensions: ['bin'] }],
+      properties: ['openFile']
+    });
+    if (canceled || !filePaths || filePaths.length === 0) return { canceled: true };
+    return await sensorFlasher.flashFirmware(filePaths[0]);
+  });
+
+  // Diagnostic Logs IPC
+  ipcMain.handle('logs:get', () => [...logBuffer]);
+  ipcMain.handle('logs:clear', () => {
+    logBuffer.length = 0;
+    return true;
+  });
 
   ipcMain.on('window:close', () => { if (settingsWindow) settingsWindow.hide(); });
 }
@@ -373,6 +488,7 @@ function applyConfig() {
 app.setAppUserModelId('com.monratis.autoaudio');
 
 app.whenReady().then(() => {
+  cleanupStaleUpdateFiles();
   const config = new Config(resolveConfigPath());
   const radar = new RadarListener(config);
   const audio = new AudioController({
@@ -381,11 +497,14 @@ app.whenReady().then(() => {
     config
   });
   const discord = new DiscordIntegration(config);
+  signalrgb = new SignalRGBIntegration({ config });
 
-  controller = new AppController(radar, audio, config, discord);
+  controller = new AppController(radar, audio, config, discord, signalrgb);
   updater = new AppUpdater({ onEvent: (ev) => pushEvent(ev.type, ev), config });
+  sensorFlasher = new SensorFlasher({ config, radar, onEvent: (ev) => pushEvent(ev.type, ev) });
 
   audio.on('toolStatus', (msg) => pushEvent('toast', { message: msg }));
+  radar.on('telemetry', (tel) => pushEvent('telemetry', tel));
   applyAutoStart(config.get('autoStart'));
 
   controller.on('switch', ({ state, device, unconfigured }) => {

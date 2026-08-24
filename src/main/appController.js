@@ -1,19 +1,20 @@
 import { EventEmitter } from 'node:events';
 
 /**
- * Spina radar z kontrolerem audio, integracją z Discordem oraz konfigurowalnymi zachowaniami stacjonarnymi/mobilnymi.
+ * Spina radar z kontrolerem audio, integracją z Discordem, SignalRGB oraz konfigurowalnymi zachowaniami stacjonarnymi/mobilnymi.
  * Tryby:
  *  'auto'     - automatyczne przełączanie wg stanu radaru
  *  'desk'     - wymuszenie mikrofonu stacjonarnego (biurko)
  *  'headset'  - wymuszenie mikrofonu mobilnego (słuchawki)
  */
 export default class AppController extends EventEmitter {
-  constructor(radar, audio, config, discord = null) {
+  constructor(radar, audio, config, discord = null, signalrgb = null) {
     super();
     this.radar = radar;
     this.audio = audio;
     this.config = config;
     this.discord = discord;
+    this.signalrgb = signalrgb;
     this.mode = 'auto';
     this.currentDevice = null; // 'desk' | 'headset' | null
     this.switching = false;
@@ -78,6 +79,11 @@ export default class AppController extends EventEmitter {
         await this.audio.wakeDisplay();
         this.emit('displayState', 'wake');
       }
+
+      // Przywrócenie oświetlenia SignalRGB
+      if (this.signalrgb) {
+        this.signalrgb.onDesk();
+      }
     } else if (state === 'away') {
       this._clearDisplaySleepTimer();
       if (this.config.get('sleepMonitorsOnAway')) {
@@ -88,6 +94,11 @@ export default class AppController extends EventEmitter {
           await this.audio.sleepDisplay();
           this.emit('displayState', 'sleep');
         }, delay);
+      }
+
+      // Zmiana oświetlenia SignalRGB (np. zmiana koloru klawiatury / zgaszenie RGB)
+      if (this.signalrgb) {
+        this.signalrgb.onAway();
       }
     }
 

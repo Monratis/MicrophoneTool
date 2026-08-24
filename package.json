@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "adm-zip": "^0.6.0",
+    "esptool-js": "^0.6.1",
     "iconv-lite": "^0.7.3",
     "serialport": "^13.0.0"
   },
