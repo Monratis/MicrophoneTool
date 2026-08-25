@@ -4,11 +4,12 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import https from 'node:https';
+import type Config from './config';
+import type { UpdateInfo, UpdaterStatus } from '../shared/types';
 
 const GITHUB_REPO = 'Monratis/MicrophoneTool';
-const DEFAULT_GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 
-function compareSemver(v1, v2) {
+function compareSemver(v1: string, v2: string): number {
   const clean1 = (v1 || '').replace(/^v/i, '').trim();
   const clean2 = (v2 || '').replace(/^v/i, '').trim();
 
@@ -24,23 +25,45 @@ function compareSemver(v1, v2) {
   return 0;
 }
 
+interface GitHubReleaseAsset {
+  id: number;
+  name: string;
+  size: number;
+  url: string;
+  browser_download_url: string;
+}
+
+interface GitHubRelease {
+  tag_name?: string;
+  name?: string;
+  body?: string;
+  published_at?: string;
+  html_url?: string;
+  assets?: GitHubReleaseAsset[];
+}
+
 export default class AppUpdater {
-  constructor({ onEvent, config }) {
-    this.onEvent = onEvent;
+  private readonly onEvent: ((ev: { type: string; [key: string]: unknown }) => void) | null;
+  private readonly config: Config;
+
+  currentVersion: string;
+  status: UpdaterStatus['status'] = 'idle';
+  updateInfo: UpdateInfo | null = null;
+  downloadedFilePath: string | null = null;
+
+  constructor({ onEvent, config }: { onEvent?: (ev: { type: string; [key: string]: unknown }) => void; config: Config }) {
+    this.onEvent = onEvent ?? null;
     this.config = config;
     this.currentVersion = app.getVersion();
-    this.status = 'idle'; // 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
-    this.updateInfo = null;
-    this.downloadedFilePath = null;
   }
 
-  emit(type, payload = {}) {
+  emit(type: string, payload: Record<string, unknown> | object = {}): void {
     if (this.onEvent) {
-      this.onEvent({ type: `updater:${type}`, ...payload });
+      this.onEvent({ type: `updater:${type}`, ...(payload as Record<string, unknown>) });
     }
   }
 
-  getStatus() {
+  getStatus(): UpdaterStatus {
     return {
       status: this.status,
       currentVersion: this.currentVersion,
@@ -50,14 +73,14 @@ export default class AppUpdater {
   }
 
   /**
-   * Sprawdza dostępność nowej wersji na GitHub Releases (obsługuje repozytoria publiczne i prywatne).
+   * Sprawdza dostępność nowej wersji na GitHub Releases.
    */
-  async checkForUpdates() {
+  async checkForUpdates(): Promise<{ available: boolean; updateInfo?: UpdateInfo; currentVersion: string; remoteVersion?: string; error?: string }> {
     this.status = 'checking';
     this.emit('status', this.getStatus());
 
     try {
-      const release = await this._fetchLatestRelease();
+      const release = await this.fetchLatestRelease();
       if (!release || !release.tag_name) {
         this.status = 'not-available';
         this.emit('status', this.getStatus());
@@ -72,12 +95,18 @@ export default class AppUpdater {
         const assets = release.assets || [];
         const isInstaller = app.isPackaged && !process.execPath.includes('win-unpacked');
 
-        let targetAsset = assets.find((a) => a.name.toLowerCase().endsWith('.exe') && (
-          isInstaller ? a.name.toLowerCase().includes('setup') : (a.name.toLowerCase().includes('portable') || !a.name.toLowerCase().includes('setup'))
-        ));
+        let targetAsset = assets.find(
+          (a) =>
+            a.name.toLowerCase().endsWith('.exe') &&
+            (isInstaller
+              ? a.name.toLowerCase().includes('setup')
+              : a.name.toLowerCase().includes('portable') || !a.name.toLowerCase().includes('setup'))
+        );
 
         if (!targetAsset && assets.length > 0) {
-          targetAsset = assets.find((a) => a.name.toLowerCase().endsWith('.exe') || a.name.toLowerCase().endsWith('.zip'));
+          targetAsset = assets.find(
+            (a) => a.name.toLowerCase().endsWith('.exe') || a.name.toLowerCase().endsWith('.zip')
+          );
         }
 
         this.updateInfo = {
@@ -85,15 +114,17 @@ export default class AppUpdater {
           tag: release.tag_name,
           name: release.name || release.tag_name,
           notes: release.body || '',
-          publishedAt: release.published_at,
-          url: release.html_url,
-          asset: targetAsset ? {
-            id: targetAsset.id,
-            name: targetAsset.name,
-            size: targetAsset.size,
-            apiUrl: targetAsset.url,
-            downloadUrl: targetAsset.browser_download_url
-          } : null
+          publishedAt: release.published_at || '',
+          url: release.html_url || '',
+          asset: targetAsset
+            ? {
+                id: targetAsset.id,
+                name: targetAsset.name,
+                size: targetAsset.size,
+                apiUrl: targetAsset.url,
+                downloadUrl: targetAsset.browser_download_url
+              }
+            : null
         };
 
         this.status = 'available';
@@ -105,21 +136,21 @@ export default class AppUpdater {
         return { available: false, currentVersion: this.currentVersion, remoteVersion: remoteTag };
       }
     } catch (err) {
-      console.error('[updater] check error:', err.message);
+      console.error('[updater] check error:', (err as Error).message);
       this.status = 'error';
-      this.emit('status', { ...this.getStatus(), error: err.message });
-      return { available: false, error: err.message, currentVersion: this.currentVersion };
+      this.emit('status', { ...this.getStatus(), error: (err as Error).message });
+      return { available: false, error: (err as Error).message, currentVersion: this.currentVersion };
     }
   }
 
-  async _fetchLatestRelease() {
+  private async fetchLatestRelease(): Promise<GitHubRelease | null> {
     const repo = (this.config && this.config.get('githubRepo')) || GITHUB_REPO;
-    const token = (this.config && this.config.get('githubToken')) || DEFAULT_GITHUB_TOKEN;
+    const token = this.config.get('githubToken');
     const url = `https://api.github.com/repos/${repo}/releases/latest`;
 
-    const headers = {
+    const headers: Record<string, string> = {
       'User-Agent': `AutoAudioSwitch/${this.currentVersion}`,
-      'Accept': 'application/vnd.github.v3+json'
+      Accept: 'application/vnd.github.v3+json'
     };
     if (token && token.trim()) {
       headers['Authorization'] = `Bearer ${token.trim()}`;
@@ -140,13 +171,13 @@ export default class AppUpdater {
       throw new Error(`GitHub API HTTP ${res.status}`);
     }
 
-    return await res.json();
+    return (await res.json()) as GitHubRelease;
   }
 
   /**
-   * Pobiera plik aktualizacji z raportowaniem postępu na żywo (działa dla publicznych i prywatnych repo).
+   * Pobiera plik aktualizacji z raportowaniem postępu na żywo.
    */
-  async downloadUpdate() {
+  async downloadUpdate(): Promise<{ ok: boolean; file: string }> {
     if (!this.updateInfo || !this.updateInfo.asset) {
       throw new Error('Brak pliku aktualizacji do pobrania');
     }
@@ -155,7 +186,7 @@ export default class AppUpdater {
     this.emit('status', this.getStatus());
 
     const asset = this.updateInfo.asset;
-    const token = (this.config && this.config.get('githubToken')) || DEFAULT_GITHUB_TOKEN;
+    const token = this.config.get('githubToken');
     const tempDir = path.join(os.tmpdir(), 'AutoAudioSwitch-Update');
     fs.mkdirSync(tempDir, { recursive: true });
 
@@ -167,26 +198,31 @@ export default class AppUpdater {
     return new Promise((resolve, reject) => {
       let downloadedBytes = 0;
       const totalBytes = asset.size || 0;
-      let startTime = Date.now();
+      const startTime = Date.now();
 
       // Dla prywatnych repo użyj API Asset URL z nagłówkiem application/octet-stream
       const isPrivate = Boolean(token && token.trim());
-      const initialUrl = (isPrivate && asset.apiUrl) ? asset.apiUrl : asset.downloadUrl;
+      const initialUrl =
+        isPrivate && asset.apiUrl ? asset.apiUrl : asset.downloadUrl!;
 
-      const fetchWithRedirects = (currentUrl, isRedirect = false) => {
-        const headers = {
+      const fetchWithRedirects = (currentUrl: string, isRedirect = false): void => {
+        const headers: Record<string, string> = {
           'User-Agent': `AutoAudioSwitch/${this.currentVersion}`
         };
 
-        // Dołącz autoryzację tylko do domeny api.github.com (nigdy do AWS S3 po redirectzie)
+        // Autoryzacja tylko do api.github.com (nigdy do S3 po redirectzie)
         if (isPrivate && !isRedirect) {
-          headers['Authorization'] = `Bearer ${token.trim()}`;
+          headers['Authorization'] = `Bearer ${(token || '').trim()}`;
           headers['Accept'] = 'application/octet-stream';
         }
 
         const req = https.get(currentUrl, { headers }, (res) => {
-          // Obsługa przekierowań (301, 302, 307) np. z GitHub API do AWS S3
-          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          if (
+            res.statusCode &&
+            res.statusCode >= 300 &&
+            res.statusCode < 400 &&
+            res.headers.location
+          ) {
             fetchWithRedirects(res.headers.location, true);
             return;
           }
@@ -194,19 +230,21 @@ export default class AppUpdater {
           if (res.statusCode !== 200) {
             fileStream.close();
             this.status = 'error';
-            const errMsg = `Błąd pobierania HTTP ${res.statusCode}${res.statusCode === 401 || res.statusCode === 404 ? ' (sprawdź uprawnienia GitHub Token)' : ''}`;
+            const errMsg = `Błąd pobierania HTTP ${res.statusCode}${
+              res.statusCode === 401 || res.statusCode === 404 ? ' (sprawdź uprawnienia GitHub Token)' : ''
+            }`;
             this.emit('status', { ...this.getStatus(), error: errMsg });
             reject(new Error(errMsg));
             return;
           }
 
-          res.on('data', (chunk) => {
+          res.on('data', (chunk: Buffer) => {
             downloadedBytes += chunk.length;
             fileStream.write(chunk);
 
             const percent = totalBytes > 0 ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
             const elapsedSec = (Date.now() - startTime) / 1000;
-            const speedKB = elapsedSec > 0 ? Math.round((downloadedBytes / 1024) / elapsedSec) : 0;
+            const speedKB = elapsedSec > 0 ? Math.round(downloadedBytes / 1024 / elapsedSec) : 0;
 
             this.emit('progress', {
               percent,
@@ -223,7 +261,7 @@ export default class AppUpdater {
             resolve({ ok: true, file: targetFile });
           });
 
-          res.on('error', (err) => {
+          res.on('error', (err: Error) => {
             fileStream.close();
             this.status = 'error';
             this.emit('status', { ...this.getStatus(), error: err.message });
@@ -231,7 +269,7 @@ export default class AppUpdater {
           });
         });
 
-        req.on('error', (err) => {
+        req.on('error', (err: Error) => {
           fileStream.close();
           this.status = 'error';
           this.emit('status', { ...this.getStatus(), error: err.message });
@@ -246,7 +284,7 @@ export default class AppUpdater {
   /**
    * Instaluje pobraną aktualizację i restartuje aplikację.
    */
-  quitAndInstall() {
+  quitAndInstall(): void {
     if (!this.downloadedFilePath || !fs.existsSync(this.downloadedFilePath)) {
       throw new Error('Plik instalatora nie istnieje');
     }

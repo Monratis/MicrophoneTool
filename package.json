@@ -25,6 +25,7 @@
     "serialport": "^13.0.0"
   },
   "devDependencies": {
+    "@types/node": "^26.3.0",
     "electron": "^43.4.1",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",

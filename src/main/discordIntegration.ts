@@ -1,7 +1,8 @@
 import net from 'node:net';
 import { EventEmitter } from 'node:events';
+import type Config from './config';
 
-const DISCORD_CLIENT_ID = '128000000000000000'; // Generic local RPC Client ID
+const DISCORD_CLIENT_ID = '128000000000000000';
 
 const OPCODES = {
   HANDSHAKE: 0,
@@ -9,52 +10,50 @@ const OPCODES = {
   CLOSE: 2,
   PING: 3,
   PONG: 4
-};
+} as const;
 
-/**
- * Obsługa lokalnego IPC Discorda (Named Pipes \\.\pipe\discord-ipc-0..9).
- * Wymusza natychmiastowe odświeżenie silnika audio (Voice Engine) w Discordzie
- * po zmianie domyślnego mikrofonu Windows, eliminując lagi, opóźnienia i głuche pauzy.
- */
 export default class DiscordIntegration extends EventEmitter {
-  constructor(config) {
+  private readonly config: Config;
+  private socket: net.Socket | null = null;
+  private connected = false;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private running = false;
+
+  constructor(config: Config) {
     super();
     this.config = config;
-    this.socket = null;
-    this.connected = false;
-    this._reconnectTimer = null;
-    this._running = false;
   }
 
-  start() {
-    this._running = true;
+  start(): void {
+    this.running = true;
     if (this.config.get('discordIntegration') !== false) {
-      this._tryConnect();
+      this.tryConnect();
     }
   }
 
-  stop() {
-    this._running = false;
-    if (this._reconnectTimer) {
-      clearTimeout(this._reconnectTimer);
-      this._reconnectTimer = null;
+  stop(): void {
+    this.running = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
     if (this.socket) {
       try {
         this.socket.destroy();
-      } catch (_) {}
+      } catch {
+        /* ignore */
+      }
       this.socket = null;
     }
     this.connected = false;
   }
 
-  _tryConnect() {
-    if (!this._running || this.connected) return;
+  private tryConnect(): void {
+    if (!this.running || this.connected) return;
 
-    // Próbuj połączyć się z pipe discord-ipc-0 do 9
-    const tryPipe = (index) => {
-      if (index > 9 || !this._running) {
-        this._scheduleReconnect();
+    const tryPipe = (index: number): void => {
+      if (index > 9 || !this.running) {
+        this.scheduleReconnect();
         return;
       }
 
@@ -64,8 +63,8 @@ export default class DiscordIntegration extends EventEmitter {
       sock.once('connect', () => {
         this.socket = sock;
         this.connected = true;
-        this._sendHandshake();
-        this._setupSocket(sock);
+        this.sendHandshake();
+        this.setupSocket(sock);
       });
 
       sock.once('error', () => {
@@ -77,9 +76,8 @@ export default class DiscordIntegration extends EventEmitter {
     tryPipe(0);
   }
 
-  _setupSocket(sock) {
-    sock.on('data', (buf) => {
-      // Odbiór ramek z Discorda
+  private setupSocket(sock: net.Socket): void {
+    sock.on('data', (buf: Buffer) => {
       try {
         if (buf.length >= 8) {
           const op = buf.readInt32LE(0);
@@ -90,14 +88,16 @@ export default class DiscordIntegration extends EventEmitter {
             this.emit('message', { op, data });
           }
         }
-      } catch (_) {}
+      } catch {
+        /* ignore */
+      }
     });
 
     sock.on('close', () => {
       this.connected = false;
       this.socket = null;
-      if (this._running) {
-        this._scheduleReconnect();
+      if (this.running) {
+        this.scheduleReconnect();
       }
     });
 
@@ -110,16 +110,16 @@ export default class DiscordIntegration extends EventEmitter {
     });
   }
 
-  _sendHandshake() {
+  private sendHandshake(): void {
     if (!this.socket || !this.connected) return;
     const payload = JSON.stringify({
       v: 1,
       client_id: DISCORD_CLIENT_ID
     });
-    this._sendPacket(OPCODES.HANDSHAKE, payload);
+    this.sendPacket(OPCODES.HANDSHAKE, payload);
   }
 
-  _sendPacket(opcode, jsonPayload) {
+  private sendPacket(opcode: number, jsonPayload: string): void {
     if (!this.socket || this.socket.destroyed) return;
     try {
       const payloadBuf = Buffer.from(jsonPayload, 'utf8');
@@ -127,22 +127,20 @@ export default class DiscordIntegration extends EventEmitter {
       header.writeInt32LE(opcode, 0);
       header.writeInt32LE(payloadBuf.length, 4);
       this.socket.write(Buffer.concat([header, payloadBuf]));
-    } catch (_) {}
+    } catch {
+      /* ignore */
+    }
   }
 
-  _scheduleReconnect() {
-    if (!this._running || this._reconnectTimer) return;
-    this._reconnectTimer = setTimeout(() => {
-      this._reconnectTimer = null;
-      this._tryConnect();
-    }, 10000); // Ponawiaj co 10s w tle
+  private scheduleReconnect(): void {
+    if (!this.running || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.tryConnect();
+    }, 10000);
   }
 
-  /**
-   * Wywoływane natychmiast po zmianie mikrofonu w systemie.
-   * Wysyła do Discorda polecenie natychmiastowego przeładowania ustawień głosu.
-   */
-  async notifyDeviceChanged(deviceName) {
+  async notifyDeviceChanged(deviceName: string | null): Promise<void> {
     if (!this.config.get('discordIntegration')) return;
 
     if (this.connected && this.socket) {
@@ -157,10 +155,10 @@ export default class DiscordIntegration extends EventEmitter {
           },
           nonce
         });
-        this._sendPacket(OPCODES.FRAME, payload);
+        this.sendPacket(OPCODES.FRAME, payload);
         console.log(`[discord] Wysłano polecenie synchronizacji audio (${deviceName || 'default'})`);
       } catch (err) {
-        console.warn('[discord] Błąd wysyłania komendy:', err.message);
+        console.warn('[discord] Błąd wysyłania komendy:', (err as Error).message);
       }
     }
   }

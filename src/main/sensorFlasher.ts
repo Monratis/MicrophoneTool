@@ -1,42 +1,63 @@
-'use strict';
-
 import { SerialPort } from 'serialport';
 import { ESPLoader } from 'esptool-js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import https from 'node:https';
+import type RadarListener from './radarListener';
+import type Config from './config';
 
-const DEFAULT_GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 const GITHUB_REPO = 'Monratis/MicrophoneTool';
+
+interface GitHubAsset {
+  name: string;
+  size: number;
+  url: string;
+  browser_download_url: string;
+}
+
+interface FirmwareCheck {
+  available: boolean;
+  version?: string;
+  name?: string;
+  size?: number;
+  downloadUrl?: string;
+  apiUrl?: string;
+  releaseNotes?: string;
+  error?: string;
+  message?: string;
+}
 
 /**
  * Adapter SerialPort (Node.js) do interfejsu Transport (esptool-js).
  */
 class NodeSerialTransport {
-  constructor(port) {
+  private readonly port: SerialPort;
+  baudrate: number;
+  slipReaderEnabled = false;
+  dtrState = false;
+  rtsState = false;
+  private buffer = new Uint8Array(0);
+  private readResolvers: Array<{ minBytes: number; resolve: (data: Uint8Array) => void }> = [];
+
+  constructor(port: SerialPort) {
     this.port = port;
     this.baudrate = port.baudRate || 115200;
-    this.slipReaderEnabled = false;
-    this._DTR_state = false;
-    this._RTS_state = false;
-    this.buffer = new Uint8Array(0);
-    this._readResolvers = [];
 
-    this.port.on('data', (chunk) => {
+    port.on('data', (chunk: Buffer) => {
       const u8 = new Uint8Array(chunk);
       const combined = new Uint8Array(this.buffer.length + u8.length);
       combined.set(this.buffer);
       combined.set(u8, this.buffer.length);
       this.buffer = combined;
 
-      while (this._readResolvers.length > 0 && this.buffer.length > 0) {
-        const { resolve, minBytes } = this._readResolvers[0];
-        if (this.buffer.length >= minBytes) {
-          this._readResolvers.shift();
-          const out = this.buffer.slice(0, minBytes);
-          this.buffer = this.buffer.slice(minBytes);
-          resolve(out);
+      while (this.readResolvers.length > 0 && this.buffer.length > 0) {
+        const entry = this.readResolvers[0];
+        if (this.buffer.length >= entry.minBytes) {
+          this.readResolvers.shift();
+          const out = this.buffer.slice(0, entry.minBytes);
+          this.buffer = this.buffer.slice(entry.minBytes);
+          entry.resolve(out);
         } else {
           break;
         }
@@ -44,15 +65,15 @@ class NodeSerialTransport {
     });
   }
 
-  getInfo() {
+  getInfo(): string {
     return `NodeSerialPort ${this.port.path}`;
   }
 
-  getPid() {
-    return 0x1001; // XIAO ESP32-C6 USB-JTAG
+  getPid(): number {
+    return 0x1001;
   }
 
-  async read(timeout = 3000, minBytes = 1) {
+  async read(timeout = 3000, minBytes = 1): Promise<Uint8Array> {
     if (this.buffer.length >= minBytes) {
       const out = this.buffer.slice(0, minBytes);
       this.buffer = this.buffer.slice(minBytes);
@@ -61,8 +82,8 @@ class NodeSerialTransport {
 
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
-        const idx = this._readResolvers.findIndex((r) => r.resolve === resolve);
-        if (idx >= 0) this._readResolvers.splice(idx, 1);
+        const idx = this.readResolvers.findIndex((r) => r.resolve === wrappedResolve);
+        if (idx >= 0) this.readResolvers.splice(idx, 1);
         if (this.buffer.length > 0) {
           const out = this.buffer;
           this.buffer = new Uint8Array(0);
@@ -72,19 +93,18 @@ class NodeSerialTransport {
         }
       }, timeout);
 
-      this._readResolvers.push({
-        minBytes,
-        resolve: (data) => {
-          clearTimeout(timer);
-          resolve(data);
-        }
-      });
+      const wrappedResolve = (data: Uint8Array): void => {
+        clearTimeout(timer);
+        resolve(data);
+      };
+
+      this.readResolvers.push({ minBytes, resolve: wrappedResolve });
     });
   }
 
-  async write(data) {
+  async write(data: Buffer | Uint8Array | number[]): Promise<void> {
     return new Promise((resolve, reject) => {
-      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data.buffer || data);
+      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as unknown as Uint8Array);
       this.port.write(buf, (err) => {
         if (err) reject(err);
         else this.port.drain(() => resolve());
@@ -92,22 +112,22 @@ class NodeSerialTransport {
     });
   }
 
-  async setSignals(signals) {
+  async setSignals(signals: { dataTerminalReady?: boolean; requestToSend?: boolean }): Promise<void> {
     return new Promise((resolve) => {
-      const options = {};
+      const options: Record<string, boolean> = {};
       if (typeof signals.dataTerminalReady !== 'undefined') {
         options.dtr = signals.dataTerminalReady;
-        this._DTR_state = signals.dataTerminalReady;
+        this.dtrState = signals.dataTerminalReady;
       }
       if (typeof signals.requestToSend !== 'undefined') {
         options.rts = signals.requestToSend;
-        this._RTS_state = signals.requestToSend;
+        this.rtsState = signals.requestToSend;
       }
       this.port.set(options, () => resolve());
     });
   }
 
-  async setBaudrate(baud) {
+  async setBaudrate(baud: number): Promise<void> {
     return new Promise((resolve, reject) => {
       this.baudrate = baud;
       this.port.update({ baudRate: baud }, (err) => {
@@ -117,7 +137,7 @@ class NodeSerialTransport {
     });
   }
 
-  async disconnect() {
+  async disconnect(): Promise<void> {
     return new Promise((resolve) => {
       if (this.port && this.port.isOpen) {
         this.port.close(() => resolve());
@@ -129,31 +149,41 @@ class NodeSerialTransport {
 }
 
 export default class SensorFlasher {
-  constructor({ config, radar, onEvent }) {
+  private readonly config: Config;
+  private readonly radar: RadarListener | null;
+  private readonly onEvent: ((ev: { type: string; [key: string]: unknown }) => void) | null;
+
+  isFlashing = false;
+  cancelRequested = false;
+
+  constructor({
+    config,
+    radar,
+    onEvent
+  }: {
+    config: Config;
+    radar: RadarListener;
+    onEvent: (ev: { type: string; [key: string]: unknown }) => void;
+  }) {
     this.config = config;
-    this.radar = radar;
-    this.onEvent = onEvent;
-    this.isFlashing = false;
-    this.cancelRequested = false;
+    this.radar = radar ?? null;
+    this.onEvent = onEvent ?? null;
   }
 
-  emit(type, payload = {}) {
+  emit(type: string, payload: Record<string, unknown> = {}): void {
     if (this.onEvent) {
       this.onEvent({ type: `sensor:${type}`, ...payload });
     }
   }
 
-  /**
-   * Sprawdza dostępność skompilowanego firmware'u (.bin) na GitHubie.
-   */
-  async checkGitHubFirmware() {
+  async checkGitHubFirmware(): Promise<FirmwareCheck> {
     const repo = (this.config && this.config.get('githubRepo')) || GITHUB_REPO;
-    const token = (this.config && this.config.get('githubToken')) || DEFAULT_GITHUB_TOKEN;
+    const token = this.config.get('githubToken');
     const url = `https://api.github.com/repos/${repo}/releases/latest`;
 
-    const headers = {
+    const headers: Record<string, string> = {
       'User-Agent': 'AutoAudioSwitch-SensorFlasher',
-      'Accept': 'application/vnd.github.v3+json'
+      Accept: 'application/vnd.github.v3+json'
     };
     if (token && token.trim()) {
       headers['Authorization'] = `Bearer ${token.trim()}`;
@@ -163,10 +193,9 @@ export default class SensorFlasher {
       const res = await fetch(url, { headers, signal: AbortSignal.timeout(10000) });
       if (!res.ok) return { available: false, error: `HTTP ${res.status}` };
 
-      const release = await res.json();
+      const release = (await res.json()) as { tag_name?: string; body?: string; assets?: GitHubAsset[] };
       const assets = release.assets || [];
 
-      // Szukaj pliku .bin firmware'u
       const binAsset = assets.find((a) => a.name.toLowerCase().endsWith('.bin'));
 
       if (!binAsset) {
@@ -187,15 +216,12 @@ export default class SensorFlasher {
         releaseNotes: release.body || ''
       };
     } catch (err) {
-      return { available: false, error: err.message };
+      return { available: false, error: (err as Error).message };
     }
   }
 
-  /**
-   * Pobiera plik firmware .bin do folderu tymczasowego.
-   */
-  async downloadFirmware(asset) {
-    const token = (this.config && this.config.get('githubToken')) || DEFAULT_GITHUB_TOKEN;
+  async downloadFirmware(asset: { name: string; size?: number; apiUrl?: string; downloadUrl?: string }): Promise<string> {
+    const token = this.config.get('githubToken');
     const tempDir = path.join(os.tmpdir(), 'AutoAudioSwitch-Firmware');
     fs.mkdirSync(tempDir, { recursive: true });
 
@@ -203,72 +229,77 @@ export default class SensorFlasher {
     const fileStream = fs.createWriteStream(targetFile);
 
     const isPrivate = Boolean(token && token.trim());
-    const initialUrl = isPrivate && asset.apiUrl ? asset.apiUrl : asset.downloadUrl;
+    const initialUrl =
+      isPrivate && asset.apiUrl ? asset.apiUrl : (asset.downloadUrl as string);
 
     return new Promise((resolve, reject) => {
-      const fetchWithRedirects = (curUrl, isRedirect = false) => {
-        const headers = { 'User-Agent': 'AutoAudioSwitch-SensorFlasher' };
+      const fetchWithRedirects = (curUrl: string, isRedirect = false): void => {
+        const headers: Record<string, string> = { 'User-Agent': 'AutoAudioSwitch-SensorFlasher' };
         if (isPrivate && !isRedirect) {
-          headers['Authorization'] = `Bearer ${token.trim()}`;
+          headers['Authorization'] = `Bearer ${(token || '').trim()}`;
           headers['Accept'] = 'application/octet-stream';
         }
 
-        https.get(curUrl, { headers }, (res) => {
-          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            fetchWithRedirects(res.headers.location, true);
-            return;
-          }
-          if (res.statusCode !== 200) {
-            fileStream.close();
-            reject(new Error(`Błąd pobierania firmware HTTP ${res.statusCode}`));
-            return;
-          }
-
-          let downloaded = 0;
-          const total = asset.size || 0;
-
-          res.on('data', (c) => {
-            downloaded += c.length;
-            if (total > 0) {
-              this.emit('flash-progress', {
-                stage: 'downloading',
-                percent: Math.round((downloaded / total) * 100),
-                message: `Pobieranie firmware: ${Math.round((downloaded / 1024))} kB / ${Math.round(total / 1024)} kB`
-              });
+        https
+          .get(curUrl, { headers }, (res) => {
+            if (
+              res.statusCode &&
+              res.statusCode >= 300 &&
+              res.statusCode < 400 &&
+              res.headers.location
+            ) {
+              fetchWithRedirects(res.headers.location, true);
+              return;
             }
-          });
+            if (res.statusCode !== 200) {
+              fileStream.close();
+              reject(new Error(`Błąd pobierania firmware HTTP ${res.statusCode}`));
+              return;
+            }
 
-          res.pipe(fileStream);
-          fileStream.on('finish', () => {
+            let downloaded = 0;
+            const total = asset.size || 0;
+
+            res.on('data', (c: Buffer) => {
+              downloaded += c.length;
+              if (total > 0) {
+                this.emit('flash-progress', {
+                  stage: 'downloading',
+                  percent: Math.round((downloaded / total) * 100),
+                  message: `Pobieranie firmware: ${Math.round(downloaded / 1024)} kB / ${Math.round(total / 1024)} kB`
+                });
+              }
+            });
+
+            res.pipe(fileStream);
+            fileStream.on('finish', () => {
+              fileStream.close();
+              resolve(targetFile);
+            });
+          })
+          .on('error', (err: Error) => {
             fileStream.close();
-            resolve(targetFile);
+            reject(err);
           });
-        }).on('error', (err) => {
-          fileStream.close();
-          reject(err);
-        });
       };
 
       fetchWithRedirects(initialUrl);
     });
   }
 
-  /**
-   * Wgrywa firmware .bin bezpośrednio do XIAO ESP32-C6 po kablu USB (Serial COM).
-   */
-  async flashFirmware(binPathOrBuffer, customPort = null) {
+  async flashFirmware(binPathOrBuffer: string | Buffer, customPort: string | null = null): Promise<{ ok: boolean; port: string }> {
     if (this.isFlashing) throw new Error('Wgrywanie firmware jest już w toku');
     this.isFlashing = true;
     this.cancelRequested = false;
 
-    let targetPort = customPort || (this.radar && this.radar.portName);
-    if (!targetPort || targetPort === 'auto') {
+    let targetPort: string | null = customPort || null;
+    if (!targetPort) {
       const list = await SerialPort.list();
       const espPort = list.find((p) => {
         const vid = (p.vendorId || '').toLowerCase();
         const pid = (p.productId || '').toLowerCase();
         const mfg = (p.manufacturer || '').toLowerCase();
-        return vid === '303a' || vid === '2886' || mfg.includes('espressif') || mfg.includes('seeed');
+        return vid === '303a' || vid === '2886' || pid === '1001' || mfg.includes('espressif') || mfg.includes('seeed');
       });
       if (espPort) targetPort = espPort.path;
       else if (list.length > 0) targetPort = list[0].path;
@@ -283,10 +314,10 @@ export default class SensorFlasher {
     this.emit('flash-progress', { stage: 'connecting', percent: 5, message: `Łączenie z ${targetPort}…` });
     if (this.radar) {
       await this.radar.stop();
-      await new Promise((r) => setTimeout(r, 600));
+      await new Promise<void>((r) => setTimeout(r, 600));
     }
 
-    let serialPort = null;
+    let serialPort: SerialPort | null = null;
 
     try {
       // 2. Otwarcie portu na 115200 baud
@@ -296,38 +327,37 @@ export default class SensorFlasher {
         autoOpen: false
       });
 
-      await new Promise((resolve, reject) => {
-        serialPort.open((err) => (err ? reject(err) : resolve()));
+      await new Promise<void>((resolve, reject) => {
+        serialPort!.open((err) => (err ? reject(err) : resolve()));
       });
 
       const transport = new NodeSerialTransport(serialPort);
 
       // 3. Inicjalizacja ESPLoader
       const terminal = {
-        clean: () => {},
-        writeLine: (data) => console.log(`[esptool] ${data}`),
-        write: (data) => process.stdout.write(String(data))
+        clean: (): void => {},
+        writeLine: (data: string): void => {
+          console.log(`[esptool] ${data}`);
+        },
+        write: (data: string | Uint8Array): void => {
+          process.stdout.write(String(data));
+        }
       };
 
       const loader = new ESPLoader({
-        transport,
+        transport: transport as never,
         baudrate: 115200,
-        terminal,
+        terminal: terminal as never,
         romBaudrate: 115200,
         enableFlashSizes: true
-      });
+      } as never);
 
       this.emit('flash-progress', { stage: 'syncing', percent: 15, message: 'Synchronizacja z bootloaderem ESP32-C6…' });
       const chipName = await loader.main();
       console.log(`[esptool] Wykryto układ: ${chipName}`);
 
       // 4. Załadowanie zawartości pliku binarnego
-      let binBuffer;
-      if (Buffer.isBuffer(binPathOrBuffer)) {
-        binBuffer = binPathOrBuffer;
-      } else {
-        binBuffer = fs.readFileSync(binPathOrBuffer);
-      }
+      const binBuffer = typeof binPathOrBuffer === 'string' ? fs.readFileSync(binPathOrBuffer) : binPathOrBuffer;
 
       // 5. Konwersja na ciąg binarny dla esptool-js
       let binString = '';
@@ -338,12 +368,12 @@ export default class SensorFlasher {
       this.emit('flash-progress', { stage: 'erasing', percent: 25, message: 'Przygotowywanie pamięci flash…' });
 
       // 6. Zapisywanie pamięci Flash z raportowaniem postępu na żywo
-      const flashOptions = {
+      await loader.writeFlash({
         fileArray: [{ data: binString, address: 0x0 }],
         flashSize: 'keep',
         eraseAll: false,
         compress: true,
-        reportProgress: (fileIndex, written, total) => {
+        reportProgress: (_fileIndex: number, written: number, total: number) => {
           const pct = Math.round(25 + (written / total) * 70);
           this.emit('flash-progress', {
             stage: 'flashing',
@@ -351,14 +381,12 @@ export default class SensorFlasher {
             message: `Zapisywanie pamięci Flash: ${Math.round((written / total) * 100)}% (${Math.round(written / 1024)} kB)`
           });
         },
-        calculateMD5Hash: (image) => ''
-      };
-
-      await loader.writeFlash(flashOptions);
+        calculateMD5Hash: () => ''
+      } as never);
 
       // 7. Restart ESP32-C6
       this.emit('flash-progress', { stage: 'rebooting', percent: 98, message: 'Restartowanie układu ESP32-C6…' });
-      await loader.hardReset();
+      await (loader as unknown as { hardReset(): Promise<void> }).hardReset();
       await transport.disconnect();
 
       this.emit('flash-progress', { stage: 'done', percent: 100, message: 'Firmware wgrany pomyślnie! ✓' });
@@ -367,16 +395,15 @@ export default class SensorFlasher {
       return { ok: true, port: targetPort };
     } catch (err) {
       console.error('[esptool] Błąd podczas wgrywania firmware:', err);
-      this.emit('flash-progress', { stage: 'error', percent: 0, message: `Błąd wgrywania: ${err.message}` });
+      this.emit('flash-progress', { stage: 'error', percent: 0, message: `Błąd wgrywania: ${(err as Error).message}` });
       throw err;
     } finally {
       this.isFlashing = false;
       // Wznów nasłuch radaru
-      if (this.radar) {
-        setTimeout(async () => {
-          try {
-            await this.radar.start();
-          } catch (_) {}
+      const radar = this.radar;
+      if (radar) {
+        setTimeout(() => {
+          void radar.start().catch(() => {});
         }, 1200);
       }
     }

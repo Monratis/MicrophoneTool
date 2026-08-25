@@ -1,18 +1,17 @@
-'use strict';
+import { contextBridge, ipcRenderer } from 'electron';
+import type { IpcRendererEvent } from 'electron';
 
-const { contextBridge, ipcRenderer } = require('electron');
-
-contextBridge.exposeInMainWorld('api', {
+const api = {
   getState: () => ipcRenderer.invoke('state:get'),
   getPorts: () => ipcRenderer.invoke('ports:list'),
-  setMode: (mode) => ipcRenderer.invoke('state:mode', mode),
-  setPort: (port) => ipcRenderer.invoke('ports:set', port),
-  updateConfig: (patch) => ipcRenderer.invoke('config:update', patch),
+  setMode: (mode: string) => ipcRenderer.invoke('state:mode', mode),
+  setPort: (port: string) => ipcRenderer.invoke('ports:set', port),
+  updateConfig: (patch: Record<string, unknown>) => ipcRenderer.invoke('config:update', patch),
   detectDevices: () => ipcRenderer.invoke('devices:detect'),
   listDevices: () => ipcRenderer.invoke('devices:list'),
-  toggleMute: (target) => ipcRenderer.invoke('audio:toggleMute', target),
-  setMute: (target, mute) => ipcRenderer.invoke('audio:setMute', { target, mute }),
-  testDevice: (name) => ipcRenderer.invoke('audio:testDevice', name),
+  toggleMute: (target?: string) => ipcRenderer.invoke('audio:toggleMute', target),
+  setMute: (target: string, mute: boolean) => ipcRenderer.invoke('audio:setMute', { target, mute }),
+  testDevice: (name: string) => ipcRenderer.invoke('audio:testDevice', name),
   sleepDisplay: () => ipcRenderer.invoke('display:sleep'),
   wakeDisplay: () => ipcRenderer.invoke('display:wake'),
   openConfigDir: () => ipcRenderer.invoke('config:openDir'),
@@ -42,9 +41,13 @@ contextBridge.exposeInMainWorld('api', {
   getLogs: () => ipcRenderer.invoke('logs:get'),
   clearLogs: () => ipcRenderer.invoke('logs:clear'),
 
-  onEvent: (cb) => {
-    const listener = (_e, payload) => cb(payload);
+  onEvent: (cb: (e: unknown) => void) => {
+    const listener = (_e: IpcRendererEvent, payload: unknown): void => cb(payload);
     ipcRenderer.on('push:event', listener);
-    return () => ipcRenderer.removeListener('push:event', listener);
+    return (): void => {
+      ipcRenderer.removeListener('push:event', listener);
+    };
   }
-});
+};
+
+contextBridge.exposeInMainWorld('api', api);
