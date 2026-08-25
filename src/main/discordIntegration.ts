@@ -21,6 +21,8 @@ export default class DiscordIntegration extends EventEmitter {
   private ready = false;
   private authenticated = false;
   private authFlowRunning = false;
+  private authFailures = 0;
+  private lastAuthAttemptAt = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private running = false;
   private handshakeFailures = 0;
@@ -214,7 +216,11 @@ export default class DiscordIntegration extends EventEmitter {
    */
   private async authorizeFlow(): Promise<void> {
     if (this.authFlowRunning || this.authenticated || !this.ready) return;
+    // Odmowa autoryzacji nie może pchać popupa co 10 s: po 2 odmowach
+    // kolejne próby najwcześniej po 5 minutach.
+    if (this.authFailures >= 2 && Date.now() - this.lastAuthAttemptAt < 5 * 60 * 1000) return;
     this.authFlowRunning = true;
+    this.lastAuthAttemptAt = Date.now();
     try {
       const secret = (this.config.get('discordClientSecret') || '').trim();
       if (!secret) {
@@ -229,9 +235,11 @@ export default class DiscordIntegration extends EventEmitter {
       });
       const code = (authResp.data as { code?: string } | undefined)?.code;
       if (!authResp.ok || !code) {
+        this.authFailures++;
         console.warn('[discord] AUTHORIZE odrzucone:', JSON.stringify(authResp.data ?? null).slice(0, 300));
         return;
       }
+      this.authFailures = 0;
       const token = await this.exchangeToken(code);
       if (!token) return;
       const auth = await this.rpcCommand('AUTHENTICATE', { access_token: token });

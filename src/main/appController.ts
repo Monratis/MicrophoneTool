@@ -245,9 +245,23 @@ export default class AppController extends EventEmitter {
     }
   }
 
+  /**
+   * Po ręcznym teście urządzenia ("▶ Przetestuj") aplikuj jego profil:
+   * głośność + ustawienia głosowe Discorda — jak przy prawdziwym przełączeniu.
+   */
+  applyProfileForDevice(deviceName: string): void {
+    if (!deviceName) return;
+    const state: DeviceState =
+      deviceName === this.config.get('micDeskName') ? 'desk' : 'headset';
+    const volCfg = state === 'desk' ? this.config.get('micDeskVolume') : this.config.get('micHeadsetVolume');
+    if (typeof volCfg === 'number' && volCfg >= 0) {
+      void this.audio.setVolume(deviceName, volCfg);
+    }
+    this.applyDiscordGate(state);
+  }
+
   /** Dopasowuje profil głosowy Discorda do specyfiki aktywnego mikrofonu. */
-  private applyDiscordGate(state: DeviceState): void {
-    if (!this.discord || !this.config.get('discordGateFollowMic')) return;
+  private applyDiscordGate(state: DeviceState): void {    if (!this.discord || !this.config.get('discordGateFollowMic')) return;
     const rawGate = state === 'desk' ? this.config.get('micDeskGateDb') : this.config.get('micHeadsetGateDb');
     const krispRaw = state === 'desk' ? this.config.get('micDeskKrisp') : this.config.get('micHeadsetKrisp');
     const agcRaw = state === 'desk' ? this.config.get('micDeskAgc') : this.config.get('micHeadsetAgc');

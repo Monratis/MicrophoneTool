@@ -87,6 +87,8 @@ export function registerIpc(ctx: AppContext): void {
   });
   ipcMain.handle('audio:testDevice', async (_e, name: string) => {
     await ctx.audio.setDefaultRecordingDevice(name);
+    // Test = mini-przełączenie: aplikuj też profil (głośność + Discord)
+    ctx.controller.applyProfileForDevice(name);
     ctx.refreshSnapshot();
     return ctx.buildSnapshot();
   });
