@@ -175,14 +175,13 @@ export default class DiscordIntegration extends EventEmitter {
     }
     if (op !== 1 || !payload || typeof payload !== 'object') return;
 
-    // READY = handshake zaakceptowany
+    // READY = handshake zaakceptowany.
+    // Autoryzacja NIE odpala się automatycznie — robi to użytkownik z poziomu
+    // tray (Autoryzuj Discord), żeby uniknąć 4002/backoff przy wisiącym popupie.
     if (payload.evt === 'READY') {
       this.handshakeFailures = 0;
       this.ready = true;
       console.log('[discord] Sesja RPC gotowa (READY)');
-      if (!this.authenticated) {
-        void this.authorizeFlow();
-      }
       return;
     }
 
@@ -214,6 +213,13 @@ export default class DiscordIntegration extends EventEmitter {
     }
   }
 
+  /** Ręczne uruchomienie autoryzacji (tray) — resetuje backoff i odpala flow. */
+  authorizeManually(): void {
+    this.authFailures = 0;
+    this.lastAuthAttemptAt = 0;
+    void this.authorizeFlow();
+  }
+
   /**
    * Pełny OAuth flow dla komend głosowych (4006 bez tego):
    * AUTHORIZE (popup zgody w kliencie) → code → wymiana na token
@@ -234,14 +240,50 @@ export default class DiscordIntegration extends EventEmitter {
         );
         return;
       }
-      const authResp = await this.rpcCommand('AUTHORIZE', {
-        client_id: this.config.get('discordClientId'),
-        scopes: ['rpc', 'rpc.voice.read', 'rpc.voice.write']
-      });
+      // Najpierw pełne scopes głosowe; przy odrzuceniu fallback do minimalnych (identify+rpc).
+      // Zestaw zgodny z działającym pluginem Deckboard (github.com/aislandener/discord-deckboard).
+      // Uwaga: scope 'rpc' NIE istnieje w liście scopes na Developer Portalu — to scope
+      // lokalny IPC; dodanie go w kodzie jest poprawne i wymagane.
+      const scopeSets: string[][] = [
+        ['identify', 'rpc', 'rpc.notifications.read', 'rpc.voice.read', 'rpc.voice.write', 'rpc.activities.write'],
+        ['identify', 'rpc']
+      ];
+      let authResp: { ok: boolean; data?: unknown } = { ok: false, data: undefined };
+      for (const scopes of scopeSets) {
+        // AUTHORIZE otwiera MODAL zgody w kliencie Discord — użytkownik klika ręką,
+        // więc timeout musi być długi (rpcCommand domyślnie ma 3 s — ZA KRÓTKO).
+        authResp = await this.rpcCommand(
+          'AUTHORIZE',
+          { client_id: this.config.get('discordClientId'), scopes },
+          120000
+        );
+        const c = (authResp.data as { code?: string } | undefined)?.code;
+        if (authResp.ok && c) break;
+        // 4002 "Already authing" = w kliencie trwa już inny flow autoryzacji
+        // (zawieszony popup albo inny program RPC jak Deckboard). Czekamy i ponawiamy
+        // tę samą próbę — nowy popup pojawi się po zwolnieniu slotu.
+        const errCode = (authResp.data as { code?: number } | undefined)?.code;
+        if (errCode === 4002) {
+          console.warn(
+            '[discord] 4002 Already authing — w Discordzie trwa inna autoryzacja. ' +
+              'Zamknij zawieszony popup zgody lub wyłącz inny program RPC (np. Deckboard), ' +
+              'potem kliknij ponownie „Autoryzuj Discord".'
+          );
+          break;
+        }
+        console.warn(
+          `[discord] AUTHORIZE odrzucone (scopes: ${scopes.join(',')}):`,
+          JSON.stringify(authResp.data ?? null).slice(0, 300)
+        );
+      }
       const code = (authResp.data as { code?: string } | undefined)?.code;
       if (!authResp.ok || !code) {
         this.authFailures++;
-        console.warn('[discord] AUTHORIZE odrzucone:', JSON.stringify(authResp.data ?? null).slice(0, 300));
+        console.error(
+          '[discord] AUTHORIZE bezskuteczny. Sprawdź, czy w Developer Portal → OAuth2 → Redirects ' +
+            'jest zarejestrowany adres z discordRedirectUri oraz czy popup zgody w kliencie Discord ' +
+            'został zatwierdzony. Szczegóły w logach AUTHORIZE raw powyżej.'
+        );
         return;
       }
       this.authFailures = 0;
@@ -255,6 +297,8 @@ export default class DiscordIntegration extends EventEmitter {
       } else {
         console.warn('[discord] AUTHENTICATE odrzucone:', JSON.stringify(auth.data ?? null).slice(0, 300));
       }
+    } catch (e) {
+      console.warn('[discord] Błąd flow autoryzacji:', (e as Error).message);
     } finally {
       this.authFlowRunning = false;
     }
@@ -268,7 +312,7 @@ export default class DiscordIntegration extends EventEmitter {
         client_secret: (this.config.get('discordClientSecret') || '').trim(),
         grant_type: 'authorization_code',
         code,
-        redirect_uri: this.config.get('discordRedirectUri') || 'http://localhost'
+        redirect_uri: this.config.get('discordRedirectUri') || 'https://discord.com'
       }).toString();
       const req = https.request(
         {
@@ -360,7 +404,7 @@ export default class DiscordIntegration extends EventEmitter {
   }
 
   /** Wspólny wysyłacz komendy RPC z weryfikacją odpowiedzi po nonce. */
-  private rpcCommand(cmd: string, args: Record<string, unknown>): Promise<{ ok: boolean; data?: unknown }> {
+  private rpcCommand(cmd: string, args: Record<string, unknown>, timeoutMs = 3000): Promise<{ ok: boolean; data?: unknown }> {
     if (!this.connected || !this.ready || !this.socket || this.socket.destroyed) {
       return Promise.resolve({ ok: false });
     }
@@ -370,7 +414,7 @@ export default class DiscordIntegration extends EventEmitter {
       const timer = setTimeout(() => {
         this.pending.delete(nonce);
         resolve({ ok: false });
-      }, 3000);
+      }, timeoutMs);
       this.pending.set(nonce, (v) => {
         clearTimeout(timer);
         resolve(v);
@@ -416,5 +460,39 @@ export default class DiscordIntegration extends EventEmitter {
 
   async setVoiceGate(thresholdDb: number): Promise<boolean> {
     return this.applyMicSettings({ gateDb: thresholdDb });
+  }
+
+  /**
+   * Głośność wejścia przez Discorda (pipeline WebRTC). Działa nawet dla urządzeń
+   * BT, które nie wystawiają IAudioEndpointVolume w OS (E_NOINTERFACE).
+   * Zakres Discorda: 0-200 (100 = 100%). Fallback dla daemona audio.
+   */
+  async applyInputVolume(percent: number): Promise<boolean> {
+    if (!this.config.get('discordIntegration') || !this.authenticated) return false;
+    const vol = Math.max(0, Math.min(200, Math.round(percent)));
+    const reply = await this.rpcCommand('SET_VOICE_SETTINGS', {
+      input: { volume: vol }
+    });
+    console.log(
+      `[discord] SET_VOICE_SETTINGS input.volume=${vol} -> ok=${reply.ok}`
+    );
+    return reply.ok;
+  }
+
+  /** Mute wejścia przez Discorda — fallback dla urządzeń BT bez IAudioEndpointVolume. */
+  async setInputMute(muted: boolean): Promise<boolean> {
+    if (!this.config.get('discordIntegration') || !this.authenticated) return false;
+    const reply = await this.rpcCommand('SET_VOICE_SETTINGS', { mute: muted });
+    console.log(`[discord] SET_VOICE_SETTINGS mute=${muted} -> ok=${reply.ok}`);
+    return reply.ok;
+  }
+
+  /** Aktualny stan mute wejścia z Discorda (do toggle przy urządzeniach BT). */
+  async getInputMute(): Promise<boolean | null> {
+    if (!this.config.get('discordIntegration') || !this.authenticated) return null;
+    const reply = await this.rpcCommand('GET_VOICE_SETTINGS', {});
+    if (!reply.ok) return null;
+    const d = reply.data as { mute?: boolean };
+    return typeof d.mute === 'boolean' ? d.mute : null;
   }
 }

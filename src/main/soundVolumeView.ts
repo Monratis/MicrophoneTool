@@ -73,6 +73,13 @@ function parseCsv(text: string): string[][] {
   return rows;
 }
 
+interface SubunitInfo {
+  cmdName: string;
+  itemId: string;
+  volume?: number;
+  isMuted?: boolean;
+}
+
 /**
  * Moduł kontrolera audio Windows (Zero-Latency Resident Daemon & Direct COM).
  */
@@ -84,6 +91,8 @@ export default class SoundVolumeView {
   private cachedTool: ToolInfo | null = null;
   private devicesCache: CachedDevices | null = null;
   private readonly nameToIdMap = new Map<string, string>();
+  private readonly subunitMap = new Map<string, SubunitInfo>();
+  private subunitMapTimestamp = 0;
   private currentDefaultDevice: string | null = null;
 
   private daemonProc: ReturnType<typeof spawn> | null = null;
@@ -209,7 +218,145 @@ export default class SoundVolumeView {
     return out;
   }
 
-  // ---------- Zero-Latency Resident Daemon Manager ----------
+  async ensureSvv(): Promise<string | null> {
+    const svvCandidates = [this.svvExePath, path.join(this.toolsDir, 'SoundVolumeView.exe')];
+    for (const c of svvCandidates) {
+      if (fs.existsSync(c)) return c;
+    }
+    if (this.config && this.config.get('autoDownloadTools')) {
+      try {
+        const out = await this.downloadSvv();
+        if (fs.existsSync(out)) return out;
+      } catch (err) {
+        console.error('[audioBackend] SVV download failed:', (err as Error).message);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Szybka synchronizacja drzewa podwęzłów Kernel Streaming (Subunits) z SoundVolumeView.
+   * Umożliwia sprzętową regulację głośności/wyciszenia urządzeń bez IAudioEndpointVolume.
+   */
+  async refreshSubunits(forceFresh = false): Promise<void> {
+    const now = Date.now();
+    if (!forceFresh && this.subunitMap.size > 0 && now - this.subunitMapTimestamp < 10000) {
+      return;
+    }
+    const svvExe = await this.ensureSvv();
+    if (!svvExe) return;
+
+    const tmp = path.join(os.tmpdir(), `svv-subunits-${now}-${process.pid}.csv`);
+    try {
+      const csvRes = await this.run(svvExe, ['/scomma', tmp]);
+      if (!csvRes.ok || !fs.existsSync(tmp)) return;
+      const raw = fs.readFileSync(tmp);
+      let text: string;
+      try {
+        text = iconv.decode(raw, 'cp1250');
+      } catch {
+        text = raw.toString('latin1');
+      }
+      const rows = parseCsv(text);
+      if (rows.length < 2) return;
+      const h = rows[0];
+      const iType = h.indexOf('Type');
+      const iDirection = h.indexOf('Direction');
+      const iDevName = h.indexOf('Device Name');
+      const iMuted = h.indexOf('Muted');
+      const iVolPct = h.indexOf('Volume Percent');
+      const iItemId = h.indexOf('Item ID');
+      const iCmdName = h.indexOf('Command-Line Friendly ID');
+
+      this.subunitMap.clear();
+      this.subunitMapTimestamp = now;
+
+      for (const r of rows.slice(1)) {
+        const type = (iType >= 0 ? r[iType] : '').trim().toLowerCase();
+        const direction = (iDirection >= 0 ? r[iDirection] : '').trim().toLowerCase();
+        if (type !== 'subunit' || direction !== 'capture') continue;
+
+        const devName = (iDevName >= 0 ? r[iDevName] : '').trim();
+        const cmdName = (iCmdName >= 0 ? r[iCmdName] : '').trim();
+        const itemId = (iItemId >= 0 ? r[iItemId] : '').trim();
+        const mutedStr = (iMuted >= 0 ? r[iMuted] : '').trim().toLowerCase();
+        const volStr = (iVolPct >= 0 ? r[iVolPct] : '').trim().replace('%', '');
+
+        const isMuted = mutedStr === 'yes' ? true : mutedStr === 'no' ? false : undefined;
+        const volNum = parseFloat(volStr);
+        const volume = !isNaN(volNum) ? Math.round(volNum) : undefined;
+
+        const info: SubunitInfo = {
+          cmdName: cmdName || itemId,
+          itemId,
+          volume,
+          isMuted
+        };
+
+        if (devName) {
+          this.subunitMap.set(devName.toLowerCase(), info);
+          this.subunitMap.set(`mikrofon (${devName})`.toLowerCase(), info);
+          this.subunitMap.set(`microphone (${devName})`.toLowerCase(), info);
+        }
+        if (cmdName) {
+          this.subunitMap.set(cmdName.toLowerCase(), info);
+        }
+        if (itemId) {
+          this.subunitMap.set(itemId.toLowerCase(), info);
+        }
+      }
+    } catch (err) {
+      console.error('[audioBackend] refreshSubunits error:', (err as Error).message);
+    } finally {
+      try {
+        if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  private async resolveSubunitTarget(target: string): Promise<string | null> {
+    if (!target) return null;
+    const directTarget = target.trim();
+    const idMapped = this.nameToIdMap.get(directTarget) || directTarget;
+
+    await this.refreshSubunits();
+
+    const lookup = (key: string): string | null => {
+      const k = key.toLowerCase().trim();
+      const direct = this.subunitMap.get(k);
+      if (direct) return direct.cmdName;
+
+      for (const [mapKey, info] of this.subunitMap.entries()) {
+        if (k.includes(mapKey) || mapKey.includes(k)) {
+          return info.cmdName;
+        }
+      }
+      return null;
+    };
+
+    let resolved = lookup(directTarget) || lookup(idMapped);
+    if (resolved) return resolved;
+
+    const stripped = directTarget
+      .replace(/^mikrofon\s*\((.+)\)$/i, '$1')
+      .replace(/^microphone\s*\((.+)\)$/i, '$1')
+      .trim();
+
+    resolved = lookup(stripped);
+    if (resolved) return resolved;
+
+    const candidates = [
+      `${stripped}\\Subunit\\Przechwyt.`,
+      `${stripped}\\Subunit\\Capture`,
+      `${stripped}\\Subunit\\Mikrofon`,
+      `${stripped}\\Subunit\\Microphone`,
+      `${directTarget}\\Subunit\\Przechwyt.`,
+      `${directTarget}\\Subunit\\Capture`
+    ];
+    return candidates[0];
+  }
 
   private async ensureDaemon(): Promise<ReturnType<typeof spawn> | null> {
     if (this.daemonProc && !this.daemonProc.killed) {
@@ -251,7 +398,11 @@ export default class SoundVolumeView {
         errRl.on('line', (line: string) => {
           const trimmed = line.trim();
           if (!trimmed) return;
-          console.warn('[audioBackend] daemon stderr:', trimmed);
+          // E_NOINTERFACE jest oczekiwanym stanem dla urządzeń wirtualnych/chat —
+          // jest płynnie obsługiwany przez fallback KS Subunit bez błędu.
+          if (!trimmed.includes('E_NOINTERFACE')) {
+            console.warn('[audioBackend] daemon stderr:', trimmed);
+          }
           if (trimmed.startsWith('{') && this.daemonQueue.length > 0) {
             const item = this.daemonQueue.shift();
             item?.resolve({ ok: false, stdout: '', stderr: trimmed });
@@ -404,12 +555,6 @@ export default class SoundVolumeView {
   async toggleMute(target = ''): Promise<{ ok: boolean; isMuted?: boolean }> {
     const idOrName = this.nameToIdMap.get(target) || target;
     let res = await this.sendDaemonCommand(`toggle-mute ${idOrName}`.trim());
-    if (!res || !res.ok) {
-      const tool = await this.ensure();
-      if (tool && tool.isNative) {
-        res = await this.run(tool.path, ['toggle-mute', idOrName]);
-      }
-    }
     if (res && res.ok && res.stdout) {
       try {
         const parsed = JSON.parse(res.stdout);
@@ -419,6 +564,36 @@ export default class SoundVolumeView {
         /* ignore */
       }
     }
+
+    // Fallback 1: Kernel Streaming Subunit (SoundVolumeView) dla urządzeń z E_NOINTERFACE (np. BlackShark Chat)
+    const svvExe = await this.ensureSvv();
+    if (svvExe) {
+      const subunitTarget = await this.resolveSubunitTarget(target || idOrName);
+      if (subunitTarget) {
+        const svvRes = await this.run(svvExe, ['/Switch', subunitTarget]);
+        if (svvRes.ok) {
+          this.devicesCache = null;
+          await this.refreshSubunits(true);
+          const entry = this.subunitMap.get((target || idOrName).toLowerCase());
+          console.log(`[audio] Hardware toggle mute via KS Subunit -> ${entry?.isMuted ? 'MUTED' : 'UNMUTED'} (${subunitTarget})`);
+          return { ok: true, isMuted: entry?.isMuted };
+        }
+      }
+    }
+
+    // Fallback 2: Standalone CLI
+    const tool = await this.ensure();
+    if (tool && tool.isNative) {
+      res = await this.run(tool.path, ['toggle-mute', idOrName]);
+      if (res && res.ok && res.stdout) {
+        try {
+          return JSON.parse(res.stdout);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+
     return res || { ok: false };
   }
 
@@ -426,12 +601,39 @@ export default class SoundVolumeView {
     const idOrName = this.nameToIdMap.get(target) || target;
     const cmd = mute ? `mute ${idOrName}` : `unmute ${idOrName}`;
     let res = await this.sendDaemonCommand(cmd.trim());
-    if (!res || !res.ok) {
-      const tool = await this.ensure();
-      if (tool && tool.isNative) {
-        res = await this.run(tool.path, [mute ? 'mute' : 'unmute', idOrName]);
+    if (res && res.ok && res.stdout) {
+      try {
+        const parsed = JSON.parse(res.stdout);
+        this.devicesCache = null;
+        return parsed;
+      } catch {
+        return { ok: true, isMuted: mute };
       }
     }
+
+    // Fallback 1: Kernel Streaming Subunit (SoundVolumeView) dla urządzeń z E_NOINTERFACE
+    const svvExe = await this.ensureSvv();
+    if (svvExe) {
+      const subunitTarget = await this.resolveSubunitTarget(target || idOrName);
+      if (subunitTarget) {
+        const svvRes = await this.run(svvExe, [mute ? '/Mute' : '/Unmute', subunitTarget]);
+        if (svvRes.ok) {
+          this.devicesCache = null;
+          const entry = this.subunitMap.get((target || idOrName).toLowerCase());
+          if (entry) entry.isMuted = mute;
+          console.log(`[audio] Hardware mute via KS Subunit -> ${mute ? 'MUTED' : 'UNMUTED'} (${subunitTarget})`);
+          return { ok: true, isMuted: mute };
+        }
+      }
+    }
+
+    // Fallback 2: Standalone CLI
+    const tool = await this.ensure();
+    if (tool && tool.isNative) {
+      res = await this.run(tool.path, [mute ? 'mute' : 'unmute', idOrName]);
+      if (res && res.ok) return { ok: true, isMuted: mute };
+    }
+
     this.devicesCache = null;
     return res || { ok: false };
   }
@@ -443,24 +645,58 @@ export default class SoundVolumeView {
     // Procent PIERWSZY w formacie daemonowym — nazwy urządzeń potrafią
     // kończyć się cyfrą, co łamało parsowanie "ostatni token".
     let res = await this.sendDaemonCommand(`set-volume ${vol} ${idOrName}`);
-    if (!res || !res.ok) {
-      const tool = await this.ensure();
-      if (tool && tool.isNative) {
-        res = await this.run(tool.path, ['set-volume', idOrName, String(vol)]);
+    if (res && res.ok) {
+      return this.parseVolumeResponse(res);
+    }
+
+    // Fallback 1: Kernel Streaming Subunit (SoundVolumeView) dla urządzeń z E_NOINTERFACE
+    const svvExe = await this.ensureSvv();
+    if (svvExe) {
+      const subunitTarget = await this.resolveSubunitTarget(target || idOrName);
+      if (subunitTarget) {
+        const svvRes = await this.run(svvExe, ['/SetVolume', subunitTarget, String(vol)]);
+        if (svvRes.ok) {
+          this.devicesCache = null;
+          const entry = this.subunitMap.get((target || idOrName).toLowerCase());
+          if (entry) entry.volume = vol;
+          console.log(`[audio] Hardware volume via KS Subunit -> ${vol}% (${subunitTarget})`);
+          return { ok: true, volume: vol };
+        }
       }
     }
+
+    // Fallback 2: Standalone CLI
+    const tool = await this.ensure();
+    if (tool && tool.isNative) {
+      res = await this.run(tool.path, ['set-volume', idOrName, String(vol)]);
+      if (res && res.ok) return this.parseVolumeResponse(res);
+    }
+
     return this.parseVolumeResponse(res);
   }
 
   async getVolume(target = ''): Promise<{ ok: boolean; volume?: number }> {
     const idOrName = this.nameToIdMap.get(target) || target;
     let res = await this.sendDaemonCommand(`get-volume ${idOrName}`.trim());
-    if (!res || !res.ok) {
-      const tool = await this.ensure();
-      if (tool && tool.isNative) {
-        res = await this.run(tool.path, ['get-volume', idOrName]);
-      }
+    if (res && res.ok) {
+      const parsed = this.parseVolumeResponse(res);
+      if (parsed.volume !== undefined) return parsed;
     }
+
+    // Fallback 1: Kernel Streaming Subunit (SoundVolumeView)
+    await this.refreshSubunits();
+    const entry = this.subunitMap.get((target || idOrName).toLowerCase());
+    if (entry && typeof entry.volume === 'number') {
+      return { ok: true, volume: entry.volume };
+    }
+
+    // Fallback 2: Standalone CLI
+    const tool = await this.ensure();
+    if (tool && tool.isNative) {
+      res = await this.run(tool.path, ['get-volume', idOrName]);
+      if (res && res.ok) return this.parseVolumeResponse(res);
+    }
+
     return this.parseVolumeResponse(res);
   }
 
@@ -534,6 +770,7 @@ export default class SoundVolumeView {
       name?: string;
       id?: string;
       isDefault?: boolean | number;
+      isDefaultComm?: boolean | number;
       isMuted?: boolean;
       volume?: number;
     }
@@ -541,7 +778,7 @@ export default class SoundVolumeView {
       try {
         const parsed = JSON.parse(res.stdout.trim()) as NativeDevice[];
         if (Array.isArray(parsed)) {
-          const list = parsed
+          const list: AudioDeviceItem[] = parsed
             .map((d) => {
               if (d.name && d.id) {
                 this.nameToIdMap.set(d.name, d.id);
@@ -552,8 +789,8 @@ export default class SoundVolumeView {
               return {
                 name: d.name!,
                 isDefault: Boolean(d.isDefault),
-                // Daemon zwraca isMuted — renderer inicjalizuje z niego
-                // stan pill "Wyciszony/Aktywny".
+                isDefaultComm: Boolean(d.isDefaultComm),
+                // Daemon zwraca isMuted — renderer inicjalizuje z niego stan pill
                 isMuted: typeof d.isMuted === 'boolean' ? d.isMuted : undefined,
                 // Daemon wysyła volume już jako procent (0-100)
                 volume: typeof d.volume === 'number' ? d.volume : undefined,
@@ -561,6 +798,26 @@ export default class SoundVolumeView {
               };
             })
             .filter((d) => d.name);
+
+          // Wzbogać listę o odczyt z podwęzłów (SVV) dla urządzeń bez IAudioEndpointVolume
+          try {
+            await this.refreshSubunits();
+            for (const item of list) {
+              const entry =
+                this.subunitMap.get(item.name.toLowerCase()) ||
+                (item.id ? this.subunitMap.get(item.id.toLowerCase()) : null);
+              if (entry) {
+                if (typeof entry.volume === 'number' && (item.volume === undefined || item.volume === 100)) {
+                  item.volume = entry.volume;
+                }
+                if (typeof entry.isMuted === 'boolean' && item.isMuted === undefined) {
+                  item.isMuted = entry.isMuted;
+                }
+              }
+            }
+          } catch {
+            /* ignore enrichment failure */
+          }
 
           this.devicesCache = { list, timestamp: now };
           return list;

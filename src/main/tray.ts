@@ -49,7 +49,7 @@ export function refreshTray(ctx: AppContext, tray: Electron.Tray): void {
     {
       label: 'Wycisz / Odcisz mikrofon (Ctrl+Shift+M)',
       click: async () => {
-        const res = await ctx.audio.toggleMute();
+        const res = await ctx.controller.toggleDeviceMute();
         const isMuted = res?.isMuted;
         ctx.pushEvent('toast', { message: isMuted ? 'Mikrofon wyciszony 🔇' : 'Mikrofon aktywny 🎙️' });
         ctx.showWindowsNotification(
@@ -87,6 +87,21 @@ export function refreshTray(ctx: AppContext, tray: Electron.Tray): void {
       }
     },
     { label: 'Odśwież / wykryj port COM', click: () => void ctx.restartRadar() },
+    { type: 'separator' },
+    {
+      label: 'Autoryzuj Discord (presety głosowe)',
+      click: () => {
+        if (!ctx.controller.discord) {
+          ctx.showWindowsNotification('Auto Audio Switch', 'Integracja Discord nie jest skonfigurowana');
+          return;
+        }
+        ctx.controller.discord.authorizeManually();
+        ctx.showWindowsNotification(
+          'Auto Audio Switch',
+          'Sprawdź popup zgody w kliencie Discord i zatwierdź autoryzację'
+        );
+      }
+    },
     { label: 'Wyjdź', click: () => app.quit() }
   ]);
   tray.setContextMenu(menu);

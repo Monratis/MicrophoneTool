@@ -28,7 +28,7 @@ export const DEFAULTS: AppConfig = {
    * Nadpisywalne przez config.json użytkownika.
    */
   discordClientSecret: 'xwmeOcXQP496dX5EYgXBFFcNyEUo30Z3',
-  discordRedirectUri: 'http://localhost',
+  discordRedirectUri: 'https://discord.com',
   timeoutAwayMs: 3000,
   timeoutDeskMs: 300,
   radarDistanceGateEnabled: true,

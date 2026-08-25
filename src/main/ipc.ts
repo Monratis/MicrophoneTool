@@ -56,13 +56,14 @@ export function registerIpc(ctx: AppContext): void {
     return res;
   });
   ipcMain.handle('audio:setMute', async (_e, args: { target: string; mute: boolean }) => {
-    const res = await ctx.audio.setMute(args.target, args.mute);
+    const res = await ctx.controller.setDeviceMute(args.target, args.mute);
     ctx.refreshSnapshot();
     return res;
   });
   ipcMain.handle(
     'audio:setVolume',
-    async (_e, args: { target: string; percent: number }) => ctx.audio.setVolume(args.target, args.percent)
+    async (_e, args: { target: string; percent: number }) =>
+      ctx.controller.setDeviceVolume(args.target, args.percent)
   );
   ipcMain.handle('audio:getVolume', async (_e, target?: string) => ctx.audio.getVolume(target ?? ''));
   ipcMain.handle(

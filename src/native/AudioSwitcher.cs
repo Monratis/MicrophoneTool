@@ -260,18 +260,30 @@ namespace AudioSwitcher
                 {
                     if (args.Length < 3)
                     {
-                        Console.Error.WriteLine("{\"ok\":false,\"error\":\"Usage: set-volume <Name_or_ID> <0-100>\"}");
+                        Console.Error.WriteLine("{\"ok\":false,\"error\":\"Usage: set-volume <Name_or_ID> <0-100> lub <0-100> <Name_or_ID>\"}");
                         return 1;
                     }
+                    // Auto-wykrywanie kolejności: daemon używa <0-100> <Name>,
+                    // CLI/fallback SoundVolumeView <Name> <0-100>. Próbujemy obie,
+                    // żeby obie konwencje działały i nie było "Invalid volume percentage".
                     float pct;
-                    if (!float.TryParse(args[2], out pct))
+                    string target;
+                    if (float.TryParse(args[2], out pct))
+                    {
+                        target = args[1]; // <Name_or_ID> <0-100>
+                    }
+                    else if (float.TryParse(args[1], out pct))
+                    {
+                        target = args[2]; // <0-100> <Name_or_ID>
+                    }
+                    else
                     {
                         Console.Error.WriteLine("{\"ok\":false,\"error\":\"Invalid volume percentage\"}");
                         return 1;
                     }
                     if (pct < 0f) pct = 0f;
                     if (pct > 100f) pct = 100f;
-                    return SetVolume(args[1], pct / 100f);
+                    return SetVolume(target, pct / 100f);
                 }
                 else if (command == "get-volume")
                 {
@@ -665,6 +677,46 @@ namespace AudioSwitcher
             return SetMute(dev.Id, !dev.IsMuted);
         }
 
+        // Endpoint potrafi na chwilę zniknąć przy przełączaniu urządzeń (USB/BT
+        // rozłącza się między enumeracją a Activate) — krótki retry zamiast
+        // natychmiastowego "Failed to access endpoint volume".
+        private static IAudioEndpointVolume ActivateEndpointVolume(string deviceId, out int hr)
+        {
+            hr = unchecked((int)0x80004005); // E_FAIL
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    IMMDeviceEnumerator enumerator = GetEnumerator();
+                    IMMDevice immDev;
+                    if (enumerator.GetDevice(deviceId, out immDev) == 0 && immDev != null)
+                    {
+                        Guid iid = IID_IAudioEndpointVolume;
+                        object epvObj;
+                        hr = immDev.Activate(ref iid, 1, IntPtr.Zero, out epvObj);
+                        if (hr == 0 && epvObj != null)
+                        {
+                            IAudioEndpointVolume epv = epvObj as IAudioEndpointVolume;
+                            if (epv != null) return epv;
+                        }
+                        // E_NOINTERFACE = urządzenie (np. BT "Chat"/telefon) NIE wspiera
+                        // IAudioEndpointVolume w ogóle — retry nic nie da, przerywamy.
+                        if (hr == unchecked((int)0x80004002)) break;
+                    }
+                    else
+                    {
+                        hr = unchecked((int)0x80070490); // HRESULT_FROM_WIN32(ERROR_NOT_FOUND)
+                    }
+                }
+                catch (Exception ex)
+                {
+                    hr = Marshal.GetHRForException(ex);
+                }
+                System.Threading.Thread.Sleep(150);
+            }
+            return null;
+        }
+
         private static int SetMute(string target, bool mute)
         {
             string defCon, defComm;
@@ -679,30 +731,21 @@ namespace AudioSwitcher
                 return 1;
             }
 
+            int hrAct = 0;
             try
             {
-                IMMDeviceEnumerator enumerator = GetEnumerator();
-                IMMDevice immDev;
-                if (enumerator.GetDevice(dev.Id, out immDev) == 0 && immDev != null)
+                IAudioEndpointVolume epv = ActivateEndpointVolume(dev.Id, out hrAct);
+                if (epv != null)
                 {
-                    Guid iid = IID_IAudioEndpointVolume;
-                    object epvObj;
-                    if (immDev.Activate(ref iid, 1, IntPtr.Zero, out epvObj) == 0 && epvObj != null)
+                    Guid ctx = Guid.Empty;
+                    int hrMute = epv.SetMute(mute, ref ctx);
+                    if (hrMute != 0)
                     {
-                        IAudioEndpointVolume epv = epvObj as IAudioEndpointVolume;
-                        if (epv != null)
-                        {
-                            Guid ctx = Guid.Empty;
-                            int hrMute = epv.SetMute(mute, ref ctx);
-                            if (hrMute != 0)
-                            {
-                                Console.Error.WriteLine("{\"ok\":false,\"error\":\"SetMute failed hr=0x" + hrMute.ToString("X8") + "\"}");
-                                return 1;
-                            }
-                            Console.WriteLine("{\"ok\":true,\"isMuted\":" + (mute ? "true" : "false") + ",\"id\":" + EscapeJson(dev.Id) + "}");
-                            return 0;
-                        }
+                        Console.Error.WriteLine("{\"ok\":false,\"error\":\"SetMute failed hr=0x" + hrMute.ToString("X8") + "\"}");
+                        return 1;
                     }
+                    Console.WriteLine("{\"ok\":true,\"isMuted\":" + (mute ? "true" : "false") + ",\"id\":" + EscapeJson(dev.Id) + "}");
+                    return 0;
                 }
             }
             catch (Exception ex)
@@ -711,7 +754,7 @@ namespace AudioSwitcher
                 return 1;
             }
 
-            Console.Error.WriteLine("{\"ok\":false,\"error\":\"Failed to access endpoint volume\"}");
+            Console.Error.WriteLine("{\"ok\":false,\"error\":" + (hrAct == unchecked((int)0x80004002) ? EscapeJson("Device does not support volume/mute control (E_NOINTERFACE)") : EscapeJson("Failed to access endpoint volume hr=0x" + hrAct.ToString("X8"))) + "}");
             return 1;
         }
 
@@ -729,30 +772,21 @@ namespace AudioSwitcher
                 return 1;
             }
 
+            int hrAct = 0;
             try
             {
-                IMMDeviceEnumerator enumerator = GetEnumerator();
-                IMMDevice immDev;
-                if (enumerator.GetDevice(dev.Id, out immDev) == 0 && immDev != null)
+                IAudioEndpointVolume epv = ActivateEndpointVolume(dev.Id, out hrAct);
+                if (epv != null)
                 {
-                    Guid iid = IID_IAudioEndpointVolume;
-                    object epvObj;
-                    if (immDev.Activate(ref iid, 1, IntPtr.Zero, out epvObj) == 0 && epvObj != null)
+                    Guid ctx = Guid.Empty;
+                    int hrVol = epv.SetMasterVolumeLevelScalar(scalar, ref ctx);
+                    if (hrVol != 0)
                     {
-                        IAudioEndpointVolume epv = epvObj as IAudioEndpointVolume;
-                        if (epv != null)
-                        {
-                            Guid ctx = Guid.Empty;
-                            int hrVol = epv.SetMasterVolumeLevelScalar(scalar, ref ctx);
-                            if (hrVol != 0)
-                            {
-                                Console.Error.WriteLine("{\"ok\":false,\"error\":\"SetVolume failed hr=0x" + hrVol.ToString("X8") + "\"}");
-                                return 1;
-                            }
-                            Console.WriteLine("{\"ok\":true,\"volume\":" + Math.Round(scalar * 100f) + ",\"id\":" + EscapeJson(dev.Id) + "}");
-                            return 0;
-                        }
+                        Console.Error.WriteLine("{\"ok\":false,\"error\":\"SetVolume failed hr=0x" + hrVol.ToString("X8") + "\"}");
+                        return 1;
                     }
+                    Console.WriteLine("{\"ok\":true,\"volume\":" + Math.Round(scalar * 100f) + ",\"id\":" + EscapeJson(dev.Id) + "}");
+                    return 0;
                 }
             }
             catch (Exception ex)
@@ -761,7 +795,7 @@ namespace AudioSwitcher
                 return 1;
             }
 
-            Console.Error.WriteLine("{\"ok\":false,\"error\":\"Failed to access endpoint volume\"}");
+            Console.Error.WriteLine("{\"ok\":false,\"error\":" + (hrAct == unchecked((int)0x80004002) ? EscapeJson("Device does not support volume/mute control (E_NOINTERFACE)") : EscapeJson("Failed to access endpoint volume hr=0x" + hrAct.ToString("X8"))) + "}");
             return 1;
         }
 
@@ -779,24 +813,15 @@ namespace AudioSwitcher
                 return 1;
             }
 
+            int hrAct = 0;
+            float scalar;
             try
             {
-                IMMDeviceEnumerator enumerator = GetEnumerator();
-                IMMDevice immDev;
-                float scalar;
-                if (enumerator.GetDevice(dev.Id, out immDev) == 0 && immDev != null)
+                IAudioEndpointVolume epv = ActivateEndpointVolume(dev.Id, out hrAct);
+                if (epv != null && epv.GetMasterVolumeLevelScalar(out scalar) == 0)
                 {
-                    Guid iid = IID_IAudioEndpointVolume;
-                    object epvObj;
-                    if (immDev.Activate(ref iid, 1, IntPtr.Zero, out epvObj) == 0 && epvObj != null)
-                    {
-                        IAudioEndpointVolume epv = epvObj as IAudioEndpointVolume;
-                        if (epv != null && epv.GetMasterVolumeLevelScalar(out scalar) == 0)
-                        {
-                            Console.WriteLine("{\"ok\":true,\"volume\":" + Math.Round(scalar * 100f) + ",\"id\":" + EscapeJson(dev.Id) + "}");
-                            return 0;
-                        }
-                    }
+                    Console.WriteLine("{\"ok\":true,\"volume\":" + Math.Round(scalar * 100f) + ",\"id\":" + EscapeJson(dev.Id) + "}");
+                    return 0;
                 }
             }
             catch (Exception ex)
@@ -805,7 +830,7 @@ namespace AudioSwitcher
                 return 1;
             }
 
-            Console.Error.WriteLine("{\"ok\":false,\"error\":\"Failed to access endpoint volume\"}");
+            Console.Error.WriteLine("{\"ok\":false,\"error\":" + (hrAct == unchecked((int)0x80004002) ? EscapeJson("Device does not support volume/mute control (E_NOINTERFACE)") : EscapeJson("Failed to access endpoint volume hr=0x" + hrAct.ToString("X8"))) + "}");
             return 1;
         }
 

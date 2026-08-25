@@ -255,9 +255,48 @@ export default class AppController extends EventEmitter {
       deviceName === this.config.get('micDeskName') ? 'desk' : 'headset';
     const volCfg = state === 'desk' ? this.config.get('micDeskVolume') : this.config.get('micHeadsetVolume');
     if (typeof volCfg === 'number' && volCfg >= 0) {
-      void this.audio.setVolume(deviceName, volCfg);
+      void this.setDeviceVolume(deviceName, volCfg);
     }
     this.applyDiscordGate(state);
+  }
+
+  /**
+   * Głośność mikrofonu: najpierw OS (daemon/SVV), a gdy urządzenie (np. BT headset)
+   * nie wspiera IAudioEndpointVolume (E_NOINTERFACE) — fallback do głośności wejścia
+   * w Discordzie (działa przez pipeline WebRTC).
+   */
+  async setDeviceVolume(target: string, percent: number): Promise<{ ok: boolean; volume?: number }> {
+    const res = await this.audio.setVolume(target, percent);
+    if (!res.ok && this.discord) {
+      const ok = await this.discord.applyInputVolume(percent);
+      return ok ? { ok: true, volume: percent } : res;
+    }
+    return res;
+  }
+
+  /** Mute mikrofonu: OS, a dla urządzeń BT bez IAudioEndpointVolume — fallback do Discorda. */
+  async setDeviceMute(target: string, mute: boolean): Promise<{ ok: boolean; isMuted?: boolean }> {
+    const res = await this.audio.setMute(target, mute);
+    if (!res.ok && this.discord) {
+      const ok = await this.discord.setInputMute(mute);
+      return ok ? { ok: true, isMuted: mute } : res;
+    }
+    return res;
+  }
+
+  /** Toggle mute z fallbackiem do Discorda (odczyt stanu + odwrócenie). */
+  async toggleDeviceMute(target?: string): Promise<{ ok: boolean; isMuted?: boolean }> {
+    const res = await this.audio.toggleMute(target);
+    if (res.ok) return res;
+    if (this.discord) {
+      const cur = await this.discord.getInputMute();
+      if (cur !== null) {
+        const next = !cur;
+        const ok = await this.discord.setInputMute(next);
+        return ok ? { ok: true, isMuted: next } : res;
+      }
+    }
+    return res;
   }
 
   /** Dopasowuje profil głosowy Discorda do specyfiki aktywnego mikrofonu. */
@@ -363,7 +402,7 @@ export default class AppController extends EventEmitter {
       // Głośność wybranego mikrofonu (jeśli skonfigurowana)
       const volCfg = state === 'desk' ? this.config.get('micDeskVolume') : this.config.get('micHeadsetVolume');
       if (targetMic && typeof volCfg === 'number' && volCfg >= 0) {
-        void this.audio.setVolume(targetMic, volCfg);
+        void this.setDeviceVolume(targetMic, volCfg);
       }
 
       // Operacje mute niezależne od siebie → równolegle (jeden round-trip
