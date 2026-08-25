@@ -40,6 +40,14 @@ export interface AppConfig {
    * Bez własnego zarejestrowanego ID klient Discord może odrzucać połączenie.
    */
   discordClientId: string;
+  /**
+   * OAuth2 Client Secret tej apki — WYMAGANY do wymiany kodu autoryzacji
+   * na token (presety głosowe). Trzymasz go tylko lokalnie w swoim
+   * config.json; domyślnie pusty.
+   */
+  discordClientSecret: string;
+  /** Redirect URI zarejestrowany w portalu deweloperskim (dla wymiany kodu) */
+  discordRedirectUri: string;
   timeoutAwayMs: number;
   timeoutDeskMs: number;
   radarDistanceGateEnabled: boolean;

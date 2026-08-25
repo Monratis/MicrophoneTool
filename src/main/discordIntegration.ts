@@ -1,4 +1,5 @@
 import net from 'node:net';
+import https from 'node:https';
 import { EventEmitter } from 'node:events';
 import type Config from './config';
 
@@ -18,6 +19,8 @@ export default class DiscordIntegration extends EventEmitter {
   private socket: net.Socket | null = null;
   private connected = false;
   private ready = false;
+  private authenticated = false;
+  private authFlowRunning = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private running = false;
   private handshakeFailures = 0;
@@ -54,6 +57,7 @@ export default class DiscordIntegration extends EventEmitter {
     }
     this.connected = false;
     this.ready = false;
+    this.authenticated = false;
     this.frameBuf = Buffer.alloc(0);
     this.failAllPending();
   }
@@ -119,6 +123,8 @@ export default class DiscordIntegration extends EventEmitter {
       const wasReady = this.ready;
       this.connected = false;
       this.ready = false;
+      this.authenticated = false;
+
       this.socket = null;
       this.failAllPending();
       if (this.running) {
@@ -144,6 +150,7 @@ export default class DiscordIntegration extends EventEmitter {
     sock.on('error', () => {
       this.connected = false;
       this.ready = false;
+      this.authenticated = false;
       if (this.socket) {
         this.socket.destroy();
         this.socket = null;
@@ -171,15 +178,12 @@ export default class DiscordIntegration extends EventEmitter {
       this.handshakeFailures = 0;
       this.ready = true;
       console.log('[discord] Sesja RPC gotowa (READY)');
-      // Sonda diagnostyczna: czy kanał komend działa i jak nazywają się
-      // pola ustawień głosowych w TYM kliencie.
-      void this.rpcCommand('GET_VOICE_SETTINGS', {}).then((r) => {
-        console.log(
-          `[discord] GET_VOICE_SETTINGS -> ok=${r.ok} ${JSON.stringify(r.data).slice(0, 600)}`
-        );
-      });
+      if (!this.authenticated) {
+        void this.authorizeFlow();
+      }
       return;
     }
+
 
     // Odpowiedź komendy po nonce
     const nonce = typeof payload.nonce === 'string' ? payload.nonce : undefined;
@@ -201,6 +205,92 @@ export default class DiscordIntegration extends EventEmitter {
       resolve({ ok: false });
       this.pending.delete(nonce);
     }
+  }
+
+  /**
+   * Pełny OAuth flow dla komend głosowych (4006 bez tego):
+   * AUTHORIZE (popup zgody w kliencie) → code → wymiana na token
+   * (wymaga discordClientSecret z config.json) → AUTHENTICATE.
+   */
+  private async authorizeFlow(): Promise<void> {
+    if (this.authFlowRunning || this.authenticated || !this.ready) return;
+    this.authFlowRunning = true;
+    try {
+      const secret = (this.config.get('discordClientSecret') || '').trim();
+      if (!secret) {
+        console.error(
+          '[discord] Brak discordClientSecret w config.json — presety głosowe wymagają autoryzacji OAuth (scope rpc.voice.write).'
+        );
+        return;
+      }
+      const authResp = await this.rpcCommand('AUTHORIZE', {
+        client_id: this.config.get('discordClientId'),
+        scopes: ['rpc', 'rpc.voice.read', 'rpc.voice.write']
+      });
+      const code = (authResp.data as { code?: string } | undefined)?.code;
+      if (!authResp.ok || !code) {
+        console.warn('[discord] AUTHORIZE odrzucone:', JSON.stringify(authResp.data ?? null).slice(0, 300));
+        return;
+      }
+      const token = await this.exchangeToken(code);
+      if (!token) return;
+      const auth = await this.rpcCommand('AUTHENTICATE', { access_token: token });
+      if (auth.ok) {
+        this.authenticated = true;
+        const username = (auth.data as { user?: { username?: string } } | undefined)?.user?.username;
+        console.log(`[discord] Zalogowano${username ? ` jako ${username}` : ''} — presety głosowe aktywne`);
+      } else {
+        console.warn('[discord] AUTHENTICATE odrzucone:', JSON.stringify(auth.data ?? null).slice(0, 300));
+      }
+    } finally {
+      this.authFlowRunning = false;
+    }
+  }
+
+  /** Wymiana kodu autoryzacji na access token (POST /api/oauth2/token). */
+  private exchangeToken(code: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      const body = new URLSearchParams({
+        client_id: this.config.get('discordClientId'),
+        client_secret: (this.config.get('discordClientSecret') || '').trim(),
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: this.config.get('discordRedirectUri') || 'http://localhost'
+      }).toString();
+      const req = https.request(
+        {
+          hostname: 'discord.com',
+          path: '/api/oauth2/token',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': Buffer.byteLength(body)
+          }
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (c) => (data += c));
+          res.on('end', () => {
+            try {
+              const json = JSON.parse(data) as { access_token?: string; error?: string };
+              if (json.access_token) resolve(json.access_token);
+              else {
+                console.warn('[discord] Token exchange błąd:', JSON.stringify(json).slice(0, 300));
+                resolve(null);
+              }
+            } catch {
+              resolve(null);
+            }
+          });
+        }
+      );
+      req.on('error', (e) => {
+        console.warn('[discord] Token exchange error:', e.message);
+        resolve(null);
+      });
+      req.write(body);
+      req.end();
+    });
   }
 
   private sendHandshake(): void {
@@ -284,6 +374,7 @@ export default class DiscordIntegration extends EventEmitter {
    */
   async applyMicSettings(opts: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }): Promise<boolean> {
     if (!this.config.get('discordIntegration')) return false;
+    if (!this.connected || !this.ready || !this.authenticated) return false;
     try {
       const args: Record<string, unknown> = {};
       if (typeof opts.gateDb === 'number') {

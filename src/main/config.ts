@@ -22,6 +22,13 @@ export const DEFAULTS: AppConfig = {
   discordGateFollowMic: true,
   /** Application ID apki Auto Audio Switch (Discord Developer Portal) */
   discordClientId: '1238447097859145859',
+  /**
+   * Client Secret osadzony w apkce na stałe (decyzja właściciela — apka
+   * dystrybuowana prywatnie, scope'y ograniczone do rpc.voice.*).
+   * Nadpisywalne przez config.json użytkownika.
+   */
+  discordClientSecret: 'xwmeOcXQP496dX5EYgXBFFcNyEUo30Z3',
+  discordRedirectUri: 'http://localhost',
   timeoutAwayMs: 3000,
   timeoutDeskMs: 300,
   radarDistanceGateEnabled: true,
