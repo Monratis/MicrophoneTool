@@ -14,6 +14,7 @@ import type { AppContext } from './appContext';
 import {
   getAppDataDir,
   cleanupStaleUpdateFiles,
+  ensureToastShortcut,
   resolveConfigPath,
   resolveBinDir,
   resolveAppIcon,
@@ -120,6 +121,7 @@ app.setAppUserModelId('com.monratis.autoaudio');
 
 app.whenReady().then(() => {
   cleanupStaleUpdateFiles();
+  ensureToastShortcut();
 
   const appDataDir = getAppDataDir();
   try {

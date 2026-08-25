@@ -49,6 +49,15 @@ export function createSettingsWindow(ctx: AppContext): void {
     settingsWindow = null;
     ctx.settingsWindow = null;
   });
+  // Ikona na taskbarze TYLKO gdy okno faktycznie widać; schowane do tray
+  // znika z paska. Zdarzenia show/hide obejmują wszystkie ścieżki
+  // (klik w tray, przycisk ✕, druga instancja).
+  settingsWindow.on('show', () => {
+    settingsWindow?.setSkipTaskbar(false);
+  });
+  settingsWindow.on('hide', () => {
+    settingsWindow?.setSkipTaskbar(true);
+  });
 
   ctx.settingsWindow = settingsWindow;
 }

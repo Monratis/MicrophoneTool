@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { app, Notification, nativeImage } from 'electron';
+import { app, Notification, nativeImage, shell } from 'electron';
 import type { BrowserWindow } from 'electron';
 import type Config from './config';
 import type AppController from './appController';
@@ -146,5 +146,32 @@ export function createNotification(title: string, body: string, notificationsEna
     } catch {
       /* ignore */
     }
+  }
+}
+
+/**
+ * Windows bierze ikonę toasta ze skrótu Start Menu powiązanego z App User
+ * Model ID. Portable nie ma takiego skrótu → powiadomienia pokazują generyczną
+ * ikonę. Tworzymy/odświeżamy go przy każdym starcie (target = aktualna lokalizacja EXE).
+ */
+export function ensureToastShortcut(): void {
+  try {
+    if (!app.isPackaged) return; // w dev toast i tak dziedziczy ikonę Electrona
+    const programsDir = path.join(
+      app.getPath('appData'),
+      'Microsoft',
+      'Windows',
+      'Start Menu',
+      'Programs'
+    );
+    fs.mkdirSync(programsDir, { recursive: true });
+    shell.writeShortcutLink(path.join(programsDir, 'Auto Audio Switch.lnk'), 'replace', {
+      target: process.execPath,
+      cwd: path.dirname(process.execPath),
+      appUserModelId: 'com.monratis.autoaudio',
+      description: 'Auto Audio Switch'
+    });
+  } catch (err) {
+    console.warn('[main] toast shortcut warning:', (err as Error).message);
   }
 }
