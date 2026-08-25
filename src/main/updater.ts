@@ -74,8 +74,21 @@ export default class AppUpdater {
 
   /**
    * Sprawdza dostępność nowej wersji na GitHub Releases.
+   * Deduplikacja: nakładające się wywołania (tray + timer + przycisk)
+   * dzielą jeden request zamiast wyścigu o stan.
    */
   async checkForUpdates(): Promise<{ available: boolean; updateInfo?: UpdateInfo; currentVersion: string; remoteVersion?: string; error?: string }> {
+    if (!this.checkInflight) {
+      this.checkInflight = this.doCheckForUpdates().finally(() => {
+        this.checkInflight = null;
+      });
+    }
+    return this.checkInflight;
+  }
+
+  private checkInflight: Promise<{ available: boolean; updateInfo?: UpdateInfo; currentVersion: string; remoteVersion?: string; error?: string }> | null = null;
+
+  private async doCheckForUpdates(): Promise<{ available: boolean; updateInfo?: UpdateInfo; currentVersion: string; remoteVersion?: string; error?: string }> {
     this.status = 'checking';
     this.emit('status', this.getStatus());
 
@@ -93,7 +106,11 @@ export default class AppUpdater {
       if (isNewer) {
         // Dopasuj odpowiedni asset (installer / portable / zip)
         const assets = release.assets || [];
-        const isInstaller = app.isPackaged && !process.execPath.includes('win-unpacked');
+        // Portable EXE sam wypakowuje payload — jego execPath wskazuje plik "(Portable).exe",
+        // nie katalog win-unpacked; bez tego portable brał asset Setup i odpalał instalator NSIS.
+        const execLower = process.execPath.toLowerCase();
+        const isInstaller =
+          app.isPackaged && !execLower.includes('portable') && !execLower.includes('win-unpacked');
 
         let targetAsset = assets.find(
           (a) =>
@@ -181,6 +198,10 @@ export default class AppUpdater {
     if (!this.updateInfo || !this.updateInfo.asset) {
       throw new Error('Brak pliku aktualizacji do pobrania');
     }
+    // Dwa równoległe pobrania pisałyby do tego samego pliku jednocześnie.
+    if (this.status === 'downloading') {
+      throw new Error('Pobieranie aktualizacji już trwa');
+    }
 
     this.status = 'downloading';
     this.emit('status', this.getStatus());
@@ -193,19 +214,35 @@ export default class AppUpdater {
     const targetFile = path.join(tempDir, asset.name);
     this.downloadedFilePath = targetFile;
 
-    const fileStream = fs.createWriteStream(targetFile);
-
     return new Promise((resolve, reject) => {
+      const fileStream = fs.createWriteStream(targetFile);
+      // Bez tego dysk pełny / zablokowany przez AV = nieobsłużony 'error'
+      // na strumieniu = crash całego procesu Electrona.
+      fileStream.on('error', (err: Error) => {
+        this.status = 'error';
+        this.emit('status', { ...this.getStatus(), error: err.message });
+        reject(err);
+      });
       let downloadedBytes = 0;
       const totalBytes = asset.size || 0;
       const startTime = Date.now();
+      let failed = false;
 
       // Dla prywatnych repo użyj API Asset URL z nagłówkiem application/octet-stream
       const isPrivate = Boolean(token && token.trim());
       const initialUrl =
         isPrivate && asset.apiUrl ? asset.apiUrl : asset.downloadUrl!;
 
-      const fetchWithRedirects = (currentUrl: string, isRedirect = false): void => {
+      const fetchWithRedirects = (currentUrl: string, isRedirect = false, depth = 0): void => {
+        if (depth > 5) {
+          fileStream.close();
+          this.status = 'error';
+          const errMsg = 'Zbyt wiele przekierowań podczas pobierania aktualizacji';
+          this.emit('status', { ...this.getStatus(), error: errMsg });
+          reject(new Error(errMsg));
+          return;
+        }
+
         const headers: Record<string, string> = {
           'User-Agent': `AutoAudioSwitch/${this.currentVersion}`
         };
@@ -223,7 +260,8 @@ export default class AppUpdater {
             res.statusCode < 400 &&
             res.headers.location
           ) {
-            fetchWithRedirects(res.headers.location, true);
+            res.destroy();
+            fetchWithRedirects(res.headers.location, true, depth + 1);
             return;
           }
 
@@ -240,7 +278,12 @@ export default class AppUpdater {
 
           res.on('data', (chunk: Buffer) => {
             downloadedBytes += chunk.length;
-            fileStream.write(chunk);
+            // Backpressure: bez pauzy przy pełnym buforze write() całe ~100 MB
+            // ląduje w pamięci procesu przy wolnym dysku.
+            if (!fileStream.write(chunk)) {
+              res.pause();
+              fileStream.once('drain', () => res.resume());
+            }
 
             const percent = totalBytes > 0 ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
             const elapsedSec = (Date.now() - startTime) / 1000;
@@ -254,22 +297,29 @@ export default class AppUpdater {
             });
           });
 
-          res.on('end', () => {
-            fileStream.end();
-            this.status = 'downloaded';
-            this.emit('status', this.getStatus());
-            resolve({ ok: true, file: targetFile });
-          });
-
           res.on('error', (err: Error) => {
-            fileStream.close();
+            failed = true;
+            fileStream.destroy();
             this.status = 'error';
             this.emit('status', { ...this.getStatus(), error: err.message });
             reject(err);
           });
+
+          // Rozwiązuj dopiero gdy plik jest w pełni spłukany na dysk
+          // ('end' oznacza koniec odczytu z sieci, nie zapisu do pliku).
+          res.on('end', () => {
+            fileStream.end();
+          });
+          fileStream.on('finish', () => {
+            if (failed) return;
+            this.status = 'downloaded';
+            this.emit('status', this.getStatus());
+            resolve({ ok: true, file: targetFile });
+          });
         });
 
         req.on('error', (err: Error) => {
+          failed = true;
           fileStream.close();
           this.status = 'error';
           this.emit('status', { ...this.getStatus(), error: err.message });
@@ -288,23 +338,43 @@ export default class AppUpdater {
     if (!this.downloadedFilePath || !fs.existsSync(this.downloadedFilePath)) {
       throw new Error('Plik instalatora nie istnieje');
     }
+    // Bez tego guard da się zainstalować PLIK CZĘŚCIOWY po nieudanym
+    // pobieraniu (plik istnieje, ale jest obcięty).
+    if (this.status !== 'downloaded') {
+      throw new Error('Aktualizacja nie została w pełni pobrana');
+    }
 
     const installerPath = this.downloadedFilePath;
     const currentExe = process.execPath;
 
     if (installerPath.toLowerCase().endsWith('.exe')) {
       if (installerPath.toLowerCase().includes('setup')) {
-        // Uruchomienie instalatora NSIS
-        spawn(installerPath, ['/S'], {
+        // Uruchomienie instalatora NSIS dopiero PO wyjściu aplikacji —
+        // start przed quit() koliduje z zablokowanymi plikami EXE.
+        const delayedRun = [
+          '@echo off',
+          'timeout /t 2 /nobreak > nul',
+          `start "" "${installerPath}" /S`,
+          'del "%~f0"'
+        ].join('\r\n');
+        const runScript = path.join(os.tmpdir(), 'update_run_installer.bat');
+        fs.writeFileSync(runScript, delayedRun, 'utf8');
+        spawn('cmd.exe', ['/c', runScript], {
           detached: true,
-          stdio: 'ignore'
+          stdio: 'ignore',
+          windowsHide: true
         }).unref();
       } else {
-        // Aktualizacja wersji portable: skrypt wsadowy podmieniający .exe
+        // Aktualizacja wersji portable: skrypt wsadowy podmieniający .exe.
+        // EXE potrafi być zablokowany dłużej niż sekundę — ponawiamy kopię zanim odpalimy nową binarkę.
         const batScript = path.join(os.tmpdir(), 'update_restart.bat');
         const batContent = `@echo off
-timeout /t 1 /nobreak > nul
-copy /y "${installerPath}" "${currentExe}"
+timeout /t 2 /nobreak > nul
+copy /y "${installerPath}" "${currentExe}" > nul 2>&1
+if errorlevel 1 (
+  timeout /t 3 /nobreak > nul
+  copy /y "${installerPath}" "${currentExe}" > nul 2>&1
+)
 start "" "${currentExe}"
 del "%~f0"
 `;

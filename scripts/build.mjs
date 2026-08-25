@@ -187,32 +187,59 @@ if (fs.existsSync(iconPatcherExe) && fs.existsSync(iconIco)) {
 }
 
 // --- 7. Fix latest.yml AFTER icon patching (hashes must match final bytes) --
+//
+// WAŻNE: latest.yml w trybie "all" zawiera WPISY DLA KAŻDEGO ARTEFAKTU
+// (portable + setup). Naiwne regexy z flagą /g podmieniałyby sha512/size
+// WSZYSTKICH wpisów wartościami jednego pliku → auto-update klienta
+// odrzucałby pobrany instalator/portable przy weryfikacji hasha.
+// Stąd przetwarzanie blokami: każdy wpis (top-level path: oraz każdy
+// "- url:") dopasowywany i przeliczany osobno.
 
 const latestYmlSrc = path.join(distDir, 'latest.yml');
 if (fs.existsSync(latestYmlSrc)) {
-  let yml = fs.readFileSync(latestYmlSrc, 'utf8');
-  const pathMatch = yml.match(/^path:\s*(.+)$/m);
-  if (pathMatch) {
-    // electron-builder sanitizes artifact names in latest.yml ("Auto-Audio-Switch-Setup-0.2.0.exe")
-    // while the real file keeps spaces — match by normalized comparison
-    const norm = (s) => s.toLowerCase().replace(/[^a-z0-9.]/g, '');
-    const wanted = norm(pathMatch[1].trim());
-    const localFile = fs.readdirSync(releasesDir).find((f) => f.toLowerCase().endsWith('.exe') && norm(f) === wanted);
-    if (localFile) {
-      const localPath = path.join(releasesDir, localFile);
-      const hash = sha512Base64(localPath);
-      const size = fs.statSync(localPath).size;
-      yml = yml
-        .replace(/^path:\s*.+$/m, `path: ${localFile}`)
-        .replace(/^(\s*-\s*url:\s*).+$/m, `$1${localFile}`)
-        .replace(/^(\s*)sha512:\s*.+$/gm, `$1sha512: ${hash}`)
-        .replace(/^(\s*)size:\s*\d+$/gm, `$1size: ${size}`);
-      fs.writeFileSync(path.join(releasesDir, 'latest.yml'), yml);
-      copied.push('latest.yml');
-      console.log(`[build] latest.yml re-hashed after icon patch (${localFile})`);
-    } else {
-      console.log(`[build] Skipping latest.yml (no artifact matches "${pathMatch[1].trim()}" in mode "${mode}")`);
+  const lines = fs.readFileSync(latestYmlSrc, 'utf8').split(/\r?\n/);
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9.]/g, '');
+  const releasesExes = fs.readdirSync(releasesDir).filter((f) => f.toLowerCase().endsWith('.exe'));
+  const findByNorm = (name) => releasesExes.find((f) => norm(f) === norm(String(name).trim()));
+
+  // Granice bloków: linia "path:" oraz każda linia "- url:"
+  const starts = [];
+  lines.forEach((l, i) => {
+    if (/^path:\s*\S/.test(l) || /^\s*-\s*url:\s*\S/.test(l)) starts.push(i);
+  });
+
+  let patchedEntries = 0;
+  for (let b = 0; b < starts.length; b++) {
+    const from = starts[b];
+    const to = b + 1 < starts.length ? starts[b + 1] : lines.length;
+    const m = lines[from].match(/^(?:path:\s*|\s*-\s*url:\s*)(.+)$/);
+    if (!m) continue;
+    const localFile = findByNorm(m[1]);
+    if (!localFile) continue;
+
+    const localPath = path.join(releasesDir, localFile);
+    const hash = sha512Base64(localPath);
+    const size = fs.statSync(localPath).size;
+
+    for (let i = from; i < to; i++) {
+      if (i === from) {
+        // Nazwa pliku to cały ogon linii po prefiksie ("path: " / "- url: ")
+        lines[i] = lines[i].slice(0, lines[i].length - m[1].length) + localFile;
+      } else if (/^\s*sha512:/.test(lines[i])) {
+        lines[i] = lines[i].replace(/sha512:\s*.+$/, `sha512: ${hash}`);
+      } else if (/^\s*size:\s*\d/.test(lines[i])) {
+        lines[i] = lines[i].replace(/size:\s*\d+\s*$/, `size: ${size}`);
+      }
     }
+    patchedEntries++;
+  }
+
+  if (patchedEntries > 0) {
+    fs.writeFileSync(path.join(releasesDir, 'latest.yml'), lines.join('\n'));
+    copied.push('latest.yml');
+    console.log(`[build] latest.yml re-hashed after icon patch (${patchedEntries} entr${patchedEntries === 1 ? 'y' : 'ies'})`);
+  } else {
+    console.log(`[build] Skipping latest.yml (no matching artifacts in mode "${mode}")`);
   }
 } else if (patchedFiles.length > 0 && mode !== 'all') {
   console.warn('[build] Warning: no latest.yml found — auto-update metadata will be stale.');

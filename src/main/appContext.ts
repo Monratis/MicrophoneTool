@@ -57,6 +57,7 @@ export function cleanupStaleUpdateFiles(): void {
   const targets = [
     path.join(os.tmpdir(), 'AutoAudioSwitch-Update'),
     path.join(os.tmpdir(), 'update_restart.bat'),
+    path.join(os.tmpdir(), 'update_run_installer.bat'),
     path.join(os.tmpdir(), 'AutoAudioSwitch-Firmware')
   ];
   for (const t of targets) {
@@ -117,9 +118,10 @@ export function resolveWindowIcon(): Electron.NativeImage | null {
 // ---------- autostart ----------
 
 export function applyAutoStart(enabled: boolean): void {
+  // openAsHidden pominięte: _macOS only_ i deprecated w Electron — na Windows
+  // aplikacja i tak startuje schowana (okno show:false, tray).
   app.setLoginItemSettings({
     openAtLogin: enabled,
-    openAsHidden: true,
     path: process.execPath
   });
 }

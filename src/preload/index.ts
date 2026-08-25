@@ -11,6 +11,10 @@ const api = {
   listDevices: () => ipcRenderer.invoke('devices:list'),
   toggleMute: (target?: string) => ipcRenderer.invoke('audio:toggleMute', target),
   setMute: (target: string, mute: boolean) => ipcRenderer.invoke('audio:setMute', { target, mute }),
+  setVolume: (target: string, percent: number) => ipcRenderer.invoke('audio:setVolume', { target, percent }),
+  getVolume: (target?: string) => ipcRenderer.invoke('audio:getVolume', target),
+  discordApplyVoice: (args: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }) =>
+    ipcRenderer.invoke('discord:applyVoice', args),
   testDevice: (name: string) => ipcRenderer.invoke('audio:testDevice', name),
   sleepDisplay: () => ipcRenderer.invoke('display:sleep'),
   wakeDisplay: () => ipcRenderer.invoke('display:wake'),
@@ -34,7 +38,8 @@ const api = {
 
   // Sensor USB Firmware Flasher & Recovery
   checkSensorFirmware: () => ipcRenderer.invoke('sensor:checkFirmware'),
-  flashSensorFromGitHub: () => ipcRenderer.invoke('sensor:flashFromGitHub'),
+  flashSensorFromGitHub: (opts?: { eraseAll?: boolean }) =>
+    ipcRenderer.invoke('sensor:flashFromGitHub', opts),
   flashSensorFromFile: () => ipcRenderer.invoke('sensor:flashFromFile'),
 
   // Diagnostic Logs

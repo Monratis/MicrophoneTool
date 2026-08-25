@@ -36,7 +36,9 @@ export function registerIpc(ctx: AppContext): void {
     return ctx.buildSnapshot();
   });
   ipcMain.handle('devices:list', async () => {
-    return await ctx.audio.listRecordingDevices(true);
+    // Cache 3 s — renderer woła to przy KAŻDYM snapshocie (radar status,
+    // mute, przełączenie); bez cache każde zdarzenie = rund trip do daemona.
+    return await ctx.audio.listRecordingDevices(false);
   });
   ipcMain.handle('devices:detect', async () => {
     const devices = await ctx.audio.listRecordingDevices(true);
@@ -53,6 +55,16 @@ export function registerIpc(ctx: AppContext): void {
     ctx.refreshSnapshot();
     return res;
   });
+  ipcMain.handle(
+    'audio:setVolume',
+    async (_e, args: { target: string; percent: number }) => ctx.audio.setVolume(args.target, args.percent)
+  );
+  ipcMain.handle('audio:getVolume', async (_e, target?: string) => ctx.audio.getVolume(target ?? ''));
+  ipcMain.handle(
+    'discord:applyVoice',
+    async (_e, args: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }) =>
+      ctx.controller.discord ? ctx.controller.discord.applyMicSettings(args || {}) : false
+  );
   ipcMain.handle('config:reset', () => {
     for (const [key, value] of Object.entries(DEFAULTS)) {
       (ctx.config.data as unknown as Record<string, unknown>)[key] = value;
@@ -119,7 +131,7 @@ export function registerIpc(ctx: AppContext): void {
 
   // Sensor USB Firmware Flasher & Emergency Recovery IPC
   ipcMain.handle('sensor:checkFirmware', async () => ctx.sensorFlasher.checkGitHubFirmware());
-  ipcMain.handle('sensor:flashFromGitHub', async () => {
+  ipcMain.handle('sensor:flashFromGitHub', async (_e, opts?: { eraseAll?: boolean }) => {
     const check = await ctx.sensorFlasher.checkGitHubFirmware();
     if (!check.available || !check.name) {
       throw new Error(check.message || check.error || 'Brak pliku firmware .bin na GitHubie');
@@ -130,14 +142,20 @@ export function registerIpc(ctx: AppContext): void {
       apiUrl: check.apiUrl,
       downloadUrl: check.downloadUrl
     });
-    return await ctx.sensorFlasher.flashFirmware(binPath);
+    // eraseAll wyłącznie dla jawnie żądanego trybu ratunkowego (unbrick) —
+    // normalna aktualizacja nie dotyka fabrycznej kalibracji radaru.
+    return await ctx.sensorFlasher.flashFirmware(binPath, null, { eraseAll: Boolean(opts?.eraseAll) });
   });
   ipcMain.handle('sensor:flashFromFile', async () => {
-    const { canceled, filePaths } = await dialog.showOpenDialog(getSettingsWindow() ?? undefined!, {
+    const parent = getSettingsWindow();
+    const dialogOpts = {
       title: 'Wybierz skompilowany plik firmware ESP32-C6 (.bin)',
       filters: [{ name: 'Firmware Binary (*.bin)', extensions: ['bin'] }],
-      properties: ['openFile']
-    });
+      properties: ['openFile' as const]
+    };
+    const { canceled, filePaths } = parent
+      ? await dialog.showOpenDialog(parent, dialogOpts)
+      : await dialog.showOpenDialog(dialogOpts);
     if (canceled || !filePaths || filePaths.length === 0) return { canceled: true };
     return await ctx.sensorFlasher.flashFirmware(filePaths[0]);
   });

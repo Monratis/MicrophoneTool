@@ -2,7 +2,8 @@ import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import type Config from './config';
 
-const DISCORD_CLIENT_ID = '128000000000000000';
+// Fallback gdy config nie zawiera discordClientId — realny Application ID
+const DISCORD_CLIENT_ID = '1238447097859145859';
 
 const OPCODES = {
   HANDSHAKE: 0,
@@ -16,8 +17,14 @@ export default class DiscordIntegration extends EventEmitter {
   private readonly config: Config;
   private socket: net.Socket | null = null;
   private connected = false;
+  private ready = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private running = false;
+  private handshakeFailures = 0;
+  /** Akumulator ramek — TCP dowolnie dzieli pakiety, trzeba składać. */
+  private frameBuf = Buffer.alloc(0);
+  /** nonce -> resolver odpowiedzi komendy (z timeoutem w wywołaniu). */
+  private readonly pending = new Map<string, (v: { ok: boolean; data?: unknown }) => void>();
 
   constructor(config: Config) {
     super();
@@ -46,6 +53,9 @@ export default class DiscordIntegration extends EventEmitter {
       this.socket = null;
     }
     this.connected = false;
+    this.ready = false;
+    this.frameBuf = Buffer.alloc(0);
+    this.failAllPending();
   }
 
   private tryConnect(): void {
@@ -63,8 +73,10 @@ export default class DiscordIntegration extends EventEmitter {
       sock.once('connect', () => {
         this.socket = sock;
         this.connected = true;
-        this.sendHandshake();
+        // Najpierw czytnik danych, potem handshake — inaczej odpowiedź
+        // "Ready" od Discorda przepada zanim ktokolwiek ją odczyta.
         this.setupSocket(sock);
+        this.sendHandshake();
       });
 
       sock.once('error', () => {
@@ -78,31 +90,57 @@ export default class DiscordIntegration extends EventEmitter {
 
   private setupSocket(sock: net.Socket): void {
     sock.on('data', (buf: Buffer) => {
-      try {
-        if (buf.length >= 8) {
-          const op = buf.readInt32LE(0);
-          const len = buf.readInt32LE(4);
-          if (buf.length >= 8 + len) {
-            const jsonStr = buf.slice(8, 8 + len).toString('utf8');
-            const data = JSON.parse(jsonStr);
-            this.emit('message', { op, data });
-          }
+      // Akumulacja: jedna porcja z TCP może zawierać ułamek ramki albo
+      // kilka ramek naraz — przetwarzamy wyłącznie kompletne pakiety.
+      this.frameBuf = Buffer.concat([this.frameBuf, buf]);
+      while (this.frameBuf.length >= 8) {
+        const len = this.frameBuf.readInt32LE(4);
+        if (len < 0 || len > 10 * 1024 * 1024) {
+          console.warn('[discord] Nieprawidłowa długość ramki — resync bufora');
+          this.frameBuf = Buffer.alloc(0);
+          return;
         }
-      } catch {
-        /* ignore */
+        if (this.frameBuf.length < 8 + len) break;
+        const op = this.frameBuf.readInt32LE(0);
+        const payload = this.frameBuf.slice(8, 8 + len);
+        this.frameBuf = this.frameBuf.slice(8 + len);
+        try {
+          this.handleFrame(op, JSON.parse(payload.toString('utf8')));
+        } catch {
+          /* nie-JSON payload — ignoruj */
+        }
       }
     });
 
     sock.on('close', () => {
+      const wasReady = this.ready;
       this.connected = false;
+      this.ready = false;
       this.socket = null;
+      this.failAllPending();
       if (this.running) {
-        this.scheduleReconnect();
+        // Zamknięcie bez READY = odrzucony handshake (np. zły client_id).
+        // Po 3 porażkach schodzimy na 5 minut — nie meczymy Discorda co 10 s.
+        if (!wasReady) {
+          this.handshakeFailures++;
+          if (this.handshakeFailures === 3) {
+            console.error(
+              '[discord] Powtarzające się odrzucenia handshake — sprawdź discordClientId ' +
+                '(Application ID z Discord Developer Portal). Kolejne próby co 5 min.'
+            );
+          }
+        } else {
+          this.handshakeFailures = 0;
+        }
+        const delay =
+          !wasReady && this.handshakeFailures >= 3 ? 5 * 60 * 1000 : 10000;
+        this.scheduleReconnect(delay);
       }
     });
 
     sock.on('error', () => {
       this.connected = false;
+      this.ready = false;
       if (this.socket) {
         this.socket.destroy();
         this.socket = null;
@@ -110,11 +148,56 @@ export default class DiscordIntegration extends EventEmitter {
     });
   }
 
+  private handleFrame(op: number, payload: any): void {
+    // Opcode 2 = CLOSE — Discord zamyka sesję (np. błędny client_id)
+    if (op === 2) {
+      console.warn(`[discord] Serwer zamknął sesję: ${JSON.stringify(payload?.data ?? payload)}`);
+      if (payload?.data?.code === 4004 || /client.?id/i.test(JSON.stringify(payload))) {
+        console.error(
+          '[discord] Prawdopodobnie nieprawidłowy discordClientId w configu — RPC wymaga ' +
+            'Application ID z Discord Developer Portal. Ustaw własny ID, aby presety działały.'
+        );
+      }
+      this.socket?.destroy();
+      return;
+    }
+    if (op !== 1 || !payload || typeof payload !== 'object') return;
+
+    // READY = handshake zaakceptowany
+    if (payload.evt === 'READY') {
+      this.handshakeFailures = 0;
+      this.ready = true;
+      console.log('[discord] Sesja RPC gotowa (READY)');
+      return;
+    }
+
+    // Odpowiedź komendy po nonce
+    const nonce = typeof payload.nonce === 'string' ? payload.nonce : undefined;
+    if (nonce && this.pending.has(nonce)) {
+      const resolve = this.pending.get(nonce)!;
+      this.pending.delete(nonce);
+      const isError =
+        payload.evt === 'error' ||
+        (typeof payload.status === 'number' && payload.status >= 400);
+      if (isError) {
+        console.warn(`[discord] ${String(payload.cmd)} odrzucone: ${JSON.stringify(payload.data ?? payload.message ?? '')}`);
+      }
+      resolve({ ok: !isError, data: payload.data });
+    }
+  }
+
+  private failAllPending(): void {
+    for (const [nonce, resolve] of this.pending) {
+      resolve({ ok: false });
+      this.pending.delete(nonce);
+    }
+  }
+
   private sendHandshake(): void {
     if (!this.socket || !this.connected) return;
     const payload = JSON.stringify({
       v: 1,
-      client_id: DISCORD_CLIENT_ID
+      client_id: this.config.get('discordClientId') || DISCORD_CLIENT_ID
     });
     this.sendPacket(OPCODES.HANDSHAKE, payload);
   }
@@ -132,12 +215,12 @@ export default class DiscordIntegration extends EventEmitter {
     }
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(delay = 10000): void {
     if (!this.running || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.tryConnect();
-    }, 10000);
+    }, delay);
   }
 
   async notifyDeviceChanged(deviceName: string | null): Promise<void> {
@@ -161,5 +244,58 @@ export default class DiscordIntegration extends EventEmitter {
         console.warn('[discord] Błąd wysyłania komendy:', (err as Error).message);
       }
     }
+  }
+
+  /**
+   * Ustawia profil głosowy aktywnego mikrofonu w Discordzie:
+   * bramkę VAD (threshold dB), Krisp, AGC i usuwanie echa.
+   * Wymaga zaakceptowanego handshake (READY). Odpowiedź Discorda weryfikowana
+   * po nonce — porażki NIE przechodzą już po cichu.
+   */
+  async applyMicSettings(opts: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }): Promise<boolean> {
+    if (!this.config.get('discordIntegration')) return false;
+    if (!this.connected || !this.ready || !this.socket || this.socket.destroyed) return false;
+    try {
+      const args: Record<string, unknown> = {};
+      if (typeof opts.gateDb === 'number') {
+        const clamped = Math.max(-90, Math.min(0, Math.round(opts.gateDb)));
+        args.mode = {
+          type: 'VOICE_ACTIVITY',
+          auto_threshold: false,
+          threshold: clamped
+        };
+      }
+      if (typeof opts.krisp === 'boolean') args.noise_suppression = opts.krisp;
+      if (typeof opts.agc === 'boolean') args.automatic_gain_control = opts.agc;
+      if (typeof opts.echo === 'boolean') args.echo_cancellation = opts.echo;
+      if (Object.keys(args).length === 0) return false;
+
+      const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const payload = JSON.stringify({ cmd: 'SET_VOICE_SETTINGS', args, nonce });
+
+      const reply = await new Promise<{ ok: boolean; data?: unknown }>((resolve) => {
+        const timer = setTimeout(() => {
+          this.pending.delete(nonce);
+          resolve({ ok: false });
+        }, 3000);
+        this.pending.set(nonce, (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        });
+        this.sendPacket(OPCODES.FRAME, payload);
+      });
+
+      if (!reply.ok) {
+        console.warn('[discord] SET_VOICE_SETTINGS nie powiodło się', JSON.stringify(opts));
+      }
+      return reply.ok;
+    } catch (err) {
+      console.warn('[discord] Błąd ustawiania profilu głosowego:', (err as Error).message);
+      return false;
+    }
+  }
+
+  async setVoiceGate(thresholdDb: number): Promise<boolean> {
+    return this.applyMicSettings({ gateDb: thresholdDb });
   }
 }

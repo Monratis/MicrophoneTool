@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import https from 'node:https';
+import { createHash } from 'node:crypto';
 import type RadarListener from './radarListener';
 import type Config from './config';
 
@@ -30,6 +31,10 @@ interface FirmwareCheck {
 
 /**
  * Adapter SerialPort (Node.js) do interfejsu Transport (esptool-js).
+ * Implementuje PEŁNĄ powierzchnię wymaganą przez ESPLoader 0.6.x:
+ * connect / disconnect / readLoop / flushInput / peek / read / write /
+ * setBaudrate / setSignals / setDTR / setRTS / getPid / getInfo /
+ * hexify / hexConvert / trace.
  */
 class NodeSerialTransport {
   private readonly port: SerialPort;
@@ -37,12 +42,17 @@ class NodeSerialTransport {
   slipReaderEnabled = false;
   dtrState = false;
   rtsState = false;
+  tracing = false;
+  private readonly detectedPid?: number;
   private buffer = new Uint8Array(0);
   private readResolvers: Array<{ minBytes: number; resolve: (data: Uint8Array) => void }> = [];
 
-  constructor(port: SerialPort) {
+  constructor(port: SerialPort, detectedPid?: number) {
     this.port = port;
     this.baudrate = port.baudRate || 115200;
+    // Realny PID pozwala esptool dobrać właściwą strategię resetu
+    // (USB-JTAG-Serial dla PID 0x1001, klasyczny DTR/RTS dla mostków UART).
+    this.detectedPid = detectedPid;
 
     port.on('data', (chunk: Buffer) => {
       const u8 = new Uint8Array(chunk);
@@ -65,12 +75,42 @@ class NodeSerialTransport {
     });
   }
 
+  /** esptool woła przed każdą próbą połączenia; port otwieramy sami wcześniej. */
+  async connect(baudrate?: number): Promise<void> {
+    const target = typeof baudrate === 'number' && baudrate > 0 ? baudrate : this.baudrate;
+    this.baudrate = target;
+    if (this.port.isOpen && this.port.baudRate !== target) {
+      await this.setBaudrate(target);
+    }
+    this.flushInput();
+  }
+
   getInfo(): string {
     return `NodeSerialPort ${this.port.path}`;
   }
 
   getPid(): number {
-    return 0x1001;
+    return this.detectedPid ?? 0x1001;
+  }
+
+  /** Dane napływają przez event 'data' — brak potrzeby aktywnego pollingu. */
+  readLoop(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  /**
+   * Czyści bufor wejściowy. Mirror zachowania webserial: NIE rozwiązuje
+   * oczekujących odczytów pustą ramką — pusta ramka mogłaby zostać
+   * zinterpretowana przez esptool jako odpowiedź urządzenia. Oczekujące
+   * read() wygasają własnym timeoutem i sięgają po świeże dane.
+   */
+  flushInput(): void {
+    this.buffer = new Uint8Array(0);
+  }
+
+  /** Podgląd bufora bez konsumpcji (mirror zachowania webserial Transport). */
+  peek(): Uint8Array {
+    return this.buffer;
   }
 
   async read(timeout = 3000, minBytes = 1): Promise<Uint8Array> {
@@ -127,6 +167,16 @@ class NodeSerialTransport {
     });
   }
 
+  // Strategie resetu esptool (ClassicReset / HardReset / UsbJtagSerialReset)
+  // wołają wprost setDTR / setRTS.
+  async setDTR(val: boolean): Promise<void> {
+    await this.setSignals({ dataTerminalReady: val });
+  }
+
+  async setRTS(val: boolean): Promise<void> {
+    await this.setSignals({ requestToSend: val });
+  }
+
   async setBaudrate(baud: number): Promise<void> {
     return new Promise((resolve, reject) => {
       this.baudrate = baud;
@@ -145,6 +195,18 @@ class NodeSerialTransport {
         resolve();
       }
     });
+  }
+
+  hexify(u8: Uint8Array): string {
+    return Array.from(u8, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  hexConvert(u8: Uint8Array): string {
+    return this.hexify(u8);
+  }
+
+  trace(_message: string): void {
+    /* tracing wyłączony w produkcji */
   }
 }
 
@@ -196,7 +258,11 @@ export default class SensorFlasher {
       const release = (await res.json()) as { tag_name?: string; body?: string; assets?: GitHubAsset[] };
       const assets = release.assets || [];
 
-      const binAsset = assets.find((a) => a.name.toLowerCase().endsWith('.bin'));
+      // Priorytet: pliki wskazujące na ESP32-C6 / merged image; dopiero potem
+      // pierwszy lepszy .bin — redukuje ryzyko pobrania obrazu dla innego sprzętu.
+      const binAsset =
+        assets.find((a) => a.name.toLowerCase().endsWith('.bin') && /c6|merged|factory/i.test(a.name)) ||
+        assets.find((a) => a.name.toLowerCase().endsWith('.bin'));
 
       if (!binAsset) {
         return {
@@ -226,14 +292,21 @@ export default class SensorFlasher {
     fs.mkdirSync(tempDir, { recursive: true });
 
     const targetFile = path.join(tempDir, asset.name);
-    const fileStream = fs.createWriteStream(targetFile);
 
     const isPrivate = Boolean(token && token.trim());
     const initialUrl =
       isPrivate && asset.apiUrl ? asset.apiUrl : (asset.downloadUrl as string);
 
     return new Promise((resolve, reject) => {
-      const fetchWithRedirects = (curUrl: string, isRedirect = false): void => {
+      const fileStream = fs.createWriteStream(targetFile);
+      // Nieobsłużony 'error' na WriteStream (dysk pełny, AV) = crash procesu.
+      fileStream.on('error', (err: Error) => reject(err));
+      const fetchWithRedirects = (curUrl: string, isRedirect = false, depth = 0): void => {
+        if (depth > 5) {
+          fileStream.close();
+          reject(new Error('Zbyt wiele przekierowań podczas pobierania firmware'));
+          return;
+        }
         const headers: Record<string, string> = { 'User-Agent': 'AutoAudioSwitch-SensorFlasher' };
         if (isPrivate && !isRedirect) {
           headers['Authorization'] = `Bearer ${(token || '').trim()}`;
@@ -248,7 +321,8 @@ export default class SensorFlasher {
               res.statusCode < 400 &&
               res.headers.location
             ) {
-              fetchWithRedirects(res.headers.location, true);
+              res.destroy();
+              fetchWithRedirects(res.headers.location, true, depth + 1);
               return;
             }
             if (res.statusCode !== 200) {
@@ -262,6 +336,11 @@ export default class SensorFlasher {
 
             res.on('data', (c: Buffer) => {
               downloaded += c.length;
+              if (total > 0 && downloaded > total) {
+                fileStream.destroy();
+                reject(new Error('Pobrany plik jest większy niż deklarowany — możliwa manipulacja lub błąd serwera'));
+                return;
+              }
               if (total > 0) {
                 this.emit('flash-progress', {
                   stage: 'downloading',
@@ -274,6 +353,14 @@ export default class SensorFlasher {
             res.pipe(fileStream);
             fileStream.on('finish', () => {
               fileStream.close();
+              // Weryfikacja kompletności pobrania względem metadanych GitHub
+              if (total > 0 && downloaded !== total) {
+                fs.rmSync(targetFile, { force: true });
+                reject(
+                  new Error(`Pobieranie niekompletne: ${downloaded} z ${total} bajtów. Spróbuj ponownie.`)
+                );
+                return;
+              }
               resolve(targetFile);
             });
           })
@@ -287,12 +374,24 @@ export default class SensorFlasher {
     });
   }
 
-  async flashFirmware(binPathOrBuffer: string | Buffer, customPort: string | null = null): Promise<{ ok: boolean; port: string }> {
+  async flashFirmware(
+    binPathOrBuffer: string | Buffer,
+    customPort: string | null = null,
+    opts: { eraseAll?: boolean } = {}
+  ): Promise<{ ok: boolean; port: string }> {
     if (this.isFlashing) throw new Error('Wgrywanie firmware jest już w toku');
     this.isFlashing = true;
     this.cancelRequested = false;
 
+    // Wczytaj i ZWALIDUJ plik PRZED jakimkolwiek kontaktem z urządzeniem.
+    // Nigdy nie dopuszczamy do wgrania śmieci w pamięć flash sensora.
+    const binBuffer = typeof binPathOrBuffer === 'string' ? fs.readFileSync(binPathOrBuffer) : binPathOrBuffer;
+    this.validateFirmwareImage(binBuffer);
+
+    const eraseAll = Boolean(opts.eraseAll);
+
     let targetPort: string | null = customPort || null;
+    let detectedPid: number | undefined;
     if (!targetPort) {
       const list = await SerialPort.list();
       const espPort = list.find((p) => {
@@ -301,8 +400,13 @@ export default class SensorFlasher {
         const mfg = (p.manufacturer || '').toLowerCase();
         return vid === '303a' || vid === '2886' || pid === '1001' || mfg.includes('espressif') || mfg.includes('seeed');
       });
-      if (espPort) targetPort = espPort.path;
-      else if (list.length > 0) targetPort = list[0].path;
+      if (espPort) {
+        targetPort = espPort.path;
+        const pidNum = parseInt(espPort.productId || '', 16);
+        if (Number.isFinite(pidNum)) detectedPid = pidNum;
+      }
+      // Brak fallbacku na pierwszy lepszy port — nie wolno wgrywać firmware
+      // do przypadkowego urządzenia szeregowego podłączonego do komputera.
     }
 
     if (!targetPort) {
@@ -318,6 +422,7 @@ export default class SensorFlasher {
     }
 
     let serialPort: SerialPort | null = null;
+    let transport: NodeSerialTransport | null = null;
 
     try {
       // 2. Otwarcie portu na 115200 baud
@@ -331,7 +436,7 @@ export default class SensorFlasher {
         serialPort!.open((err) => (err ? reject(err) : resolve()));
       });
 
-      const transport = new NodeSerialTransport(serialPort);
+      transport = new NodeSerialTransport(serialPort, detectedPid);
 
       // 3. Inicjalizacja ESPLoader
       const terminal = {
@@ -347,31 +452,37 @@ export default class SensorFlasher {
       const loader = new ESPLoader({
         transport: transport as never,
         baudrate: 115200,
-        terminal: terminal as never,
-        romBaudrate: 115200,
-        enableFlashSizes: true
+        terminal: terminal as never
       } as never);
 
       this.emit('flash-progress', { stage: 'syncing', percent: 15, message: 'Synchronizacja z bootloaderem ESP32-C6…' });
       const chipName = await loader.main();
       console.log(`[esptool] Wykryto układ: ${chipName}`);
 
-      // 4. Załadowanie zawartości pliku binarnego
-      const binBuffer = typeof binPathOrBuffer === 'string' ? fs.readFileSync(binPathOrBuffer) : binPathOrBuffer;
-
-      // 5. Konwersja na ciąg binarny dla esptool-js
-      let binString = '';
-      for (let i = 0; i < binBuffer.length; i++) {
-        binString += String.fromCharCode(binBuffer[i]);
+      // 4. BEZWZGLĘDNA weryfikacja układu — obraz ESP32-C6 nie może trafić
+      //    na inny chip. Przerywamy PRZED kasowaniem i zapisem.
+      if (!/ESP32[-_ ]?C6/i.test(chipName)) {
+        throw new Error(
+          `Nieprawidłowy układ na porcie (${chipName}). Wgrywanie dozwolone wyłącznie na ESP32-C6.`
+        );
       }
 
-      this.emit('flash-progress', { stage: 'erasing', percent: 25, message: 'Przygotowywanie pamięci flash…' });
+      if (eraseAll) {
+        this.emit('flash-progress', { stage: 'erasing', percent: 25, message: 'Kasowanie całej pamięci flash (tryb ratunkowy)…' });
+      } else {
+        this.emit('flash-progress', { stage: 'erasing', percent: 25, message: 'Przygotowywanie pamięci flash…' });
+      }
 
-      // 6. Zapisywanie pamięci Flash z raportowaniem postępu na żywo
+      // 5. Zapis pamięci Flash z raportowaniem postępu i weryfikacją MD5.
+      //    esptool-js 0.6.x wymaga data jako Uint8Array — binary string
+      //    byłby zinterpretowany przez pako deflate jako tekst UTF-8
+      //    i USZKODZIŁ obraz podczas kompresji.
       await loader.writeFlash({
-        fileArray: [{ data: binString, address: 0x0 }],
+        fileArray: [{ data: new Uint8Array(binBuffer), address: 0x0 }],
+        flashMode: 'keep',
+        flashFreq: 'keep',
         flashSize: 'keep',
-        eraseAll: false,
+        eraseAll,
         compress: true,
         reportProgress: (_fileIndex: number, written: number, total: number) => {
           const pct = Math.round(25 + (written / total) * 70);
@@ -381,13 +492,17 @@ export default class SensorFlasher {
             message: `Zapisywanie pamięci Flash: ${Math.round((written / total) * 100)}% (${Math.round(written / 1024)} kB)`
           });
         },
-        calculateMD5Hash: () => ''
+        // Prawdziwy MD5 — esptool porówna hash z urządzeniem po zapisie.
+        // Puste '' wyłączałoby weryfikację (uszkodzony flash przeszedłby niezauważony).
+        calculateMD5Hash: (image: string | Uint8Array): string =>
+          createHash('md5')
+            .update(typeof image === 'string' ? Buffer.from(image, 'latin1') : Buffer.from(image))
+            .digest('hex')
       } as never);
 
-      // 7. Restart ESP32-C6
+      // 6. Reset układu by the book (publiczne API esptool-js)
       this.emit('flash-progress', { stage: 'rebooting', percent: 98, message: 'Restartowanie układu ESP32-C6…' });
-      await (loader as unknown as { hardReset(): Promise<void> }).hardReset();
-      await transport.disconnect();
+      await loader.after('hard_reset');
 
       this.emit('flash-progress', { stage: 'done', percent: 100, message: 'Firmware wgrany pomyślnie! ✓' });
       this.emit('flash-complete', { ok: true, port: targetPort });
@@ -399,6 +514,13 @@ export default class SensorFlasher {
       throw err;
     } finally {
       this.isFlashing = false;
+      // ZAWSZE zwalniaj port COM — także przy błędzie, inaczej radar
+      // nie będzie w stanie ponownie otworzyć portu.
+      try {
+        await transport?.disconnect();
+      } catch {
+        /* ignore */
+      }
       // Wznów nasłuch radaru
       const radar = this.radar;
       if (radar) {
@@ -406,6 +528,66 @@ export default class SensorFlasher {
           void radar.start().catch(() => {});
         }, 1200);
       }
+    }
+  }
+
+  /**
+   * Walidacja strukturalna obrazu ESP wg esp_image_header_t (IDFv4+):
+   * - magiczny bajt 0xE9,
+   * - chip_id == 13 (ESP32-C6) — obraz innego układu = twardy reject,
+   * - tablica partycji (0xAA 0x50) na offsecie 0x8000 — dowód że plik jest
+   *   pełnym obrazem merged/factory (goły app.bin wgrany na 0x0 uszkodziłby
+   *   bootloader; app-only wymaga offsetu 0x10000 i innego procesu).
+   */
+  private validateFirmwareImage(buf: Buffer): void {
+    if (buf.length === 0) {
+      throw new Error('Plik firmware jest pusty');
+    }
+    if (buf[0] !== 0xe9) {
+      throw new Error(
+        `Plik nie jest poprawnym obrazem firmware ESP (nagłówek 0x${buf[0]
+          .toString(16)
+          .padStart(2, '0')} zamiast 0xE9). Wgrywanie przerwane.`
+      );
+    }
+
+    // Nagłówek obrazu: [1]=liczba segmentów, [4..7]=entry point, [12..13]=chip_id
+    const segmentCount = buf[1];
+    if (segmentCount < 1 || segmentCount > 16) {
+      throw new Error(`Nieprawidłowa liczba segmentów obrazu (${segmentCount}). Plik nie wygląda na firmware ESP.`);
+    }
+    const entryAddr = buf.readUInt32LE(4);
+    if (entryAddr === 0) {
+      throw new Error('Nieprawidłowy entry point (0x00000000) w nagłówku obrazu.');
+    }
+    const chipId = buf.readUInt16LE(12);
+    const CHIP_ID_ESP32_C6 = 13;
+    if (chipId !== CHIP_ID_ESP32_C6) {
+      throw new Error(
+        `Obraz przeznaczony dla innego układu (chip_id=${chipId}, oczekiwany ${CHIP_ID_ESP32_C6} = ESP32-C6). Wgrywanie przerwane.`
+      );
+    }
+
+    // Pełny obraz merged/factory zawiera tablicę partycji dokładnie na 0x8000
+    const PARTITION_TABLE_OFFSET = 0x8000;
+    if (buf.length < PARTITION_TABLE_OFFSET + 3) {
+      throw new Error(
+        'Plik jest zbyt mały, aby zawierać tablicę partycji (offset 0x8000). ' +
+          'Wymagany jest PEŁNY obraz merged/factory — pojedynczy app.bin uszkodziłby bootloader sensora.'
+      );
+    }
+    if (!(buf[PARTITION_TABLE_OFFSET] === 0xaa && buf[PARTITION_TABLE_OFFSET + 1] === 0x50)) {
+      throw new Error(
+        'Brak tablicy partycji na offsecie 0x8000 — plik nie jest pełnym obrazem merged/factory. ' +
+          'Pobieranie właściwego firmware z GitHuba lub wgranie ręczne esptool są jedynymi wspieranymi opcjami.'
+      );
+    }
+
+    const MAX_FW_BYTES = 16 * 1024 * 1024;
+    if (buf.length > MAX_FW_BYTES) {
+      throw new Error(
+        `Plik firmware przekracza rozmiar pamięci flash sensora (${Math.round(buf.length / 1024 / 1024)} MB > 16 MB).`
+      );
     }
   }
 }

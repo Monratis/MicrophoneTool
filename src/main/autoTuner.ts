@@ -201,17 +201,20 @@ export default class AutoTuner {
 
   persist(): void {
     try {
+      // Jeden zapis na dysk zamiast pięciokrotnego config.set()
+      const data = this.config.data;
       if (this.distanceMean > 0) {
-        this.config.set('radarLearnedDistanceCenter', Math.round(this.distanceMean));
-        this.config.set('radarLearnedDistanceVariance', Math.round(this.distanceMad));
+        data.radarLearnedDistanceCenter = Math.round(this.distanceMean);
+        data.radarLearnedDistanceVariance = Math.round(this.distanceMad);
       }
       if (this.heartRateMean > 0) {
-        this.config.set('radarLearnedHeartRate', Math.round(this.heartRateMean));
+        data.radarLearnedHeartRate = Math.round(this.heartRateMean);
       }
       if (this.breathRateMean > 0) {
-        this.config.set('radarLearnedBreathRate', Math.round(this.breathRateMean));
+        data.radarLearnedBreathRate = Math.round(this.breathRateMean);
       }
-      this.config.set('radarAutoTuningNoiseFloor', Math.round(this.noiseFloor));
+      data.radarAutoTuningNoiseFloor = Math.round(this.noiseFloor);
+      this.config.save();
     } catch (err) {
       console.warn('[auto-tuner] persist warning:', (err as Error).message);
     }
@@ -229,11 +232,13 @@ export default class AutoTuner {
     this.lastDistanceSample = 0;
     this.lastAdaptedAt = Date.now();
 
-    this.config.set('radarLearnedDistanceCenter', 0);
-    this.config.set('radarLearnedDistanceVariance', 0);
-    this.config.set('radarLearnedHeartRate', 0);
-    this.config.set('radarLearnedBreathRate', 0);
-    this.config.set('radarAutoTuningNoiseFloor', 0);
+    const data = this.config.data;
+    data.radarLearnedDistanceCenter = 0;
+    data.radarLearnedDistanceVariance = 0;
+    data.radarLearnedHeartRate = 0;
+    data.radarLearnedBreathRate = 0;
+    data.radarAutoTuningNoiseFloor = 0;
+    this.config.save();
 
     return this.getStatus();
   }

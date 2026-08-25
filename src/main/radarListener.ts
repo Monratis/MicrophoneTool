@@ -52,6 +52,7 @@ export default class RadarListener extends EventEmitter {
   private reconnectTimer: NodeJS.Timeout | null = null;
   reconnectAttempts = 0;
   private lastPortName: string | null = null;
+  private petStreak = 0;
   private lineBuffer = '';
   private rawBuffer: Buffer = Buffer.alloc(0);
 
@@ -75,7 +76,11 @@ export default class RadarListener extends EventEmitter {
   private async loadSerialPort(): Promise<SerialPortCtor> {
     if (!this.SerialPortCtor) {
       const m = await import('serialport');
-      this.SerialPortCtor = m.SerialPort || m.default?.SerialPort;
+      const Ctor = (m.SerialPort || m.default?.SerialPort) as SerialPortCtor | undefined;
+      if (!Ctor) {
+        throw new Error('serialport: nie znaleziono eksportu SerialPort');
+      }
+      this.SerialPortCtor = Ctor;
     }
     return this.SerialPortCtor;
   }
@@ -99,13 +104,18 @@ export default class RadarListener extends EventEmitter {
     if (!this.running) return;
     try {
       const SerialPort = await this.loadSerialPort();
+      // stop() mogło przyjść w trakcie await (np. flasher zwalnia port COM)
+      if (!this.running) return;
       const portName = this.lastPortName || (await this.resolvePort());
+      if (!this.running) return;
       if (!portName) {
         this.emit('status', { connected: false, error: 'brak portu' } satisfies RadarStatusEvent);
         this.scheduleReconnect();
         return;
       }
       this.lastPortName = portName;
+      this.lineBuffer = '';
+      this.rawBuffer = Buffer.alloc(0);
       const port = new SerialPort({
         path: portName,
         baudRate: this.config.get('baudRate') || 115200
@@ -131,7 +141,11 @@ export default class RadarListener extends EventEmitter {
 
   private scheduleReconnect(): void {
     if (!this.running || this.reconnectTimer) return;
-    const delay = 2500;
+    // Drabina: po wlaniu kabla łączymy się szybko (czułość na replug),
+    // potem zwalniamy żeby nie meczyć portu przy dłuższej nieobecności.
+    const delay =
+      this.reconnectAttempts < 3 ? 600 : this.reconnectAttempts < 8 ? 1500 : 2500;
+    this.reconnectAttempts++;
     this.lastPortName = null;
     this.emit('status', { connected: false, nextReconnectMs: delay } satisfies RadarStatusEvent);
     this.reconnectTimer = setTimeout(() => {
@@ -433,14 +447,21 @@ export default class RadarListener extends EventEmitter {
     const rpm = this.telemetry.breathRate || 0;
     const dist = this.telemetry.distanceCm || 0;
 
-    const isPetSignature = (rpm > 22 && rpm <= 60) || (hr > 125 && hr <= 240);
-    if (this.config.get('petFilterEnabled') !== false && isPetSignature) {
+    // Klasyfikacja "pet" wymaga PERSISTENCJI (kilka kolejnych odczytów).
+    // Pojedniczy skok tętna/oddechu u człowieka (stres, wysiłek) nie może
+    // go przeklasyfikować na zwierzę i stłumić przełączenia.
+    const isPetSignature =
+      this.config.get('petFilterEnabled') !== false &&
+      ((rpm > 22 && rpm <= 60) || (hr > 125 && hr <= 240));
+    this.petStreak = isPetSignature ? Math.min(20, this.petStreak + 1) : 0;
+    const petConfirmed = this.petStreak >= 4;
+    if (petConfirmed) {
       this.telemetry.detectedPerson = 'pet';
       return;
     }
 
     if (!this.config.get('biometricsEnabled')) {
-      this.telemetry.detectedPerson = isPetSignature ? 'pet' : dist > 0 ? 'me' : 'unknown';
+      this.telemetry.detectedPerson = dist > 0 ? 'me' : 'unknown';
       return;
     }
 

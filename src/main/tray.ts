@@ -1,6 +1,5 @@
 import { Tray, Menu, nativeImage, app } from 'electron';
 import type { AppContext } from './appContext';
-import type { DeviceState } from '../shared/types';
 
 const STATE_LABEL: Record<string, string> = {
   desk: 'Przy biurku (Stacjonarny)',
@@ -92,5 +91,7 @@ export function refreshTray(ctx: AppContext, tray: Electron.Tray): void {
   ]);
   tray.setContextMenu(menu);
   tray.setToolTip(`Auto Audio Switch · ${stateText} · ${MODE_LABEL[s.mode]}`);
-  tray.setImage(trayIcon(s.state as DeviceState | null));
+  // Stan 'headset' odpowiada nieobecności przy biurku — pokazujemy ikonę 'away'
+  const iconKey = s.state === 'headset' ? 'away' : s.state;
+  tray.setImage(trayIcon(iconKey));
 }

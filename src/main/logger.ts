@@ -9,6 +9,9 @@ export function setLogSink(cb: (entry: string) => void): void {
   sink = cb;
 }
 
+// ... w index.ts sink sprawdza widoczność okna — logi lecą przez IPC
+// tylko gdy okno logów faktycznie widać.
+
 export function appendLog(category: string, message: string): void {
   const ts = new Date().toLocaleTimeString('pl-PL', { hour12: false });
   const entry = `[${ts}] [${category}] ${message}`;
@@ -27,6 +30,9 @@ export function interceptConsole(): void {
   const fmt = (args: unknown[]): string =>
     args
       .map((a) => {
+        if (a instanceof Error) {
+          return a.stack || a.message;
+        }
         if (typeof a === 'object' && a !== null) {
           try {
             return JSON.stringify(a);

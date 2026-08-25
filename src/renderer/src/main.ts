@@ -2,6 +2,11 @@ import './styles.css';
 import type { AudioDeviceItem, PushEvent, SerialPortInfo, Snapshot, UpdaterStatus } from './global';
 
 const STATE_LABEL: Record<string, string> = { desk: 'Przy biurku (Stacjonarny)', away: 'Poza biurkiem (Mobilny)' };
+
+// Escapowanie treści wstrzykiwanych do innerHTML (nazwy urządzeń, porty,
+// komunikaty, dane z GitHub Releases) — bez tego możliwy HTML injection.
+const esc = (s: unknown): string =>
+  String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
 const MODE_LABEL: Record<string, string> = {
   auto: 'Auto (radar)',
   desk: 'Stacjonarny',
@@ -10,11 +15,25 @@ const MODE_LABEL: Record<string, string> = {
 
 // ---------- Web Audio Chime Synthesizer ----------
 
+// Jeden współdzielony kontekst — tworzenie nowego na każdy dzwonek wycieka
+// (przeglądowe limity ~6 AudioContext; po kilku przełączeniach chime przestaje grać).
+let sharedAudioCtx: AudioContext | null = null;
+
+// Twardy sufit głośności chime — konfiguracja użytkownika nigdy nie
+// przekroczy komfortowego poziomu (pełna skala = bolesny sygnał sinus).
+const CHIME_MAX_GAIN = 0.35;
+
 function playChime(state: 'desk' | 'away', volume = 0.2) {
   try {
     const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
     if (!AudioCtx) return;
-    const ctx = new AudioCtx();
+    if (!sharedAudioCtx || sharedAudioCtx.state === 'closed') {
+      sharedAudioCtx = new AudioCtx();
+    }
+    const ctx = sharedAudioCtx;
+    if (ctx.state === 'suspended') {
+      void ctx.resume();
+    }
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -28,8 +47,10 @@ function playChime(state: 'desk' | 'away', volume = 0.2) {
       osc.frequency.exponentialRampToValueAtTime(523.25, now + 0.08);
     }
 
-    const safeVol = Math.min(1, Math.max(0.01, volume));
-    gain.gain.setValueAtTime(safeVol, now);
+    const safeVol = Math.min(CHIME_MAX_GAIN, Math.max(0.01, volume));
+    // Obwiednia z krótkim atakiem — skok do pełnej amplitudy słychać jako klik.
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(safeVol, now + 0.015);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
 
     osc.connect(gain);
@@ -53,7 +74,7 @@ class AppUI {
   private saving = false;
   private refreshingPorts = false;
   private deviceInfo = '';
-  private updater: UpdaterStatus = { status: 'idle', currentVersion: '0.2.0' };
+  private updater: UpdaterStatus = { status: 'idle', currentVersion: '' };
   private downloadProgress: { percent: number; speed: string } | null = null;
   private toasts: { id: number; message: string; error?: boolean }[] = [];
   private toastCounter = 0;
@@ -145,6 +166,35 @@ class AppUI {
     if (upd) this.updater = upd;
 
     window.api.onEvent((e: PushEvent) => this.handleEvent(e));
+
+    // Polling urządzeń/portów co 3 s — podłączenie nowego mikrofonu musi
+    // być widoczne na liście BEZ klikania "odśwież". Serwer ma cache 3 s,
+    // więc koszt to jeden tani IPC; DOM ruszamy tylko przy faktycznej zmianie.
+    this.lastDeviceSig = this.deviceListSig(this.audioDevices);
+    this.lastPortSig = this.portListSig(this.ports);
+    setInterval(() => {
+      if (!this.snap) return;
+      void this.pollHardwareLists();
+    }, 3000);
+
+    this.render();
+
+    // Escape zamyka najwyższe otwarte modalne okno. Raz na dokumencie —
+    // bindEvents odpala się przy każdym renderze i stackowałoby listenery.
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      if (this.wizardOpen) {
+        ev.preventDefault();
+        this.closeCalibrationWizard();
+      } else if (this.bioModalOpen || this.flasherModalOpen || this.logsModalOpen) {
+        ev.preventDefault();
+        this.bioModalOpen = false;
+        this.flasherModalOpen = false;
+        this.logsModalOpen = false;
+        this.render();
+      }
+    });
+
     this.render();
   }
 
@@ -168,12 +218,20 @@ class AppUI {
       if (!this.dirty) {
         this.form = { ...e.snapshot.config };
       }
-      this.loadAudioDevices().then(() => this.render());
+      // Punktowa aktualizacja — pełny rebuild widoku tylko przy akcjach użytkownika
+      this.loadAudioDevices().then(() => {
+        if (document.getElementById('state-title')) {
+          this.applySnapshotToDOM();
+        } else {
+          this.scheduleRender();
+        }
+      });
       return;
     }
 
     if (e.type === 'telemetry') {
-      this.telemetry = { ...this.telemetry, ...e };
+      const { type: _ignored, ...tel } = e;
+      this.telemetry = { ...this.telemetry, ...tel };
       this.updateTelemetryDOM();
 
       if (this.wizardOpen && this.wizardCountdown > 0) {
@@ -206,7 +264,19 @@ class AppUI {
         updateInfo: e.updateInfo !== undefined ? e.updateInfo : this.updater.updateInfo,
         error: e.error ? String(e.error) : undefined
       };
-      this.render();
+      // Tylko strefa bannerów + przycisk sprawdzania — reszta widoku nietknięta
+      const zone = document.getElementById('update-zone');
+      if (zone) {
+        zone.innerHTML = this.buildUpdateZoneHtml();
+        this.attachUpdateZoneEvents();
+        const btn = document.getElementById('btn-check-updates') as HTMLButtonElement | null;
+        if (btn) {
+          btn.disabled = this.updater.status === 'checking' || this.updater.status === 'downloading';
+          btn.textContent = this.updater.status === 'checking' ? 'Sprawdzanie…' : 'Sprawdź aktualizacje';
+        }
+      } else {
+        this.render();
+      }
     }
 
     if (e.type === 'updater:progress') {
@@ -214,7 +284,16 @@ class AppUI {
         percent: e.percent || 0,
         speed: e.speed || ''
       };
-      this.render();
+      // Celowana aktualizacja paska — pełny render tutaj migałby kilkanaście
+      // razy na sekundę podczas pobierania.
+      const fill = document.getElementById('upd-progress-fill');
+      const txt = document.getElementById('upd-progress-text');
+      if (fill && txt) {
+        fill.style.width = `${e.percent || 0}%`;
+        txt.textContent = `${e.percent || 0}% (${e.speed || ''})`;
+      } else {
+        this.render();
+      }
     }
 
     if (e.type === 'sensor:flash-progress') {
@@ -227,7 +306,17 @@ class AppUI {
       if (e.stage === 'error') {
         this.pushToast(e.message || 'Błąd wgrywania firmware', true);
       }
-      this.render();
+      // Celowana aktualizacja metra flashera (eventy lecą gęsto podczas zapisu)
+      const fill = document.getElementById('flash-meter-fill');
+      const pct = document.getElementById('flash-pct-text');
+      const msg = document.getElementById('flash-msg-text');
+      if (fill && pct) {
+        fill.style.width = `${e.percent || 0}%`;
+        pct.textContent = `${e.percent || 0}%`;
+        if (msg && e.message) msg.textContent = e.message;
+      } else {
+        this.render();
+      }
     }
 
     if (e.type === 'sensor:flash-complete') {
@@ -306,19 +395,25 @@ class AppUI {
 
   private pushToast(message: string, error = false) {
     const id = ++this.toastCounter;
+    // Limit stosu — lawina eventów nie może zasypać ekranu komunikatami
+    if (this.toasts.length >= 4) {
+      const oldest = this.toasts.shift();
+      if (oldest) clearTimeout((oldest as any)._timer);
+    }
     this.toasts.push({ id, message, error });
     this.renderToasts();
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       this.toasts = this.toasts.filter((t) => t.id !== id);
       this.renderToasts();
     }, 4000);
+    (this.toasts[this.toasts.length - 1] as any)._timer = timer;
   }
 
   private renderToasts() {
     const container = this.root.querySelector('.toasts');
     if (!container) return;
     container.innerHTML = this.toasts
-      .map((t) => `<div class="toast ${t.error ? 'error' : ''}">${t.message}</div>`)
+      .map((t) => `<div class="toast ${t.error ? 'error' : ''}">${esc(t.message)}</div>`)
       .join('');
   }
 
@@ -482,6 +577,207 @@ class AppUI {
     this.pushToast('Kalibracja sensora zakończona i zapisana ✓');
   }
 
+  private renderTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingRender = false;
+  private lastDeviceSig = '';
+  private lastPortSig = '';
+
+  private deviceListSig(devices: AudioDeviceItem[]): string {
+    return devices.map((d) => `${d.id || d.name}|${d.isDefault ? 1 : 0}`).sort().join(';');
+  }
+
+  private portListSig(ports: SerialPortInfo[]): string {
+    return ports.map((p) => p.path).sort().join(';');
+  }
+
+  /** Odświeża listy sprzętu w tle; DOM tylko przy realnej zmianie. */
+  private async pollHardwareLists(): Promise<void> {
+    try {
+      const devs = await window.api.listDevices();
+      if (this.deviceListSig(devs || []) !== this.lastDeviceSig) {
+        this.audioDevices = devs || [];
+        this.lastDeviceSig = this.deviceListSig(this.audioDevices);
+        this.refreshMicSelectOptions();
+      }
+      const ports = await window.api.getPorts();
+      if (this.portListSig(ports) !== this.lastPortSig) {
+        this.ports = ports;
+        this.lastPortSig = this.portListSig(ports);
+        const sel = document.getElementById('sel-port') as HTMLSelectElement | null;
+        if (sel) {
+          sel.innerHTML =
+            `<option value="auto" ${this.form?.port === 'auto' ? 'selected' : ''}>auto (automatyczne wykrycie XIAO ESP32-C6)</option>` +
+            this.ports
+              .map(
+                (p) =>
+                  `<option value="${esc(p.path)}" ${p.path === this.form!.port ? 'selected' : ''}>${esc(p.path)}${p.manufacturer ? ` · ${esc(p.manufacturer)}` : ''}</option>`
+              )
+              .join('');
+        }
+      }
+    } catch {
+      /* pomijanie cyklu */
+    }
+  }
+
+  /** Przebudowuje opcje selektów mikrofonów zachowując aktualny wybór. */
+  private refreshMicSelectOptions(): void {
+    if (!this.form) return;
+    const form = this.form;
+    const build = (id: string, savedName: string): void => {
+      const sel = document.getElementById(id) as HTMLSelectElement | null;
+      if (!sel) return;
+      const current = savedName;
+      sel.innerHTML =
+        `<option value="" ${!current ? 'selected' : ''}>— Wybierz mikrofon z listy —</option>` +
+        this.missingDeviceOption(current, this.audioDevices) +
+        this.audioDevices
+          .map(
+            (d) =>
+              `<option value="${esc(d.name)}" data-id="${esc(d.id || '')}" ${d.name === current ? 'selected' : ''}>${esc(d.name)}${d.isDefault ? ' (Domyślny)' : ''}</option>`
+          )
+          .join('');
+    };
+    build('sel-mic-desk', form.micDeskName);
+    build('sel-mic-headset', form.micHeadsetName);
+  }
+
+  /**
+   * Render kolejkowany: snapshoty potrafią leć co ~2 s (status radaru),
+   * a pełny rebuild DOM zamyka otwarte selecty, gubi kursor w polach
+   * i przerywa hover. Kolejkujemy + odkładamy gdy użytkownik coś wpisuje.
+   */
+  private scheduleRender(): void {
+    // Otwarty modal = żaden snapshot nie przebudowuje widoku pod spodem
+    // (to źródło "migania" modala). Dane siedzą w this.snap/form —
+    // zamknięcie modala i tak robi render().
+    if (this.wizardOpen || this.bioModalOpen || this.flasherModalOpen || this.logsModalOpen) return;
+    this.pendingRender = true;
+    if (this.renderTimer) return;
+    this.renderTimer = setTimeout(() => {
+      this.renderTimer = null;
+      const ae = document.activeElement as HTMLInputElement | null;
+      const typing =
+        !!ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA') && ae.type !== 'range';
+      if (typing) {
+        // Poczekaj aż użytkownik skończy edycję pola
+        ae.addEventListener(
+          'blur',
+          () => {
+            if (this.pendingRender) {
+              this.pendingRender = false;
+              this.render();
+            }
+          },
+          { once: true }
+        );
+        return;
+      }
+      this.pendingRender = false;
+      this.render();
+    }, 400);
+  }
+
+  /** Izolowana strefa bannerów aktualizacji — przebudowywana osobno, bez ruszania reszty widoku. */
+  private buildUpdateZoneHtml(): string {
+    if (this.updater.status === 'available' && this.updater.updateInfo) {
+      return `<div class="update-banner">
+                  <div class="update-banner-icon">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                  </div>
+                  <div class="update-banner-content">
+                    <strong>Nowa wersja dostępna: v${esc(this.updater.updateInfo.version)}</strong>
+                    <p>${esc(this.updater.updateInfo.name || 'Nowe funkcje i usprawnienia')}</p>
+                    <button class="btn btn-sm btn-primary" id="btn-download-update">Pobierz i zaktualizuj</button>
+                  </div>
+                </div>`;
+    }
+    if (this.updater.status === 'downloading') {
+      return `<div class="update-banner downloading">
+                  <div class="update-banner-content" style="width: 100%">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 4px">
+                      <strong>Pobieranie aktualizacji…</strong>
+                      <span id="upd-progress-text">${this.downloadProgress?.percent || 0}% (${this.downloadProgress?.speed || '...'})</span>
+                    </div>
+                    <div class="progress-bar">
+                      <div class="progress-fill" id="upd-progress-fill" style="width: ${this.downloadProgress?.percent || 0}%"></div>
+                    </div>
+                  </div>
+                </div>`;
+    }
+    if (this.updater.status === 'downloaded') {
+      return `<div class="update-banner ready">
+                  <div class="update-banner-icon">✓</div>
+                  <div class="update-banner-content">
+                    <strong>Aktualizacja gotowa do instalacji!</strong>
+                    <p>Kliknij poniżej, aby zrestartować aplikację.</p>
+                    <button class="btn btn-sm btn-primary" id="btn-install-update">Zainstaluj i uruchom ponownie</button>
+                  </div>
+                </div>`;
+    }
+    return '';
+  }
+
+  private attachUpdateZoneEvents(): void {
+    document.getElementById('btn-download-update')?.addEventListener('click', async () => {
+      this.pushToast('Rozpoczynam pobieranie aktualizacji…');
+      try {
+        await window.api.downloadUpdate();
+      } catch (err: any) {
+        this.pushToast(`Błąd pobierania: ${err.message}`, true);
+      }
+    });
+    document.getElementById('btn-install-update')?.addEventListener('click', async () => {
+      try {
+        await window.api.installUpdate();
+      } catch (err: any) {
+        this.pushToast(`Nie można zainstalować: ${err.message}`, true);
+      }
+    });
+  }
+
+  /** Punktowa synchronizacja UI ze snapshotem — bez pełnego rebuildu widoku. */
+  private applySnapshotToDOM(): void {
+    if (!this.snap || !this.form) return;
+    const snap = this.snap;
+    const isUnconfigured = !this.form.micDeskName && !this.form.micHeadsetName;
+
+    const title = document.getElementById('state-title');
+    if (title) {
+      title.textContent = snap.state ? STATE_LABEL[snap.state] : (isUnconfigured ? 'Brak konfiguracji' : 'Oczekiwanie…');
+    }
+    const dev = document.getElementById('device-name');
+    if (dev) {
+      dev.textContent = snap.deviceName ? snap.deviceName : (isUnconfigured ? 'Nie wybrano' : '—');
+    }
+    const radarBadge = document.getElementById('radar-badge');
+    if (radarBadge) {
+      radarBadge.textContent = snap.radar.connected ? 'Radar: połączony' : 'Radar: brak połączenia';
+      radarBadge.className = `badge ${snap.radar.connected ? 'live' : ''}`;
+    }
+    document.querySelectorAll<HTMLElement>('[data-mode]').forEach((b) => {
+      b.classList.toggle('active', b.getAttribute('data-mode') === snap.mode);
+    });
+    const pill = document.getElementById('btn-toggle-mute');
+    if (pill) {
+      pill.className = `mute-pill ${this.isMuted ? 'muted' : ''}`;
+      pill.textContent = this.isMuted ? '🔇 Wyciszony' : '🎙️ Aktywny';
+    }
+    // Synchronizacja wybranych opcji (gdy opcja istnieje na liście)
+    const syncSelect = (id: string, val: string): void => {
+      const sel = document.getElementById(id) as HTMLSelectElement | null;
+      if (!sel) return;
+      if (Array.from(sel.options).some((o) => o.value === val)) sel.value = val;
+    };
+    syncSelect('sel-mic-desk', this.form.micDeskName);
+    syncSelect('sel-mic-headset', this.form.micHeadsetName);
+    syncSelect('sel-port', this.form.port);
+  }
+
   render() {
     if (!this.snap || !this.form) {
       this.root.innerHTML = `<div class="app" style="display:grid;place-items:center;color:var(--muted)">Wczytywanie…</div>`;
@@ -509,7 +805,7 @@ class AppUI {
               </svg>
             </span>
             Auto Audio Switch
-            <span class="ver-tag">v${this.updater.currentVersion}</span>
+            <span class="ver-tag">v${esc(this.snap.version || this.updater.currentVersion)}</span>
           </div>
           <div class="win-btns">
             <button class="close" id="btn-close" title="Ukryj do zasobnika (Tray)">
@@ -535,54 +831,8 @@ class AppUI {
               : ''
           }
 
-          <!-- update banner -->
-          ${
-            this.updater.status === 'available' && this.updater.updateInfo
-              ? `<div class="update-banner">
-                  <div class="update-banner-icon">
-                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                      <polyline points="7 10 12 15 17 10" />
-                      <line x1="12" y1="15" x2="12" y2="3" />
-                    </svg>
-                  </div>
-                  <div class="update-banner-content">
-                    <strong>Nowa wersja dostępna: v${this.updater.updateInfo.version}</strong>
-                    <p>${this.updater.updateInfo.name || 'Nowe funkcje i usprawnienia'}</p>
-                    <button class="btn btn-sm btn-primary" id="btn-download-update">Pobierz i zaktualizuj</button>
-                  </div>
-                </div>`
-              : ''
-          }
-
-          ${
-            this.updater.status === 'downloading'
-              ? `<div class="update-banner downloading">
-                  <div class="update-banner-content" style="width: 100%">
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 4px">
-                      <strong>Pobieranie aktualizacji…</strong>
-                      <span>${this.downloadProgress?.percent || 0}% (${this.downloadProgress?.speed || '...'})</span>
-                    </div>
-                    <div class="progress-bar">
-                      <div class="progress-fill" style="width: ${this.downloadProgress?.percent || 0}%"></div>
-                    </div>
-                  </div>
-                </div>`
-              : ''
-          }
-
-          ${
-            this.updater.status === 'downloaded'
-              ? `<div class="update-banner ready">
-                  <div class="update-banner-icon">✓</div>
-                  <div class="update-banner-content">
-                    <strong>Aktualizacja gotowa do instalacji!</strong>
-                    <p>Kliknij poniżej, aby zrestartować aplikację.</p>
-                    <button class="btn btn-sm btn-primary" id="btn-install-update">Zainstaluj i uruchom ponownie</button>
-                  </div>
-                </div>`
-              : ''
-          }
+          <!-- update banner (izolowana strefa — odświezana punktowo) -->
+          <div id="update-zone">${this.buildUpdateZoneHtml()}</div>
 
           <!-- status hero & mode segmented -->
           <section class="card">
@@ -597,19 +847,19 @@ class AppUI {
                   </svg>
                 </span>
               </div>
-              <div class="status-meta">
+                <div class="status-meta">
                 <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px">
-                  <h1>${state ? STATE_LABEL[state] : (isUnconfigured ? 'Brak konfiguracji' : 'Oczekiwanie…')}</h1>
+                  <h1 id="state-title">${state ? STATE_LABEL[state] : (isUnconfigured ? 'Brak konfiguracji' : 'Oczekiwanie…')}</h1>
                   <button class="mute-pill ${this.isMuted ? 'muted' : ''}" id="btn-toggle-mute" title="Wycisz/Odcisz (skrót: Ctrl+Shift+M)">
                     ${this.isMuted ? '🔇 Wyciszony' : '🎙️ Aktywny'}
                   </button>
                 </div>
                 <p>
-                  Domyślny mikrofon: <strong>${this.snap.deviceName ?? (isUnconfigured ? 'Nie wybrano' : '—')}</strong>
+                  Domyślny mikrofon: <strong id="device-name">${this.snap.deviceName ? esc(this.snap.deviceName) : (isUnconfigured ? 'Nie wybrano' : '—')}</strong>
                 </p>
                 <div class="badges" style="margin-top: 6px">
                   <span class="badge">${MODE_LABEL[this.snap.mode] || this.snap.mode}</span>
-                  <span class="badge ${radar.connected ? 'live' : ''}">
+                  <span class="badge ${radar.connected ? 'live' : ''}" id="radar-badge">
                     ${radar.connected ? 'Radar: połączony' : 'Radar: brak połączenia'}
                   </span>
                 </div>
@@ -716,7 +966,7 @@ class AppUI {
                       ${this.ports
                         .map(
                           (p) =>
-                            `<option value="${p.path}" ${p.path === this.form!.port ? 'selected' : ''}>${p.path}${p.manufacturer ? ` · ${p.manufacturer}` : ''}</option>`
+                            `<option value="${esc(p.path)}" ${p.path === this.form!.port ? 'selected' : ''}>${esc(p.path)}${p.manufacturer ? ` · ${esc(p.manufacturer)}` : ''}</option>`
                         )
                         .join('')}
                     </select>
@@ -752,9 +1002,40 @@ class AppUI {
                   </div>
                   <select class="select" id="sel-mic-desk">
                     <option value="" ${!this.form.micDeskName ? 'selected' : ''}>— Wybierz mikrofon z listy —</option>
+                    ${this.missingDeviceOption(this.form.micDeskName, this.audioDevices)}
                     ${this.audioDevices
-                      .map((d) => `<option value="${d.name}" ${d.name === this.form!.micDeskName ? 'selected' : ''}>${d.name}${d.isDefault ? ' (Domyślny)' : ''}</option>`)
+                      .map((d) => `<option value="${esc(d.name)}" data-id="${esc(d.id || '')}" ${d.name === this.form!.micDeskName ? 'selected' : ''}>${esc(d.name)}${d.isDefault ? ' (Domyślny)' : ''}</option>`)
                       .join('')}
+                  </select>
+                  ${
+                    typeof this.form.micDeskVolume === 'number' && this.form.micDeskVolume >= 0
+                      ? `<div style="display:flex; align-items:center; gap:8px; margin-top:6px">
+                          <span style="font-size:10.5px; color:var(--muted)">🔊</span>
+                          <input type="range" class="slider" id="rng-vol-desk" min="0" max="100" step="5" value="${this.form.micDeskVolume}" style="flex:1" />
+                          <span class="slider-val" id="vol-desk-val">${this.form.micDeskVolume}%</span>
+                        </div>`
+                      : ''
+                  }
+                  <div style="display:flex; align-items:center; gap:8px; margin-top:6px">
+                    <span style="font-size:10.5px; color:var(--muted)" title="Bramka VAD w Discordzie dla tego mikrofonu">🚪</span>
+                    <input type="range" class="slider" id="rng-gate-desk" min="-90" max="0" step="5" value="${Math.max(-90, this.form.micDeskGateDb ?? -60)}" style="flex:1" />
+                    <span class="slider-val" id="gate-desk-val">${(this.form.micDeskGateDb ?? -1) >= 0 ? this.form.micDeskGateDb + ' dB' : 'domyślna'}</span>
+                  </div>
+                  ${(this.form.micDeskGateDb ?? -1) < 0 ? `<small style="display:block; color:var(--muted); font-size:10px; margin-top:2px">Rusz suwak aby ustawić własną bramkę (do tej pory Discord używa swojej)</small>` : ''}
+                  <select class="select select-sm" id="sel-krisp-desk" style="margin-top:6px">
+                    <option value="default" ${(this.form.micDeskKrisp || 'default') === 'default' ? 'selected' : ''}>🔇 Wyciszenie szumów (Krisp): domyślne Discorda</option>
+                    <option value="on" ${this.form.micDeskKrisp === 'on' ? 'selected' : ''}>🔇 Wyciszenie szumów (Krisp): włączone</option>
+                    <option value="off" ${this.form.micDeskKrisp === 'off' ? 'selected' : ''}>🔇 Wyciszenie szumów (Krisp): wyłączone</option>
+                  </select>
+                  <select class="select select-sm" id="sel-agc-desk" style="margin-top:6px">
+                    <option value="default" ${(this.form.micDeskAgc || 'default') === 'default' ? 'selected' : ''}>📈 AGC: domyślne Discorda</option>
+                    <option value="on" ${this.form.micDeskAgc === 'on' ? 'selected' : ''}>📈 AGC: włączone</option>
+                    <option value="off" ${this.form.micDeskAgc === 'off' ? 'selected' : ''}>📈 AGC: wyłączone</option>
+                  </select>
+                  <select class="select select-sm" id="sel-echo-desk" style="margin-top:6px">
+                    <option value="default" ${(this.form.micDeskEcho || 'default') === 'default' ? 'selected' : ''}>↩️ Usuwanie echa: domyślne Discorda</option>
+                    <option value="on" ${this.form.micDeskEcho === 'on' ? 'selected' : ''}>↩️ Usuwanie echa: włączone</option>
+                    <option value="off" ${this.form.micDeskEcho === 'off' ? 'selected' : ''}>↩️ Usuwanie echa: wyłączone</option>
                   </select>
                 </div>
 
@@ -765,9 +1046,40 @@ class AppUI {
                   </div>
                   <select class="select" id="sel-mic-headset">
                     <option value="" ${!this.form.micHeadsetName ? 'selected' : ''}>— Wybierz mikrofon z listy —</option>
+                    ${this.missingDeviceOption(this.form.micHeadsetName, this.audioDevices)}
                     ${this.audioDevices
-                      .map((d) => `<option value="${d.name}" ${d.name === this.form!.micHeadsetName ? 'selected' : ''}>${d.name}${d.isDefault ? ' (Domyślny)' : ''}</option>`)
+                      .map((d) => `<option value="${esc(d.name)}" data-id="${esc(d.id || '')}" ${d.name === this.form!.micHeadsetName ? 'selected' : ''}>${esc(d.name)}${d.isDefault ? ' (Domyślny)' : ''}</option>`)
                       .join('')}
+                  </select>
+                  ${
+                    typeof this.form.micHeadsetVolume === 'number' && this.form.micHeadsetVolume >= 0
+                      ? `<div style="display:flex; align-items:center; gap:8px; margin-top:6px">
+                          <span style="font-size:10.5px; color:var(--muted)">🔊</span>
+                          <input type="range" class="slider" id="rng-vol-headset" min="0" max="100" step="5" value="${this.form.micHeadsetVolume}" style="flex:1" />
+                          <span class="slider-val" id="vol-headset-val">${this.form.micHeadsetVolume}%</span>
+                        </div>`
+                      : ''
+                  }
+                  <div style="display:flex; align-items:center; gap:8px; margin-top:6px">
+                    <span style="font-size:10.5px; color:var(--muted)" title="Bramka VAD w Discordzie dla tego mikrofonu">🚪</span>
+                    <input type="range" class="slider" id="rng-gate-headset" min="-90" max="0" step="5" value="${Math.max(-90, this.form.micHeadsetGateDb ?? -60)}" style="flex:1" />
+                    <span class="slider-val" id="gate-headset-val">${(this.form.micHeadsetGateDb ?? -1) >= 0 ? this.form.micHeadsetGateDb + ' dB' : 'domyślna'}</span>
+                  </div>
+                  ${(this.form.micHeadsetGateDb ?? -1) < 0 ? `<small style="display:block; color:var(--muted); font-size:10px; margin-top:2px">Rusz suwak aby ustawić własną bramkę (do tej pory Discord używa swojej)</small>` : ''}
+                  <select class="select select-sm" id="sel-krisp-headset" style="margin-top:6px">
+                    <option value="default" ${(this.form.micHeadsetKrisp || 'default') === 'default' ? 'selected' : ''}>🔇 Wyciszenie szumów (Krisp): domyślne Discorda</option>
+                    <option value="on" ${this.form.micHeadsetKrisp === 'on' ? 'selected' : ''}>🔇 Wyciszenie szumów (Krisp): włączone</option>
+                    <option value="off" ${this.form.micHeadsetKrisp === 'off' ? 'selected' : ''}>🔇 Wyciszenie szumów (Krisp): wyłączone</option>
+                  </select>
+                  <select class="select select-sm" id="sel-agc-headset" style="margin-top:6px">
+                    <option value="default" ${(this.form.micHeadsetAgc || 'default') === 'default' ? 'selected' : ''}>📈 AGC: domyślne Discorda</option>
+                    <option value="on" ${this.form.micHeadsetAgc === 'on' ? 'selected' : ''}>📈 AGC: włączone</option>
+                    <option value="off" ${this.form.micHeadsetAgc === 'off' ? 'selected' : ''}>📈 AGC: wyłączone</option>
+                  </select>
+                  <select class="select select-sm" id="sel-echo-headset" style="margin-top:6px">
+                    <option value="default" ${(this.form.micHeadsetEcho || 'default') === 'default' ? 'selected' : ''}>↩️ Usuwanie echa: domyślne Discorda</option>
+                    <option value="on" ${this.form.micHeadsetEcho === 'on' ? 'selected' : ''}>↩️ Usuwanie echa: włączone</option>
+                    <option value="off" ${this.form.micHeadsetEcho === 'off' ? 'selected' : ''}>↩️ Usuwanie echa: wyłączone</option>
                   </select>
                 </div>
 
@@ -775,7 +1087,7 @@ class AppUI {
                   <button class="btn btn-ghost btn-sm" id="btn-detect-devices" style="width: 100%">
                     🔍 Wykryj i dopasuj mikrofony
                   </button>
-                  ${this.deviceInfo ? `<p class="hint" style="white-space: pre-line; margin-top: 6px">${this.deviceInfo}</p>` : ''}
+                  ${this.deviceInfo ? `<p class="hint" style="white-space: pre-line; margin-top: 6px">${esc(this.deviceInfo)}</p>` : ''}
                 </div>
               </section>
 
@@ -844,6 +1156,17 @@ class AppUI {
                   <button class="switch" id="sw-discord" role="switch" aria-checked="${this.form.discordIntegration ?? true}"></button>
                 </div>
 
+                <div class="field" style="margin-top: 10px">
+                  <label>Wyciszanie mikrofonów przy przełączeniu:</label>
+                  <select class="select" id="sel-mute-behavior">
+                    <option value="mute_inactive" ${(this.form.muteBehaviorOnAway || 'mute_inactive') === 'mute_inactive' ? 'selected' : ''}>Wyciszaj nieaktywny (zalecane)</option>
+                    <option value="none" ${this.form.muteBehaviorOnAway === 'none' ? 'selected' : ''}>Nie steruj wyciszeniem</option>
+                    <option value="mute_stationary" ${this.form.muteBehaviorOnAway === 'mute_stationary' ? 'selected' : ''}>Wyciszaj tylko stacjonarny przy odejściu</option>
+                    <option value="mute_all" ${this.form.muteBehaviorOnAway === 'mute_all' ? 'selected' : ''}>Wyciszaj oba przy odejściu</option>
+                  </select>
+                  <small style="display:block; color: var(--muted); font-size: 10.5px; margin-top: 4px">Ręczne wyciszenie (np. w Discordzie) nigdy nie jest automatycznie odciągane.</small>
+                </div>
+
                 <div class="toggle-row" style="margin-top: 8px">
                   <div class="label">
                     Usypiaj ekrany po odejściu
@@ -875,7 +1198,7 @@ class AppUI {
           <section class="card" style="margin-top: 4px">
             <div style="display: flex; align-items: center; justify-content: space-between">
               <div>
-                <strong style="font-size: 13px">Wersja aplikacji: v${this.updater.currentVersion}</strong>
+                <strong style="font-size: 13px">Wersja aplikacji: v${esc(this.snap.version || this.updater.currentVersion)}</strong>
                 <small style="display: block; color: var(--muted-2); margin-top: 2px">Automatyczne sprawdzanie wydań GitHub</small>
               </div>
               <div style="display: flex; gap: 8px">
@@ -1149,10 +1472,10 @@ class AppUI {
               this.sensorFlashing
                 ? `<div style="margin-top: 10px; padding: 14px; background: var(--panel-2); border: 1px solid var(--accent); border-radius: var(--radius-sm)">
                     <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px">
-                      <strong>${this.sensorFlashProgress.message || 'Wgrywanie firmware…'}</strong>
-                      <span>${this.sensorFlashProgress.percent}%</span>
+                      <strong id="flash-msg-text">${this.sensorFlashProgress.message || 'Wgrywanie firmware…'}</strong>
+                      <span id="flash-pct-text">${this.sensorFlashProgress.percent}%</span>
                     </div>
-                    <div class="wizard-meter"><div class="wizard-meter-fill" style="width: ${this.sensorFlashProgress.percent}%"></div></div>
+                    <div class="wizard-meter"><div class="wizard-meter-fill" id="flash-meter-fill" style="width: ${this.sensorFlashProgress.percent}%"></div></div>
                   </div>`
                 : `<div style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px">
                     <button class="btn btn-primary" id="btn-modal-flash-gh" style="width: 100%">
@@ -1202,8 +1525,7 @@ class AppUI {
               </div>
             </div>
 
-            <div id="log-console" style="background: #080a0f; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; height: 320px; overflow-y: auto; font-family: var(--font-mono); font-size: 11px; line-height: 1.45; color: #67e8f9; white-space: pre-wrap; word-break: break-all">
-${this.logs.length > 0 ? this.logs.join('\n') : 'Brak logów.'}</div>
+            <div id="log-console" style="background: #080a0f; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; height: 320px; overflow-y: auto; font-family: var(--font-mono); font-size: 11px; line-height: 1.45; color: #67e8f9; white-space: pre-wrap; word-break: break-all">${this.logs.length > 0 ? esc(this.logs.join('\n')) : 'Brak logów.'}</div>
           </div>
 
           <div class="modal-footer">
@@ -1212,6 +1534,12 @@ ${this.logs.length > 0 ? this.logs.join('\n') : 'Brak logów.'}</div>
         </div>
       </div>
     `;
+  }
+
+  /** Gdy zapisany mikrofon jest chwilowo odłączony — pokaż go jako (odłączony), nie gub wyboru. */
+  private missingDeviceOption(savedName: string, devices: AudioDeviceItem[]): string {
+    if (!savedName || devices.some((d) => d.name === savedName)) return '';
+    return `<option value="${esc(savedName)}" selected>${esc(savedName)} (odłączony)</option>`;
   }
 
   private bindEvents() {
@@ -1263,10 +1591,17 @@ ${this.logs.length > 0 ? this.logs.join('\n') : 'Brak logów.'}</div>
     byId('btn-bio-close')?.addEventListener('click', () => { this.bioModalOpen = false; this.render(); });
     byId('btn-bio-cancel')?.addEventListener('click', () => { this.bioModalOpen = false; this.render(); });
     byId('sw-biometrics-modal')?.addEventListener('click', () => {
-      this.patchForm({ biometricsEnabled: !(this.form?.biometricsEnabled ?? false) });
+      const val = !(this.form?.biometricsEnabled ?? false);
+      // reRender=false: pełny rebuild przy każdym kliknięciu miga i gubi stan
+      this.patchForm({ biometricsEnabled: val }, false);
+      const sw = document.getElementById('sw-biometrics-modal');
+      if (sw) sw.setAttribute('aria-checked', String(val));
     });
     byId('sw-pet-filter-modal')?.addEventListener('click', () => {
-      this.patchForm({ petFilterEnabled: !(this.form?.petFilterEnabled ?? true) });
+      const val = !(this.form?.petFilterEnabled ?? true);
+      this.patchForm({ petFilterEnabled: val }, false);
+      const sw = document.getElementById('sw-pet-filter-modal');
+      if (sw) sw.setAttribute('aria-checked', String(val));
     });
     byId('btn-quick-calibrate-bio')?.addEventListener('click', () => {
       const curDist = this.telemetry.distanceCm || 75;
@@ -1279,20 +1614,21 @@ ${this.logs.length > 0 ? this.logs.join('\n') : 'Brak logów.'}</div>
       });
       this.pushToast(`Skalibrowano profil: Dystans ${curDist}cm, Tętno ${curHr} BPM`);
     });
-    byId('inp-hr-min')?.addEventListener('input', (e) => {
-      this.patchForm({ userHeartRateMin: Number((e.target as HTMLInputElement).value) });
-    });
-    byId('inp-hr-max')?.addEventListener('input', (e) => {
-      this.patchForm({ userHeartRateMax: Number((e.target as HTMLInputElement).value) });
-    });
-    byId('inp-dist-min')?.addEventListener('input', (e) => {
-      this.patchForm({ userSeatingDistanceMin: Number((e.target as HTMLInputElement).value) });
-    });
-    byId('inp-dist-max')?.addEventListener('input', (e) => {
-      this.patchForm({ userSeatingDistanceMax: Number((e.target as HTMLInputElement).value) });
-    });
+    // Pola tekstowe: reRender=false — inaczej pełny rebuild DOM po każdym
+    // znaku ucina fokus w połowie wpisywania wartości. Zakresy sanityzowane.
+    const bindNumberInput = (id: string, key: 'userHeartRateMin' | 'userHeartRateMax' | 'userSeatingDistanceMin' | 'userSeatingDistanceMax', min: number, max: number): void => {
+      byId(id)?.addEventListener('input', (e) => {
+        const raw = Number((e.target as HTMLInputElement).value);
+        if (!Number.isFinite(raw) || raw === 0) return; // puste pole w trakcie edycji
+        this.patchForm({ [key]: Math.max(min, Math.min(max, raw)) } as Partial<Snapshot['config']>, false);
+      });
+    };
+    bindNumberInput('inp-hr-min', 'userHeartRateMin', 30, 150);
+    bindNumberInput('inp-hr-max', 'userHeartRateMax', 40, 200);
+    bindNumberInput('inp-dist-min', 'userSeatingDistanceMin', 10, 300);
+    bindNumberInput('inp-dist-max', 'userSeatingDistanceMax', 10, 400);
     byId('sel-person-action')?.addEventListener('change', (e) => {
-      this.patchForm({ personMismatchAction: (e.target as HTMLSelectElement).value as any });
+      this.patchForm({ personMismatchAction: (e.target as HTMLSelectElement).value as any }, false);
     });
     byId('btn-bio-save')?.addEventListener('click', () => {
       this.bioModalOpen = false;
@@ -1318,9 +1654,9 @@ ${this.logs.length > 0 ? this.logs.join('\n') : 'Brak logów.'}</div>
       }
     });
     byId('btn-emergency-unbrick')?.addEventListener('click', async () => {
-      this.pushToast('Uruchamianie procedury ratunkowej sensora…');
+      this.pushToast('Uruchamianie procedury ratunkowej sensora (pełne czyszczenie flash)…');
       try {
-        await window.api.flashSensorFromGitHub();
+        await window.api.flashSensorFromGitHub({ eraseAll: true });
       } catch (err: any) {
         this.pushToast(`Błąd: ${err.message}`, true);
       }
@@ -1331,7 +1667,7 @@ ${this.logs.length > 0 ? this.logs.join('\n') : 'Brak logów.'}</div>
       this.patchForm({ radarAutoTuningEnabled: !(this.form?.radarAutoTuningEnabled ?? true) });
     });
     byId('sel-auto-tuning-speed')?.addEventListener('change', (e) => {
-      this.patchForm({ radarAutoTuningSpeed: (e.target as HTMLSelectElement).value as any });
+      this.patchForm({ radarAutoTuningSpeed: (e.target as HTMLSelectElement).value as any }, false);
     });
     byId('btn-reset-autotuning')?.addEventListener('click', async () => {
       const status = await window.api.resetAutoTuning();
@@ -1364,7 +1700,56 @@ ${this.logs.length > 0 ? this.logs.join('\n') : 'Brak logów.'}</div>
 
     // Audio Devices
     byId('sel-mic-desk')?.addEventListener('change', (e) => {
-      this.patchForm({ micDeskName: (e.target as HTMLSelectElement).value }, false);
+      const sel = e.target as HTMLSelectElement;
+      const opt = sel.selectedOptions[0];
+      this.patchForm({ micDeskName: sel.value, micDeskId: opt?.getAttribute('data-id') || '' }, false);
+    });
+    byId('rng-vol-desk')?.addEventListener('input', (e) => {
+      const val = Number((e.target as HTMLInputElement).value);
+      this.patchForm({ micDeskVolume: val }, false);
+      const valEl = document.getElementById('vol-desk-val');
+      if (valEl) valEl.textContent = `${val}%`;
+    });
+    byId('rng-vol-desk')?.addEventListener('change', (e) => {
+      // Ustawiamy dopiero po puszczeniu suwaka — 'input' przy każdym pikselu
+      // zalałby daemon komendami.
+      const val = Number((e.target as HTMLInputElement).value);
+      const name = this.form?.micDeskName;
+      if (name) void window.api.setVolume(name, val);
+    });
+    byId('rng-gate-desk')?.addEventListener('input', (e) => {
+      const val = Number((e.target as HTMLInputElement).value);
+      this.patchForm({ micDeskGateDb: val }, false);
+      const valEl = document.getElementById('gate-desk-val');
+      if (valEl) valEl.textContent = `${val} dB`;
+    });
+    byId('rng-gate-desk')?.addEventListener('change', (e) => {
+      const val = Number((e.target as HTMLInputElement).value);
+      // Live-apply tylko gdy stacjonarny jest teraz aktywny
+      if ((this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+        void window.api.discordApplyVoice({ gateDb: val });
+      }
+    });
+    byId('sel-krisp-desk')?.addEventListener('change', (e) => {
+      const mode = (e.target as HTMLSelectElement).value as 'default' | 'on' | 'off';
+      this.patchForm({ micDeskKrisp: mode }, false);
+      if (mode !== 'default' && (this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+        void window.api.discordApplyVoice({ krisp: mode === 'on' });
+      }
+    });
+    byId('sel-agc-desk')?.addEventListener('change', (e) => {
+      const mode = (e.target as HTMLSelectElement).value as 'default' | 'on' | 'off';
+      this.patchForm({ micDeskAgc: mode }, false);
+      if (mode !== 'default' && (this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+        void window.api.discordApplyVoice({ agc: mode === 'on' });
+      }
+    });
+    byId('sel-echo-desk')?.addEventListener('change', (e) => {
+      const mode = (e.target as HTMLSelectElement).value as 'default' | 'on' | 'off';
+      this.patchForm({ micDeskEcho: mode }, false);
+      if (mode !== 'default' && (this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+        void window.api.discordApplyVoice({ echo: mode === 'on' });
+      }
     });
     byId('btn-test-desk')?.addEventListener('click', async () => {
       if (!this.form?.micDeskName) return;
@@ -1375,7 +1760,53 @@ ${this.logs.length > 0 ? this.logs.join('\n') : 'Brak logów.'}</div>
     });
 
     byId('sel-mic-headset')?.addEventListener('change', (e) => {
-      this.patchForm({ micHeadsetName: (e.target as HTMLSelectElement).value }, false);
+      const sel = e.target as HTMLSelectElement;
+      const opt = sel.selectedOptions[0];
+      this.patchForm({ micHeadsetName: sel.value, micHeadsetId: opt?.getAttribute('data-id') || '' }, false);
+    });
+    byId('rng-vol-headset')?.addEventListener('input', (e) => {
+      const val = Number((e.target as HTMLInputElement).value);
+      this.patchForm({ micHeadsetVolume: val }, false);
+      const valEl = document.getElementById('vol-headset-val');
+      if (valEl) valEl.textContent = `${val}%`;
+    });
+    byId('rng-vol-headset')?.addEventListener('change', (e) => {
+      const val = Number((e.target as HTMLInputElement).value);
+      const name = this.form?.micHeadsetName;
+      if (name) void window.api.setVolume(name, val);
+    });
+    byId('rng-gate-headset')?.addEventListener('input', (e) => {
+      const val = Number((e.target as HTMLInputElement).value);
+      this.patchForm({ micHeadsetGateDb: val }, false);
+      const valEl = document.getElementById('gate-headset-val');
+      if (valEl) valEl.textContent = `${val} dB`;
+    });
+    byId('rng-gate-headset')?.addEventListener('change', (e) => {
+      const val = Number((e.target as HTMLInputElement).value);
+      if ((this.snap?.state ?? 'headset') === 'headset' && this.form?.discordIntegration) {
+        void window.api.discordApplyVoice({ gateDb: val });
+      }
+    });
+    byId('sel-krisp-headset')?.addEventListener('change', (e) => {
+      const mode = (e.target as HTMLSelectElement).value as 'default' | 'on' | 'off';
+      this.patchForm({ micHeadsetKrisp: mode }, false);
+      if (mode !== 'default' && (this.snap?.state ?? 'headset') === 'headset' && this.form?.discordIntegration) {
+        void window.api.discordApplyVoice({ krisp: mode === 'on' });
+      }
+    });
+    byId('sel-agc-headset')?.addEventListener('change', (e) => {
+      const mode = (e.target as HTMLSelectElement).value as 'default' | 'on' | 'off';
+      this.patchForm({ micHeadsetAgc: mode }, false);
+      if (mode !== 'default' && (this.snap?.state ?? 'headset') === 'headset' && this.form?.discordIntegration) {
+        void window.api.discordApplyVoice({ agc: mode === 'on' });
+      }
+    });
+    byId('sel-echo-headset')?.addEventListener('change', (e) => {
+      const mode = (e.target as HTMLSelectElement).value as 'default' | 'on' | 'off';
+      this.patchForm({ micHeadsetEcho: mode }, false);
+      if (mode !== 'default' && (this.snap?.state ?? 'headset') === 'headset' && this.form?.discordIntegration) {
+        void window.api.discordApplyVoice({ echo: mode === 'on' });
+      }
     });
     byId('btn-test-headset')?.addEventListener('click', async () => {
       if (!this.form?.micHeadsetName) return;
@@ -1449,6 +1880,9 @@ ${this.logs.length > 0 ? this.logs.join('\n') : 'Brak logów.'}</div>
       const sw = document.getElementById('sw-discord');
       if (sw) sw.setAttribute('aria-checked', String(val));
     });
+    byId('sel-mute-behavior')?.addEventListener('change', (e) => {
+      this.patchForm({ muteBehaviorOnAway: (e.target as HTMLSelectElement).value as any });
+    });
     byId('sw-sleep-monitors')?.addEventListener('click', () => {
       const val = !(this.form?.sleepMonitorsOnAway ?? false);
       this.patchForm({ sleepMonitorsOnAway: val }, false);
@@ -1483,14 +1917,8 @@ ${this.logs.length > 0 ? this.logs.join('\n') : 'Brak logów.'}</div>
       }
     });
 
-    byId('btn-download-update')?.addEventListener('click', async () => {
-      this.pushToast('Rozpoczynam pobieranie aktualizacji…');
-      await window.api.downloadUpdate();
-    });
-
-    byId('btn-install-update')?.addEventListener('click', async () => {
-      await window.api.installUpdate();
-    });
+    // Przyciski strefy aktualizacji podpina attachUpdateZoneEvents()
+    // (strefa przebudowuje się niezależnie od reszty widoku)
 
     byId('btn-open-config-folder')?.addEventListener('click', () => window.api.openConfigDir());
 

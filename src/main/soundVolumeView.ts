@@ -33,7 +33,6 @@ interface CachedDevices {
   list: AudioDeviceItem[];
   timestamp: number;
 }
-
 function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -89,6 +88,7 @@ export default class SoundVolumeView {
 
   private daemonProc: ReturnType<typeof spawn> | null = null;
   private daemonRl: readline.Interface | null = null;
+  private daemonErrRl: readline.Interface | null = null;
   private readonly daemonQueue: DaemonQueueItem[] = [];
   private daemonStarting: Promise<ReturnType<typeof spawn> | null> | null = null;
 
@@ -244,6 +244,20 @@ export default class SoundVolumeView {
           }
         });
 
+        // AudioSwitcher.cs pisze błędy na Console.Error — bez konsumenta stderr
+        // odpowiedź {"ok":false} nigdy nie trafia do kolejki (5 s timeout na
+        // każdą nieudaną komendę), a bufor potoku może się zapełnić.
+        const errRl = readline.createInterface({ input: proc.stderr!, terminal: false });
+        errRl.on('line', (line: string) => {
+          const trimmed = line.trim();
+          if (!trimmed) return;
+          console.warn('[audioBackend] daemon stderr:', trimmed);
+          if (trimmed.startsWith('{') && this.daemonQueue.length > 0) {
+            const item = this.daemonQueue.shift();
+            item?.resolve({ ok: false, stdout: '', stderr: trimmed });
+          }
+        });
+
         proc.on('error', (err: Error) => {
           console.warn('[audioBackend] daemon process error:', err.message);
           this.killDaemon();
@@ -255,6 +269,7 @@ export default class SoundVolumeView {
 
         this.daemonProc = proc;
         this.daemonRl = rl;
+        this.daemonErrRl = errRl;
         return proc;
       } catch (err) {
         console.error('[audioBackend] daemon start failed:', (err as Error).message);
@@ -281,9 +296,34 @@ export default class SoundVolumeView {
       this.daemonRl.close();
       this.daemonRl = null;
     }
+    if (this.daemonErrRl) {
+      this.daemonErrRl.close();
+      this.daemonErrRl = null;
+    }
     while (this.daemonQueue.length > 0) {
       const item = this.daemonQueue.shift();
       item?.resolve({ ok: false, stdout: '', stderr: 'Daemon exited' });
+    }
+  }
+
+  /** Publiczne zamknięcie daemona (przy wyjściu z aplikacji). */
+  shutdown(): void {
+    this.killDaemon();
+  }
+
+  /**
+   * Wygrzanie przy starcie: kompilacja/pobranie toola + spawn daemon
+   * + ping. Bez tego pierwsze przełączenie mikrofonu płaci cold-start
+   * (~200-300 ms na spawn procesu).
+   */
+  async warmup(): Promise<void> {
+    try {
+      const tool = await this.ensure();
+      if (tool && tool.isNative) {
+        await this.sendDaemonCommand('ping');
+      }
+    } catch {
+      /* warmup best-effort */
     }
   }
 
@@ -396,6 +436,60 @@ export default class SoundVolumeView {
     return res || { ok: false };
   }
 
+  /** Ustawia głośność endpointu (0-100). Daemon: IAudioEndpointVolume scalar. */
+  async setVolume(target = '', percent: number): Promise<{ ok: boolean; volume?: number }> {
+    const vol = Math.max(0, Math.min(100, Math.round(percent)));
+    const idOrName = this.nameToIdMap.get(target) || target;
+    let res = await this.sendDaemonCommand(`set-volume ${idOrName} ${vol}`);
+    if (!res || !res.ok) {
+      const tool = await this.ensure();
+      if (tool && tool.isNative) {
+        res = await this.run(tool.path, ['set-volume', idOrName, String(vol)]);
+      }
+    }
+    return this.parseVolumeResponse(res);
+  }
+
+  async getVolume(target = ''): Promise<{ ok: boolean; volume?: number }> {
+    const idOrName = this.nameToIdMap.get(target) || target;
+    let res = await this.sendDaemonCommand(`get-volume ${idOrName}`.trim());
+    if (!res || !res.ok) {
+      const tool = await this.ensure();
+      if (tool && tool.isNative) {
+        res = await this.run(tool.path, ['get-volume', idOrName]);
+      }
+    }
+    return this.parseVolumeResponse(res);
+  }
+
+  private parseVolumeResponse(res: ExecResult | null): { ok: boolean; volume?: number } {
+    if (!res || !res.ok) return { ok: false };
+    try {
+      const parsed = JSON.parse(res.stdout) as { volume?: number };
+      return { ok: true, volume: typeof parsed.volume === 'number' ? parsed.volume : undefined };
+    } catch {
+      return { ok: true };
+    }
+  }
+
+  /** Aktualny domyślny mikrofon Windows (null gdy brak urządzeń). */
+  async getCurrentDefault(): Promise<{ name?: string; id?: string; isDefaultComm?: boolean } | null> {
+    let res = await this.sendDaemonCommand('get');
+    if (!res || !res.ok) {
+      const tool = await this.ensure();
+      if (tool && tool.isNative) {
+        res = await this.run(tool.path, ['get']);
+      }
+    }
+    if (!res || !res.ok || !res.stdout) return null;
+    try {
+      const parsed = JSON.parse(res.stdout.trim()) as { name?: string; id?: string; isDefaultComm?: boolean } | null;
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
   async sleepDisplay(): Promise<ExecResult | { ok: boolean }> {
     let res = await this.sendDaemonCommand('sleep-display');
     if (!res || !res.ok) {
@@ -438,6 +532,8 @@ export default class SoundVolumeView {
       name?: string;
       id?: string;
       isDefault?: boolean | number;
+      isMuted?: boolean;
+      volume?: number;
     }
 
     if (res && res.ok && res.stdout) {
@@ -455,6 +551,9 @@ export default class SoundVolumeView {
               return {
                 name: d.name!,
                 isDefault: Boolean(d.isDefault),
+                // Daemon zwraca isMuted — renderer inicjalizuje z niego
+                // stan pill "Wyciszony/Aktywny".
+                isMuted: typeof d.isMuted === 'boolean' ? d.isMuted : undefined,
                 id: d.id
               };
             })

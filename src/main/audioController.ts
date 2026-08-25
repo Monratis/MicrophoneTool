@@ -42,6 +42,18 @@ export default class AudioController extends EventEmitter {
     return this.svv.setMute(target, mute);
   }
 
+  setVolume(target: string, percent: number): Promise<{ ok: boolean; volume?: number }> {
+    return this.svv.setVolume(target, percent);
+  }
+
+  getVolume(target = ''): Promise<{ ok: boolean; volume?: number }> {
+    return this.svv.getVolume(target);
+  }
+
+  getCurrentDefault(): Promise<{ name?: string; id?: string; isDefaultComm?: boolean } | null> {
+    return this.svv.getCurrentDefault();
+  }
+
   resolveNames(devices: AudioDeviceItem[]): { micDeskName: string; micHeadsetName: string } {
     return this.svv.resolveNames(devices);
   }
@@ -56,5 +68,15 @@ export default class AudioController extends EventEmitter {
 
   binaryPath(): string {
     return this.svv.nativeExePath;
+  }
+
+  /** Ubija rezydentny daemon audio (wywoływane przy zamknięciu aplikacji). */
+  shutdown(): void {
+    this.svv.shutdown();
+  }
+
+  /** Wygrzanie toola i daemona przy starcie — pierwsze przełączenie bez cold-startu. */
+  warmup(): Promise<void> {
+    return this.svv.warmup();
   }
 }

@@ -336,6 +336,28 @@ namespace AudioSwitcher
                 {
                     SetMute(arg, false);
                 }
+                else if (cmd == "set-volume")
+                {
+                    // Format: set-volume <Name_or_ID> <0-100>
+                    // Nazwy urządzeń zawierają spacje — wartość to ostatni token.
+                    int lastSpace = arg.LastIndexOf(' ');
+                    float pct;
+                    if (lastSpace <= 0 || !float.TryParse(arg.Substring(lastSpace + 1).Trim(), out pct))
+                    {
+                        Console.Error.WriteLine("{\"ok\":false,\"error\":\"Usage: set-volume <Name_or_ID> <0-100>\"}");
+                    }
+                    else
+                    {
+                        string volTarget = arg.Substring(0, lastSpace).Trim();
+                        if (pct < 0f) pct = 0f;
+                        if (pct > 100f) pct = 100f;
+                        SetVolume(volTarget, pct / 100f);
+                    }
+                }
+                else if (cmd == "get-volume")
+                {
+                    GetVolume(arg);
+                }
                 else if (cmd == "sleep-display" || cmd == "sleep-monitors" || cmd == "display-off")
                 {
                     SleepDisplay();
@@ -626,6 +648,95 @@ namespace AudioSwitcher
                             Guid ctx = Guid.Empty;
                             epv.SetMute(mute, ref ctx);
                             Console.WriteLine("{\"ok\":true,\"isMuted\":" + (mute ? "true" : "false") + ",\"id\":" + EscapeJson(dev.Id) + "}");
+                            return 0;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("{\"ok\":false,\"error\":" + EscapeJson(ex.Message) + "}");
+                return 1;
+            }
+
+            Console.Error.WriteLine("{\"ok\":false,\"error\":\"Failed to access endpoint volume\"}");
+            return 1;
+        }
+
+        private static int SetVolume(string target, float scalar)
+        {
+            string defCon, defComm;
+            var devices = EnumerateRecordingDevices(out defCon, out defComm);
+            AudioDevice dev = string.IsNullOrEmpty(target)
+                ? (devices.Find(d => d.IsDefault) ?? (devices.Count > 0 ? devices[0] : null))
+                : FindMatchingDevice(devices, target);
+
+            if (dev == null)
+            {
+                Console.Error.WriteLine("{\"ok\":false,\"error\":\"Device not found\"}");
+                return 1;
+            }
+
+            try
+            {
+                IMMDeviceEnumerator enumerator = GetEnumerator();
+                IMMDevice immDev;
+                if (enumerator.GetDevice(dev.Id, out immDev) == 0 && immDev != null)
+                {
+                    Guid iid = IID_IAudioEndpointVolume;
+                    object epvObj;
+                    if (immDev.Activate(ref iid, 1, IntPtr.Zero, out epvObj) == 0 && epvObj != null)
+                    {
+                        IAudioEndpointVolume epv = epvObj as IAudioEndpointVolume;
+                        if (epv != null)
+                        {
+                            Guid ctx = Guid.Empty;
+                            epv.SetMasterVolumeLevelScalar(scalar, ref ctx);
+                            Console.WriteLine("{\"ok\":true,\"volume\":" + Math.Round(scalar * 100f) + ",\"id\":" + EscapeJson(dev.Id) + "}");
+                            return 0;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("{\"ok\":false,\"error\":" + EscapeJson(ex.Message) + "}");
+                return 1;
+            }
+
+            Console.Error.WriteLine("{\"ok\":false,\"error\":\"Failed to access endpoint volume\"}");
+            return 1;
+        }
+
+        private static int GetVolume(string target)
+        {
+            string defCon, defComm;
+            var devices = EnumerateRecordingDevices(out defCon, out defComm);
+            AudioDevice dev = string.IsNullOrEmpty(target)
+                ? (devices.Find(d => d.IsDefault) ?? (devices.Count > 0 ? devices[0] : null))
+                : FindMatchingDevice(devices, target);
+
+            if (dev == null)
+            {
+                Console.Error.WriteLine("{\"ok\":false,\"error\":\"Device not found\"}");
+                return 1;
+            }
+
+            try
+            {
+                IMMDeviceEnumerator enumerator = GetEnumerator();
+                IMMDevice immDev;
+                float scalar;
+                if (enumerator.GetDevice(dev.Id, out immDev) == 0 && immDev != null)
+                {
+                    Guid iid = IID_IAudioEndpointVolume;
+                    object epvObj;
+                    if (immDev.Activate(ref iid, 1, IntPtr.Zero, out epvObj) == 0 && epvObj != null)
+                    {
+                        IAudioEndpointVolume epv = epvObj as IAudioEndpointVolume;
+                        if (epv != null && epv.GetMasterVolumeLevelScalar(out scalar) == 0)
+                        {
+                            Console.WriteLine("{\"ok\":true,\"volume\":" + Math.Round(scalar * 100f) + ",\"id\":" + EscapeJson(dev.Id) + "}");
                             return 0;
                         }
                     }

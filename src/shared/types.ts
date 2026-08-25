@@ -7,7 +7,39 @@ export interface AppConfig {
   port: string;
   baudRate: number;
   micDeskName: string;
+  /** ID endpointu (stabilne mimo zmian nazwy w Windows) — opcjonalne dla starszych configów */
+  micDeskId: string;
   micHeadsetName: string;
+  /** ID endpointu (stabilne mimo zmian nazwy w Windows) — opcjonalne dla starszych configów */
+  micHeadsetId: string;
+  /** Głośność mikrofonu stacjonarnego 0-100; -1 = nie steruj głośnością */
+  micDeskVolume: number;
+  /** Głośność mikrofonu mobilnego 0-100; -1 = nie steruj głośnością */
+  micHeadsetVolume: number;
+  /** Bramka VAD Discorda dla mikrofonu stacjonarnego (-90..0 dB); -1 = nie steruj (szanuj PTT/auto próg) */
+  micDeskGateDb: number;
+  /** Bramka VAD Discorda dla mikrofonu mobilnego (-90..0 dB); -1 = nie steruj */
+  micHeadsetGateDb: number;
+  /** Wyciszenie szumów (Krisp) dla mikrofonu mobilnego */
+  /** Wyciszenie szumów (Krisp) dla mikrofonu stacjonarnego */
+  micDeskKrisp: 'default' | 'on' | 'off';
+  /** Wyciszenie szumów (Krisp) dla mikrofonu mobilnego */
+  micHeadsetKrisp: 'default' | 'on' | 'off';
+  /** Automatyczna kontrola wzmocnienia (AGC) dla mikrofonu stacjonarnego */
+  micDeskAgc: 'default' | 'on' | 'off';
+  /** AGC dla mikrofonu mobilnego */
+  micHeadsetAgc: 'default' | 'on' | 'off';
+  /** Usuwanie echa dla mikrofonu stacjonarnego */
+  micDeskEcho: 'default' | 'on' | 'off';
+  /** Usuwanie echa dla mikrofonu mobilnego */
+  micHeadsetEcho: 'default' | 'on' | 'off';
+  /** Automatycznie dopasuj bramkę Discorda do aktywnego mikrofonu */
+  discordGateFollowMic: boolean;
+  /**
+   * Application ID z Discord Developer Portal (wymagany przez RPC).
+   * Bez własnego zarejestrowanego ID klient Discord może odrzucać połączenie.
+   */
+  discordClientId: string;
   timeoutAwayMs: number;
   timeoutDeskMs: number;
   radarDistanceGateEnabled: boolean;
@@ -30,7 +62,7 @@ export interface AppConfig {
   personMismatchAction: 'ignore' | 'switch_anyway' | 'notify_only';
   switchMicOnAway: boolean;
   switchMicOnDesk: boolean;
-  muteBehaviorOnAway: 'none' | 'mute_stationary' | 'mute_all';
+  muteBehaviorOnAway: 'none' | 'mute_stationary' | 'mute_all' | 'mute_inactive';
   unmuteOnDesk: boolean;
   discordIntegration: boolean;
   signalrgbEnabled: boolean;
@@ -96,6 +128,7 @@ export interface AudioDeviceItem {
 }
 
 export interface Snapshot {
+  version: string;
   mode: AppMode;
   state: DeviceState | null;
   deviceName: string | null;
@@ -166,6 +199,9 @@ export interface Api {
   listDevices: () => Promise<AudioDeviceItem[]>;
   toggleMute: (target?: string) => Promise<{ ok: boolean; isMuted?: boolean }>;
   setMute: (target: string, mute: boolean) => Promise<{ ok: boolean; isMuted?: boolean }>;
+  setVolume: (target: string, percent: number) => Promise<{ ok: boolean; volume?: number }>;
+  getVolume: (target?: string) => Promise<{ ok: boolean; volume?: number }>;
+  discordApplyVoice: (args: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }) => Promise<boolean>;
   testDevice: (name: string) => Promise<Snapshot>;
   sleepDisplay: () => Promise<unknown>;
   wakeDisplay: () => Promise<unknown>;
@@ -185,7 +221,7 @@ export interface Api {
   getUpdaterStatus: () => Promise<UpdaterStatus | null>;
 
   checkSensorFirmware: () => Promise<{ available: boolean; version?: string; name?: string; size?: number; error?: string; message?: string }>;
-  flashSensorFromGitHub: () => Promise<{ ok: boolean; port?: string }>;
+  flashSensorFromGitHub: (opts?: { eraseAll?: boolean }) => Promise<{ ok: boolean; port?: string }>;
   flashSensorFromFile: () => Promise<{ ok?: boolean; canceled?: boolean; port?: string }>;
 
   getLogs: () => Promise<string[]>;

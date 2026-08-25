@@ -6,7 +6,22 @@ export const DEFAULTS: AppConfig = {
   port: 'auto',
   baudRate: 115200,
   micDeskName: '',
+  micDeskId: '',
   micHeadsetName: '',
+  micHeadsetId: '',
+  micDeskVolume: -1,
+  micHeadsetVolume: -1,
+  micDeskGateDb: -1,
+  micHeadsetGateDb: -1,
+  micDeskKrisp: 'default',
+  micHeadsetKrisp: 'default',
+  micDeskAgc: 'default',
+  micHeadsetAgc: 'default',
+  micDeskEcho: 'default',
+  micHeadsetEcho: 'default',
+  discordGateFollowMic: true,
+  /** Application ID apki Auto Audio Switch (Discord Developer Portal) */
+  discordClientId: '1238447097859145859',
   timeoutAwayMs: 3000,
   timeoutDeskMs: 300,
   radarDistanceGateEnabled: true,
@@ -29,7 +44,7 @@ export const DEFAULTS: AppConfig = {
   personMismatchAction: 'ignore',
   switchMicOnAway: true,
   switchMicOnDesk: true,
-  muteBehaviorOnAway: 'none',
+  muteBehaviorOnAway: 'mute_inactive',
   unmuteOnDesk: true,
   discordIntegration: true,
   signalrgbEnabled: false,
@@ -73,7 +88,14 @@ export default class Config {
         this.save();
       }
     } catch (err) {
-      console.error('[config] load error, restoring defaults:', (err as Error).message);
+      // Uszkodzony config NIE może zniknąć bez śladu — kopia .bak daje
+      // użytkownikowi szansę odzyskania ustawień po naprawie pliku.
+      console.error('[config] load error, backing up and restoring defaults:', (err as Error).message);
+      try {
+        fs.copyFileSync(this.filePath, `${this.filePath}.bak`);
+      } catch (bakErr) {
+        console.error('[config] backup failed:', (bakErr as Error).message);
+      }
       this.data = { ...DEFAULTS };
       this.save();
     }
