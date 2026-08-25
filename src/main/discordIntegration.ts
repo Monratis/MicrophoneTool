@@ -171,6 +171,13 @@ export default class DiscordIntegration extends EventEmitter {
       this.handshakeFailures = 0;
       this.ready = true;
       console.log('[discord] Sesja RPC gotowa (READY)');
+      // Sonda diagnostyczna: czy kanał komend działa i jak nazywają się
+      // pola ustawień głosowych w TYM kliencie.
+      void this.rpcCommand('GET_VOICE_SETTINGS', {}).then((r) => {
+        console.log(
+          `[discord] GET_VOICE_SETTINGS -> ok=${r.ok} ${JSON.stringify(r.data).slice(0, 600)}`
+        );
+      });
       return;
     }
 
@@ -249,6 +256,26 @@ export default class DiscordIntegration extends EventEmitter {
     }
   }
 
+  /** Wspólny wysyłacz komendy RPC z weryfikacją odpowiedzi po nonce. */
+  private rpcCommand(cmd: string, args: Record<string, unknown>): Promise<{ ok: boolean; data?: unknown }> {
+    if (!this.connected || !this.ready || !this.socket || this.socket.destroyed) {
+      return Promise.resolve({ ok: false });
+    }
+    const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const payload = JSON.stringify({ cmd, args, nonce });
+    return new Promise<{ ok: boolean; data?: unknown }>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(nonce);
+        resolve({ ok: false });
+      }, 3000);
+      this.pending.set(nonce, (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      });
+      this.sendPacket(OPCODES.FRAME, payload);
+    });
+  }
+
   /**
    * Ustawia profil głosowy aktywnego mikrofonu w Discordzie:
    * bramkę VAD (threshold dB), Krisp, AGC i usuwanie echa.
@@ -257,7 +284,6 @@ export default class DiscordIntegration extends EventEmitter {
    */
   async applyMicSettings(opts: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }): Promise<boolean> {
     if (!this.config.get('discordIntegration')) return false;
-    if (!this.connected || !this.ready || !this.socket || this.socket.destroyed) return false;
     try {
       const args: Record<string, unknown> = {};
       if (typeof opts.gateDb === 'number') {
@@ -273,24 +299,10 @@ export default class DiscordIntegration extends EventEmitter {
       if (typeof opts.echo === 'boolean') args.echo_cancellation = opts.echo;
       if (Object.keys(args).length === 0) return false;
 
-      const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const payload = JSON.stringify({ cmd: 'SET_VOICE_SETTINGS', args, nonce });
-
-      const reply = await new Promise<{ ok: boolean; data?: unknown }>((resolve) => {
-        const timer = setTimeout(() => {
-          this.pending.delete(nonce);
-          resolve({ ok: false });
-        }, 3000);
-        this.pending.set(nonce, (v) => {
-          clearTimeout(timer);
-          resolve(v);
-        });
-        this.sendPacket(OPCODES.FRAME, payload);
-      });
-
-      if (!reply.ok) {
-        console.warn('[discord] SET_VOICE_SETTINGS nie powiodło się', JSON.stringify(opts));
-      }
+      const reply = await this.rpcCommand('SET_VOICE_SETTINGS', args);
+      console.log(
+        `[discord] SET_VOICE_SETTINGS ${JSON.stringify(opts)} -> ok=${reply.ok} data=${JSON.stringify(reply.data ?? null).slice(0, 300)}`
+      );
       return reply.ok;
     } catch (err) {
       console.warn('[discord] Błąd ustawiania profilu głosowego:', (err as Error).message);
