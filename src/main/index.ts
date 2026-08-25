@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut } from 'electron';
+import { app, BrowserWindow, dialog, globalShortcut } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 
@@ -39,6 +39,12 @@ if (!gotSingleLock) {
 }
 
 interceptConsole();
+
+// Siatka bezpieczeństwa dla apki żyjącej w tray tygodniami: przyszły
+// nieobsłużony rejection logujemy zamiast ryzykować śmierć procesu.
+process.on('unhandledRejection', (reason) => {
+  console.warn('[main] unhandledRejection:', reason instanceof Error ? reason.stack : reason);
+});
 
 let ctx: AppContext | null = null;
 let tray: Electron.Tray | null = null;
@@ -297,13 +303,27 @@ app.on('second-instance', () => {
   if (ctx) showSettings(ctx);
 });
 
+let forceQuitAfterWarn = false;
+
 app.on('before-quit', (e) => {
-  // Twarda zasada: nigdy nie ubijamy esptool w połowie zapisu flash —
-  // pół-wgrany sensor to scenariusz ratunkowy. Blokujemy quit z komunikatem.
-  if (ctx?.sensorFlasher.isFlashing) {
+  // Twarda zasada: nigdy nie ubijamy esptool w połowie zapisu flash.
+  // Furtka: świadome "Zamknij mimo to" — użytkownik musi potwierdzić ryzyko,
+  // inaczej zawieszony flash zamieniłby apkę w niezanikalną.
+  if (ctx?.sensorFlasher.isFlashing && !forceQuitAfterWarn) {
     e.preventDefault();
-    showWindowsNotification('Auto Audio Switch', 'Wgrywanie firmware w toku — zamknięcie możliwe po zakończeniu.');
-    pushEvent('toast', { error: true, message: 'Nie można zamknąć: trwa wgrywanie firmware sensora' });
+    const choice = dialog.showMessageBoxSync({
+      type: 'warning',
+      title: 'Auto Audio Switch',
+      message: 'Trwa wgrywanie firmware sensora.',
+      detail: 'Przerwanie w połowie zapisu może wymagać awaryjnego wgrywania przez tryb ratunkowy.',
+      buttons: ['Czekaj na zakończenie', 'Zamknij mimo to'],
+      defaultId: 0,
+      cancelId: 0
+    });
+    if (choice === 1) {
+      forceQuitAfterWarn = true;
+      app.quit();
+    }
     return;
   }
   (app as Electron.App & { isQuitting?: boolean }).isQuitting = true;
