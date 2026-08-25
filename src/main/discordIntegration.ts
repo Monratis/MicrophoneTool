@@ -73,6 +73,9 @@ export default class DiscordIntegration extends EventEmitter {
       sock.once('connect', () => {
         this.socket = sock;
         this.connected = true;
+        // Świeża sesja — bajty z poprzedniej zerwanej sesji nie mogą
+        // zafałszować pierwszych ramek.
+        this.frameBuf = Buffer.alloc(0);
         // Najpierw czytnik danych, potem handshake — inaczej odpowiedź
         // "Ready" od Discorda przepada zanim ktokolwiek ją odczyta.
         this.setupSocket(sock);

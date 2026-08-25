@@ -25,6 +25,7 @@ export default class AppController extends EventEmitter {
   private isDisplaySleeping = false;
   private micRetryTimer: NodeJS.Timeout | null = null;
   private micRetryState: DeviceState | null = null;
+  private micRetryAttempts = 0;
   private readonly MIC_RETRY_MS = 5000;
   /** Mikrofony wyciszone PRZEZ APLIKACJĘ przy odejściu — tylko te odciszamy przy powrocie */
   private readonly mutedByApp = new Set<string>();
@@ -34,6 +35,8 @@ export default class AppController extends EventEmitter {
   private desiredTarget: string | null = null;
   private desiredName: string | null = null;
   private desiredState: DeviceState | null = null;
+  /** Stan, którego przełączenie FAKTYCZNIE się powiodło (watchdog działa tylko dla niego) */
+  private lastAppliedOkState: DeviceState | null = null;
 
   constructor(
     radar: RadarListener,
@@ -101,6 +104,14 @@ export default class AppController extends EventEmitter {
 
   private async checkDrift(): Promise<void> {
     if (!this.desiredTarget || !this.desiredState || !this.desiredName) return;
+    // Watchdog działa wyłącznie gdy: (1) ostatnie przełączenie tego stanu
+    // się powiodło, (2) użytkownik NIE wyłączył automatów dla tej strony.
+    if (this.lastAppliedOkState !== this.desiredState) return;
+    const shouldSwitchNow =
+      this.desiredState === 'desk'
+        ? this.config.get('switchMicOnDesk') !== false
+        : this.config.get('switchMicOnAway') !== false;
+    if (!shouldSwitchNow) return;
     try {
       const list = await this.audio.listRecordingDevices(true);
       const ids = new Set(list.map((d) => d.id || d.name));
@@ -137,7 +148,11 @@ export default class AppController extends EventEmitter {
         `[controller] Windows przestawił domyślny mikrofon (${stolenByArrival ? current.name : 'utrata roli comm'}) — przywracam ${this.desiredName}`
       );
       const res = await this.audio.setDefaultRecordingDevice(this.desiredTarget);
-      this.emit('switched', { state: this.desiredState, device: this.desiredName, ok: res.ok });
+      // Pełna sekwencja zdarzeń jak przy zwykłym przełączeniu — chime też
+      if (res.ok && this.desiredState) {
+        this.emit('switch', { state: this.desiredState, device: this.desiredName, switched: true });
+      }
+      this.emit('switched', { state: this.desiredState, device: this.desiredName, ok: res.ok, switched: true });
     } catch {
       /* pomijanie cyklu — kolejny tick spróbuje ponownie */
     }
@@ -149,6 +164,7 @@ export default class AppController extends EventEmitter {
       this.micRetryTimer = null;
     }
     this.micRetryState = null;
+    this.micRetryAttempts = 0;
   }
 
   /**
@@ -159,6 +175,7 @@ export default class AppController extends EventEmitter {
     if (this.micRetryState === state && this.micRetryTimer) return;
     this.clearMicRetry();
     this.micRetryState = state;
+    this.micRetryAttempts = 0;
 
     const attempt = async (): Promise<void> => {
       this.micRetryTimer = null;
@@ -172,28 +189,33 @@ export default class AppController extends EventEmitter {
         this.micRetryTimer = setTimeout(attempt, this.MIC_RETRY_MS);
         return;
       }
+      this.micRetryAttempts++;
+      // Backoff: nieobecne urządzenie potrafi być nieobecne długo
+      // (słuchawki w plecaku) — nie meczemy COM co 5 s cały dzień.
+      const delay = Math.min(this.MIC_RETRY_MS * Math.pow(2, this.micRetryAttempts - 1), 30000);
       try {
         const list = await this.audio.listRecordingDevices(true);
         const present = list.some((d) => d.id === target || d.name === target);
         if (!present) {
-          this.micRetryTimer = setTimeout(attempt, this.MIC_RETRY_MS);
+          this.micRetryTimer = setTimeout(attempt, delay);
           return;
         }
         const res = await this.audio.setDefaultRecordingDevice(target);
         if (!res.ok) {
-          this.micRetryTimer = setTimeout(attempt, this.MIC_RETRY_MS);
+          this.micRetryTimer = setTimeout(attempt, delay);
           return;
         }
         const retriedState = this.micRetryState;
         this.clearMicRetry();
         if (retriedState) {
+          this.lastAppliedOkState = retriedState;
           this.emit('switch', { state: retriedState, device: displayName, switched: true });
           this.emit('switched', { state: retriedState, device: displayName, ok: true });
           this.startDesiredWatch(retriedState, displayName, target);
           this.applyDiscordGate(retriedState);
         }
       } catch {
-        this.micRetryTimer = setTimeout(attempt, this.MIC_RETRY_MS);
+        this.micRetryTimer = setTimeout(attempt, delay);
       }
     };
 
@@ -314,8 +336,10 @@ export default class AppController extends EventEmitter {
         ok = res.ok;
         // Urządzenie chwilowo nieobecne → trzymaj się wyboru i ponawiaj aż wróci
         if (!ok) {
+          this.lastAppliedOkState = null;
           this.scheduleMicRetry(state, targetMic, target);
         } else {
+          this.lastAppliedOkState = state;
           this.clearMicRetry();
           this.startDesiredWatch(state, targetMic, target);
           this.applyDiscordGate(state);
@@ -330,9 +354,12 @@ export default class AppController extends EventEmitter {
 
       // Operacje mute niezależne od siebie → równolegle (jeden round-trip
       // daemona zamiast łańcuszka sekwencyjnych).
+      // GATE: gdy użytkownik wyłączył automatyczne przełączanie po danej
+      // stronie, nie dotykamy też wyciszeń — apka w ogóle nie ingeruje.
       const muteTasks: Promise<unknown>[] = [];
 
-      if (state === 'desk') {
+      if (shouldSwitch) {
+        if (state === 'desk') {
         // Odciszamy WYŁĄCZNIE to, co sama wyciszyłyśmy przy odejściu.
         // Ręczny mute użytkownika (Discord/spotkanie) jest nienaruszalny —
         // auto-odciszanie go to pułapka gorącego mikrofonu.
@@ -376,13 +403,14 @@ export default class AppController extends EventEmitter {
           }
         }
       }
+      }
       await Promise.all(muteTasks);
 
       if (this.discord) {
         void this.discord.notifyDeviceChanged(targetMic);
       }
 
-      this.emit('switched', { state, device: targetMic, ok });
+      this.emit('switched', { state, device: targetMic, ok, switched: shouldSwitch });
     } catch (err) {
       this.emit('error', err as Error);
     } finally {

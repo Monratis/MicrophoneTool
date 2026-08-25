@@ -20,6 +20,7 @@ export function registerIpc(ctx: AppContext): void {
   });
   ipcMain.handle('config:update', (_e, patch: Record<string, unknown>) => {
     const prevBaud = ctx.config.get('baudRate');
+    const prevPort = ctx.config.get('port');
     for (const [key, value] of Object.entries(patch || {})) {
       if (key in ctx.config.data) {
         (ctx.config.data as unknown as Record<string, unknown>)[key] = value;
@@ -27,7 +28,11 @@ export function registerIpc(ctx: AppContext): void {
     }
     if (typeof patch?.autoStart === 'boolean') applyAutoStart(patch.autoStart);
     ctx.config.save();
-    const radarNeedsRestart = Boolean(patch && 'baudRate' in patch && patch.baudRate !== prevBaud);
+    // Restart radaru przy zmianie portu LUB baudrate — inaczej radar
+    // słuchałby starego portu do końca sesji.
+    const radarNeedsRestart =
+      Boolean(patch && 'baudRate' in patch && patch.baudRate !== prevBaud) ||
+      Boolean(patch && 'port' in patch && patch.port !== prevPort);
     if (radarNeedsRestart) {
       void ctx.restartRadar();
     } else {

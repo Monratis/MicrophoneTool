@@ -11,6 +11,7 @@ import SensorFlasher from './sensorFlasher';
 import DiscordIntegration from './discordIntegration';
 import SignalRGBIntegration from './signalrgbIntegration';
 import type { AppContext } from './appContext';
+import type { DeviceState } from '../shared/types';
 import {
   getAppDataDir,
   cleanupStaleUpdateFiles,
@@ -182,17 +183,10 @@ app.whenReady().then(() => {
       console.log('[main] switch: mikrofony nie zostały jeszcze skonfigurowane przez użytkownika');
       return;
     }
-    console.log(`[main] switch -> ${state}: ${device}`);
+    // Sam sygnał zmiany — chime gra od razu; toasty/powiadomienia dopiero
+    // po POTWIERDZONYM wyniku w handlerze 'switched' (wcześniej user
+    // dostawał sprzeczne "Przełączono" + "Nie udało się" naraz).
     pushEvent('switch', { state, device });
-    pushEvent('toast', { message: `Przełączono mikrofon: ${device}` });
-    // Anti-spam: gdy gra chime, osobne powiadomienie Windows to podwójny
-    // przekaz tego samego — zostawiamy tylko sygnał dźwiękowy.
-    const chimeWillPlay =
-      ctx!.config.get('audioChime') &&
-      (state === 'desk' ? ctx!.config.get('audioChimeOnDesk') !== false : ctx!.config.get('audioChimeOnAway') !== false);
-    if (!chimeWillPlay) {
-      showWindowsNotification('Auto Audio Switch', `Aktywny mikrofon: ${device}`);
-    }
     refreshSnapshot();
   });
   controller.on('displayState', (disp: string) => {
@@ -200,11 +194,21 @@ app.whenReady().then(() => {
       message: disp === 'sleep' ? '🖥️ Ekrany uśpione (brak obecności)' : '🖥️ Ekrany wybudzone'
     });
   });
-  controller.on('switched', ({ state, device, ok }) => {
-    if (!ok && device) {
-      pushEvent('toast', { error: true, message: `Nie udało się aktywować mikrofonu: ${device} — ponawiam w tle` });
+  controller.on('switched', (p: { state: DeviceState; device?: string | null; ok: boolean; switched?: boolean }) => {
+    appendLog('APP', `switched state=${p.state} device=${p.device} ok=${p.ok} switched=${p.switched}`);
+    if (p.ok && p.switched && p.device) {
+      pushEvent('toast', { message: `Przełączono mikrofon: ${p.device}` });
+      const chimeWillPlay =
+        ctx!.config.get('audioChime') &&
+        (p.state === 'desk'
+          ? ctx!.config.get('audioChimeOnDesk') !== false
+          : ctx!.config.get('audioChimeOnAway') !== false);
+      if (!chimeWillPlay) {
+        showWindowsNotification('Auto Audio Switch', `Aktywny mikrofon: ${p.device}`);
+      }
+    } else if (!p.ok && p.device) {
+      pushEvent('toast', { error: true, message: `Nie udało się aktywować mikrofonu: ${p.device} — ponawiam w tle` });
     }
-    appendLog('APP', `switched state=${state} device=${device} ok=${ok}`);
     refreshSnapshot();
   });
   controller.on('radarStatus', (s: { connected?: boolean; error?: string }) => {
@@ -293,7 +297,15 @@ app.on('second-instance', () => {
   if (ctx) showSettings(ctx);
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (e) => {
+  // Twarda zasada: nigdy nie ubijamy esptool w połowie zapisu flash —
+  // pół-wgrany sensor to scenariusz ratunkowy. Blokujemy quit z komunikatem.
+  if (ctx?.sensorFlasher.isFlashing) {
+    e.preventDefault();
+    showWindowsNotification('Auto Audio Switch', 'Wgrywanie firmware w toku — zamknięcie możliwe po zakończeniu.');
+    pushEvent('toast', { error: true, message: 'Nie można zamknąć: trwa wgrywanie firmware sensora' });
+    return;
+  }
   (app as Electron.App & { isQuitting?: boolean }).isQuitting = true;
   globalShortcut.unregisterAll();
   // Sprzątanie: zatrzymaj radar i ubij rezydentny daemon AudioSwitcher.exe,

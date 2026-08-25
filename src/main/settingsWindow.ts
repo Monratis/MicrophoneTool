@@ -25,7 +25,8 @@ export function createSettingsWindow(ctx: AppContext): void {
     icon: winIcon ?? undefined,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
-      sandbox: false,
+      // Preload korzysta wyłącznie z ipcRenderer/contextBridge — działa w sandboksie.
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: true

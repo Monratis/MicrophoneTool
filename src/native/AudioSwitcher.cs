@@ -145,6 +145,11 @@ namespace AudioSwitcher
 
         private static readonly Guid IID_IAudioEndpointVolume = new Guid("5BC644DE-035A-46E0-B884-219C03C28731");
 
+        // Zwalnia pamięć COM przydzieloną przez IPropertyStore.GetValue —
+        // bez tego daemon wycieka przy każdej enumeracji każdego urządzenia.
+        [DllImport("ole32.dll")]
+        private static extern int PropVariantClear(ref PropVariant pvar);
+
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
@@ -251,6 +256,27 @@ namespace AudioSwitcher
                     }
                     return SetDefaultDevice(args[1]);
                 }
+                else if (command == "set-volume")
+                {
+                    if (args.Length < 3)
+                    {
+                        Console.Error.WriteLine("{\"ok\":false,\"error\":\"Usage: set-volume <Name_or_ID> <0-100>\"}");
+                        return 1;
+                    }
+                    float pct;
+                    if (!float.TryParse(args[2], out pct))
+                    {
+                        Console.Error.WriteLine("{\"ok\":false,\"error\":\"Invalid volume percentage\"}");
+                        return 1;
+                    }
+                    if (pct < 0f) pct = 0f;
+                    if (pct > 100f) pct = 100f;
+                    return SetVolume(args[1], pct / 100f);
+                }
+                else if (command == "get-volume")
+                {
+                    return GetVolume(args.Length > 1 ? args[1] : "");
+                }
                 else if (command == "--help" || command == "-h" || command == "/?")
                 {
                     PrintHelp();
@@ -338,17 +364,18 @@ namespace AudioSwitcher
                 }
                 else if (cmd == "set-volume")
                 {
-                    // Format: set-volume <Name_or_ID> <0-100>
-                    // Nazwy urządzeń zawierają spacje — wartość to ostatni token.
-                    int lastSpace = arg.LastIndexOf(' ');
+                    // Format: set-volume <0-100> <Name_or_ID>
+                    // Procent PIERWSZY — nazwy urządzeń bywają kończą się cyfrą,
+                    // co łamało parsowanie "ostatni token = wartość".
+                    int firstSpace = arg.IndexOf(' ');
                     float pct;
-                    if (lastSpace <= 0 || !float.TryParse(arg.Substring(lastSpace + 1).Trim(), out pct))
+                    if (firstSpace <= 0 || !float.TryParse(arg.Substring(0, firstSpace).Trim(), out pct))
                     {
-                        Console.Error.WriteLine("{\"ok\":false,\"error\":\"Usage: set-volume <Name_or_ID> <0-100>\"}");
+                        Console.Error.WriteLine("{\"ok\":false,\"error\":\"Usage: set-volume <0-100> <Name_or_ID>\"}");
                     }
                     else
                     {
-                        string volTarget = arg.Substring(0, lastSpace).Trim();
+                        string volTarget = arg.Substring(firstSpace + 1).Trim();
                         if (pct < 0f) pct = 0f;
                         if (pct > 100f) pct = 100f;
                         SetVolume(volTarget, pct / 100f);
@@ -451,10 +478,17 @@ namespace AudioSwitcher
                 IPropertyStore store;
                 if (dev.OpenPropertyStore(0, out store) == 0 && store != null)
                 {
-                    PropVariant val;
-                    if (store.GetValue(ref key, out val) == 0 && val.ptr != IntPtr.Zero)
+                    PropVariant val = default(PropVariant);
+                    try
                     {
-                        name = Marshal.PtrToStringUni(val.ptr);
+                        if (store.GetValue(ref key, out val) == 0 && val.ptr != IntPtr.Zero)
+                        {
+                            name = Marshal.PtrToStringUni(val.ptr);
+                        }
+                    }
+                    finally
+                    {
+                        PropVariantClear(ref val);
                     }
                 }
 
@@ -564,9 +598,17 @@ namespace AudioSwitcher
 
             if (target.StartsWith("{") && target.Contains(".{"))
             {
-                policyConfig.SetDefaultEndpoint(target, ERole.eConsole);
-                policyConfig.SetDefaultEndpoint(target, ERole.eMultimedia);
-                policyConfig.SetDefaultEndpoint(target, ERole.eCommunications);
+                // HRESULT-y MUSZĄ być sprawdzane — po restarcie usługi audio
+                // martwy COM zwraca błąd, a fałszywe "ok:true" zatruwa cache
+                // po stronie aplikacji.
+                int hrA = policyConfig.SetDefaultEndpoint(target, ERole.eConsole);
+                int hrB = policyConfig.SetDefaultEndpoint(target, ERole.eMultimedia);
+                int hrC = policyConfig.SetDefaultEndpoint(target, ERole.eCommunications);
+                if (hrA != 0 || hrB != 0 || hrC != 0)
+                {
+                    Console.Error.WriteLine("{\"ok\":false,\"error\":\"SetDefaultEndpoint failed hr=0x" + (hrA | hrB | hrC).ToString("X8") + "\"}");
+                    return 1;
+                }
                 Console.WriteLine("{\"ok\":true,\"id\":" + EscapeJson(target) + "}");
                 return 0;
             }
@@ -593,9 +635,14 @@ namespace AudioSwitcher
                 return 0;
             }
 
-            policyConfig.SetDefaultEndpoint(match.Id, ERole.eConsole);
-            policyConfig.SetDefaultEndpoint(match.Id, ERole.eMultimedia);
-            policyConfig.SetDefaultEndpoint(match.Id, ERole.eCommunications);
+            int hr1 = policyConfig.SetDefaultEndpoint(match.Id, ERole.eConsole);
+            int hr2 = policyConfig.SetDefaultEndpoint(match.Id, ERole.eMultimedia);
+            int hr3 = policyConfig.SetDefaultEndpoint(match.Id, ERole.eCommunications);
+            if (hr1 != 0 || hr2 != 0 || hr3 != 0)
+            {
+                Console.Error.WriteLine("{\"ok\":false,\"error\":\"SetDefaultEndpoint failed hr=0x" + (hr1 | hr2 | hr3).ToString("X8") + "\"}");
+                return 1;
+            }
 
             Console.WriteLine("{\"ok\":true,\"name\":" + EscapeJson(match.Name) + ",\"id\":" + EscapeJson(match.Id) + "}");
             return 0;

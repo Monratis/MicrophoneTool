@@ -173,7 +173,8 @@ class AppUI {
     this.lastDeviceSig = this.deviceListSig(this.audioDevices);
     this.lastPortSig = this.portListSig(this.ports);
     setInterval(() => {
-      if (!this.snap) return;
+      // Zasada tray: ukryte okno = zero pracy
+      if (!this.snap || document.visibilityState !== 'visible') return;
       void this.pollHardwareLists();
     }, 3000);
 
@@ -678,6 +679,16 @@ class AppUI {
     }, 400);
   }
 
+  /** Pozycja startowa suwaka głośności: config > live poziom urządzenia > 100. */
+  private initVolumePercent(micName: string, cfgVal: number | undefined): number {
+    if (typeof cfgVal === 'number' && cfgVal >= 0) return cfgVal;
+    const dev = this.audioDevices.find((d) => d.name === micName);
+    if (dev && typeof dev.volume === 'number' && dev.volume >= 0 && dev.volume <= 100) {
+      return Math.round(dev.volume);
+    }
+    return 100;
+  }
+
   /** Izolowana strefa bannerów aktualizacji — przebudowywana osobno, bez ruszania reszty widoku. */
   private buildUpdateZoneHtml(): string {
     if (this.updater.status === 'available' && this.updater.updateInfo) {
@@ -1007,15 +1018,11 @@ class AppUI {
                       .map((d) => `<option value="${esc(d.name)}" data-id="${esc(d.id || '')}" ${d.name === this.form!.micDeskName ? 'selected' : ''}>${esc(d.name)}${d.isDefault ? ' (Domyślny)' : ''}</option>`)
                       .join('')}
                   </select>
-                  ${
-                    typeof this.form.micDeskVolume === 'number' && this.form.micDeskVolume >= 0
-                      ? `<div style="display:flex; align-items:center; gap:8px; margin-top:6px">
-                          <span style="font-size:10.5px; color:var(--muted)">🔊</span>
-                          <input type="range" class="slider" id="rng-vol-desk" min="0" max="100" step="5" value="${this.form.micDeskVolume}" style="flex:1" />
-                          <span class="slider-val" id="vol-desk-val">${this.form.micDeskVolume}%</span>
-                        </div>`
-                      : ''
-                  }
+                  <div style="display:flex; align-items:center; gap:8px; margin-top:6px">
+                    <span style="font-size:10.5px; color:var(--muted)" title="Głośność tego mikrofonu w Windows">🔊</span>
+                    <input type="range" class="slider" id="rng-vol-desk" min="0" max="100" step="5" value="${this.initVolumePercent(this.form.micDeskName, this.form.micDeskVolume)}" style="flex:1" />
+                    <span class="slider-val" id="vol-desk-val">${this.initVolumePercent(this.form.micDeskName, this.form.micDeskVolume)}%</span>
+                  </div>
                   <div style="display:flex; align-items:center; gap:8px; margin-top:6px">
                     <span style="font-size:10.5px; color:var(--muted)" title="Bramka VAD w Discordzie dla tego mikrofonu">🚪</span>
                     <input type="range" class="slider" id="rng-gate-desk" min="-90" max="0" step="5" value="${Math.max(-90, this.form.micDeskGateDb ?? -60)}" style="flex:1" />
@@ -1051,15 +1058,11 @@ class AppUI {
                       .map((d) => `<option value="${esc(d.name)}" data-id="${esc(d.id || '')}" ${d.name === this.form!.micHeadsetName ? 'selected' : ''}>${esc(d.name)}${d.isDefault ? ' (Domyślny)' : ''}</option>`)
                       .join('')}
                   </select>
-                  ${
-                    typeof this.form.micHeadsetVolume === 'number' && this.form.micHeadsetVolume >= 0
-                      ? `<div style="display:flex; align-items:center; gap:8px; margin-top:6px">
-                          <span style="font-size:10.5px; color:var(--muted)">🔊</span>
-                          <input type="range" class="slider" id="rng-vol-headset" min="0" max="100" step="5" value="${this.form.micHeadsetVolume}" style="flex:1" />
-                          <span class="slider-val" id="vol-headset-val">${this.form.micHeadsetVolume}%</span>
-                        </div>`
-                      : ''
-                  }
+                  <div style="display:flex; align-items:center; gap:8px; margin-top:6px">
+                    <span style="font-size:10.5px; color:var(--muted)" title="Głośność tego mikrofonu w Windows">🔊</span>
+                    <input type="range" class="slider" id="rng-vol-headset" min="0" max="100" step="5" value="${this.initVolumePercent(this.form.micHeadsetName, this.form.micHeadsetVolume)}" style="flex:1" />
+                    <span class="slider-val" id="vol-headset-val">${this.initVolumePercent(this.form.micHeadsetName, this.form.micHeadsetVolume)}%</span>
+                  </div>
                   <div style="display:flex; align-items:center; gap:8px; margin-top:6px">
                     <span style="font-size:10.5px; color:var(--muted)" title="Bramka VAD w Discordzie dla tego mikrofonu">🚪</span>
                     <input type="range" class="slider" id="rng-gate-headset" min="-90" max="0" step="5" value="${Math.max(-90, this.form.micHeadsetGateDb ?? -60)}" style="flex:1" />

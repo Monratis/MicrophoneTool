@@ -30,8 +30,10 @@ export default class AutoTuner {
   private noiseSamplesCount = 0;
   private stableStreak = 0;
   private lastDistanceSample = 0;
+  private lastCountAt = 0;
   private lastAdaptedAt = Date.now();
   private lastSavedAt = Date.now();
+  private lastPersistedSig = '';
 
   constructor(config: Config) {
     this.config = config;
@@ -71,7 +73,13 @@ export default class AutoTuner {
     const now = Date.now();
 
     if (isSeated && distanceCm > 25 && distanceCm < 220) {
-      this.samplesCount++;
+      // Licznik próbek: feedSample leci osobno dla dystansu/tętna/oddechu
+      // (3× na jeden odczyt radaru) — throttling 250 ms liczy burst jako
+      // JEDNĄ próbkę, inaczej kalibracja "gotowa" po ~7 prawdziwych odczytach.
+      if (now - this.lastCountAt > 250) {
+        this.lastCountAt = now;
+        this.samplesCount++;
+      }
       this.lastAdaptedAt = now;
 
       if (this.distanceMean === 0) {
@@ -201,7 +209,12 @@ export default class AutoTuner {
 
   persist(): void {
     try {
-      // Jeden zapis na dysk zamiast pięciokrotnego config.set()
+      // Zapis tylko przy realnej zmianie wartości (EMA zawsze lekko dryfuje —
+      // bez dedupu dysk dostawał zapis co 45 s w nieskończoność).
+      const sig = `${Math.round(this.distanceMean)}|${Math.round(this.distanceMad)}|${Math.round(this.heartRateMean)}|${Math.round(this.breathRateMean)}|${Math.round(this.noiseFloor)}`;
+      if (sig === this.lastPersistedSig) return;
+      this.lastPersistedSig = sig;
+
       const data = this.config.data;
       if (this.distanceMean > 0) {
         data.radarLearnedDistanceCenter = Math.round(this.distanceMean);
@@ -221,6 +234,7 @@ export default class AutoTuner {
   }
 
   reset(): ReturnType<AutoTuner['getStatus']> {
+    this.lastPersistedSig = '';
     this.distanceMean = 0;
     this.distanceMad = 0;
     this.heartRateMean = 0;

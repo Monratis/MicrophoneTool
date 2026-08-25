@@ -215,6 +215,11 @@ export default class RadarListener extends EventEmitter {
       this.lineBuffer = this.lineBuffer.slice(idx + 1);
       if (!line) continue;
 
+      // Binarny strumień przecieka do bufora tekstowego (ramki zawierają
+      // bajty 0x0A w polach typu) — linie ze znakami kontrolnymi odrzucamy
+      // zanim cokolwiek kosztownego parsujemy.
+      if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(line)) continue;
+
       // JSON format
       if (line.charCodeAt(0) === 123) {
         try {
@@ -321,32 +326,90 @@ export default class RadarListener extends EventEmitter {
     }
   }
 
+  /**
+   * Parser binarnego protokołu MR60BHA2 (wg implementacji referencyjnej
+   * ESPHome seeed_mr60bha2):
+   *   [0]=0x01 | [1..2]=id BE | [3..4]=len BE | [5..6]=type BE
+   *   [7]=cksum nagłówka (XOR b0..b6, inv) | [8..8+len)=payload | ostatni=cksum danych
+   * Typy: 0x0A14 oddech, 0x0A15 tętno, 0x0A16 dystans, 0x0F09 obecność.
+   */
   private scanBinaryFrames(): void {
-    while (this.rawBuffer.length >= 4) {
-      const start = this.rawBuffer.indexOf(Buffer.from([0x53, 0x59]));
-      if (start === -1) {
-        this.rawBuffer = this.rawBuffer.slice(-1);
-        break;
-      }
-      if (start > 0) {
-        this.rawBuffer = this.rawBuffer.slice(start);
-      }
-      if (this.rawBuffer.length < 4) break;
-
-      const len = this.rawBuffer[3] || this.rawBuffer[2];
-      const frameLen = Math.max(4, Math.min(len + 4, 48));
-
-      if (this.rawBuffer.length < frameLen) {
-        break;
+    while (this.rawBuffer.length >= 8) {
+      if (this.rawBuffer[0] !== 0x01) {
+        const idx = this.rawBuffer.indexOf(0x01);
+        if (idx === -1) {
+          this.rawBuffer = Buffer.alloc(0);
+          return;
+        }
+        this.rawBuffer = this.rawBuffer.slice(idx);
+        continue;
       }
 
-      const frame = this.rawBuffer.slice(0, frameLen);
-      this.parseBinaryFrame(frame);
-      this.rawBuffer = this.rawBuffer.slice(frameLen);
+      const len = (this.rawBuffer[3] << 8) | this.rawBuffer[4];
+      if (len > 64) {
+        this.rawBuffer = this.rawBuffer.slice(1);
+        continue;
+      }
+      const total = 8 + len + 1;
+      if (this.rawBuffer.length < total) return;
+
+      const frame = this.rawBuffer.subarray(0, total);
+      let hc = 0;
+      for (let i = 0; i < 7; i++) hc ^= frame[i];
+      if ((~hc & 0xff) !== frame[7]) {
+        this.rawBuffer = this.rawBuffer.slice(1);
+        continue;
+      }
+      let dc = 0;
+      for (let i = 8; i < 8 + len; i++) dc ^= frame[i];
+      if ((~dc & 0xff) !== frame[8 + len]) {
+        this.rawBuffer = this.rawBuffer.slice(1);
+        continue;
+      }
+
+      const type = (frame[5] << 8) | frame[6];
+      this.dispatchRadarFrame(type, frame.subarray(8, 8 + len));
+      this.rawBuffer = this.rawBuffer.slice(total);
     }
+  }
 
-    if (this.rawBuffer.length > 1024) {
-      this.rawBuffer = Buffer.alloc(0);
+  /** Float z payloadu — Seeed wysyła bajty odwrócone względem LE. */
+  private payloadFloat(p: Buffer): number {
+    if (p.length < 4) return NaN;
+    return Buffer.from([p[3], p[2], p[1], p[0]]).readFloatLE(0);
+  }
+
+  private dispatchRadarFrame(type: number, p: Buffer): void {
+    switch (type) {
+      case 0x0f09: {
+        // Obecność: uint16 odwrócone, dowolna wartość != 0
+        if (p.length >= 2) {
+          const v = (p[1] << 8) | p[0];
+          this.handleRawPresence(v !== 0);
+        }
+        break;
+      }
+      case 0x0a15: {
+        const bpm = Math.round(this.payloadFloat(p));
+        if (bpm >= 30 && bpm <= 240) this.updateHeartRate(bpm);
+        break;
+      }
+      case 0x0a14: {
+        const rpm = Math.round(this.payloadFloat(p));
+        if (rpm >= 5 && rpm <= 70) this.updateBreathRate(rpm);
+        break;
+      }
+      case 0x0a16: {
+        const f = this.payloadFloat(p);
+        if (Number.isFinite(f) && f > 0 && f <= 800) {
+          // Firmware potrafi raportować w metrach albo cm — heurystyka jak w ścieżce tekstowej
+          const cm = f < 10 ? Math.round(f * 100) : Math.round(f);
+          this.updateDistance(cm);
+        }
+        break;
+      }
+      default:
+        break;
     }
   }
 
@@ -393,6 +456,54 @@ export default class RadarListener extends EventEmitter {
     this.telemetry.autoTuning = this.autoTuner.getStatus();
   }
 
+  private lastTelemetryEmit = 0;
+  private telemetryFlushTimer: NodeJS.Timeout | null = null;
+  private lastTelemetrySig = '';
+
+  /**
+   * Emisja telemetrii: sensor wypycha dane w kółko, więc wysyłamy do UI
+   * WYŁĄCZNIE gdy coś się realnie zmieniło (sygnatura pól widocznych dla
+   * użytkownika; adaptacyjne EMA kwantyzowane, żeby dryf nie generował
+   * fałszywych zmian) i nie częściej niż ~8 Hz.
+   */
+  private scheduleTelemetry(): void {
+    const t = this.telemetry;
+    const tun = t.autoTuning;
+    const sig =
+      `${t.presence ? 1 : 0}|${t.distanceCm ?? 0}|${t.heartRate ?? 0}|${t.breathRate ?? 0}|` +
+      `${t.detectedPerson ?? ''}|${tun?.mode ?? ''}|${Math.floor((tun?.samplesCount ?? 0) / 10)}|` +
+      `${Math.round((tun?.noiseFloor ?? 0) / 5)}`;
+    if (sig === this.lastTelemetrySig) return;
+
+    const now = Date.now();
+    const since = now - this.lastTelemetryEmit;
+    if (since >= 120) {
+      this.lastTelemetryEmit = now;
+      this.lastTelemetrySig = sig;
+      this.emit('telemetry', this.telemetry);
+      return;
+    }
+    if (this.telemetryFlushTimer) return;
+    this.telemetryFlushTimer = setTimeout(() => {
+      this.telemetryFlushTimer = null;
+      // Sygnatura mogła się cofnąć do ostatnio wysłanej — wtedy cisza
+      if (this.lastTelemetrySig === this.buildTelemetrySig()) return;
+      this.lastTelemetryEmit = Date.now();
+      this.lastTelemetrySig = this.buildTelemetrySig();
+      this.emit('telemetry', this.telemetry);
+    }, 120 - since);
+  }
+
+  private buildTelemetrySig(): string {
+    const t = this.telemetry;
+    const tun = t.autoTuning;
+    return (
+      `${t.presence ? 1 : 0}|${t.distanceCm ?? 0}|${t.heartRate ?? 0}|${t.breathRate ?? 0}|` +
+      `${t.detectedPerson ?? ''}|${tun?.mode ?? ''}|${Math.floor((tun?.samplesCount ?? 0) / 10)}|` +
+      `${Math.round((tun?.noiseFloor ?? 0) / 5)}`
+    );
+  }
+
   private updateDistance(distCm: number): void {
     if (distCm <= 0 || distCm > 800) return;
     this.telemetry.distanceCm = distCm;
@@ -407,7 +518,7 @@ export default class RadarListener extends EventEmitter {
     });
 
     this.evaluateBiometrics();
-    this.emit('telemetry', this.telemetry);
+    this.scheduleTelemetry();
   }
 
   private updateHeartRate(bpm: number): void {
@@ -423,7 +534,7 @@ export default class RadarListener extends EventEmitter {
     });
 
     this.evaluateBiometrics();
-    this.emit('telemetry', this.telemetry);
+    this.scheduleTelemetry();
   }
 
   private updateBreathRate(rpm: number): void {
@@ -439,7 +550,7 @@ export default class RadarListener extends EventEmitter {
     });
 
     this.evaluateBiometrics();
-    this.emit('telemetry', this.telemetry);
+    this.scheduleTelemetry();
   }
 
   private evaluateBiometrics(): void {
@@ -545,7 +656,7 @@ export default class RadarListener extends EventEmitter {
   resetAutoTuning(): ReturnType<AutoTuner['getStatus']> {
     const status = this.autoTuner.reset();
     this.telemetry.autoTuning = status;
-    this.emit('telemetry', this.telemetry);
+    this.scheduleTelemetry();
     return status;
   }
 
@@ -556,9 +667,13 @@ export default class RadarListener extends EventEmitter {
     if (this.awayTimer) clearTimeout(this.awayTimer);
 
     if (present) {
-      this.deskTimer = setTimeout(() => this.setState('desk'), this.config.get('timeoutDeskMs'));
+      // Koercja: śmieciowa wartość z configu (NaN/ujemna) nie może
+      // zamienić debouncera w natychmiastowe flappy przełączanie.
+      const deskMs = Math.max(0, Number(this.config.get('timeoutDeskMs')) || 300);
+      this.deskTimer = setTimeout(() => this.setState('desk'), deskMs);
     } else {
-      this.awayTimer = setTimeout(() => this.setState('away'), this.config.get('timeoutAwayMs'));
+      const awayMs = Math.max(250, Number(this.config.get('timeoutAwayMs')) || 3000);
+      this.awayTimer = setTimeout(() => this.setState('away'), awayMs);
     }
     this.emit('status', {
       presence: present,

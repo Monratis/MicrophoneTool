@@ -440,7 +440,9 @@ export default class SoundVolumeView {
   async setVolume(target = '', percent: number): Promise<{ ok: boolean; volume?: number }> {
     const vol = Math.max(0, Math.min(100, Math.round(percent)));
     const idOrName = this.nameToIdMap.get(target) || target;
-    let res = await this.sendDaemonCommand(`set-volume ${idOrName} ${vol}`);
+    // Procent PIERWSZY w formacie daemonowym — nazwy urządzeń potrafią
+    // kończyć się cyfrą, co łamało parsowanie "ostatni token".
+    let res = await this.sendDaemonCommand(`set-volume ${vol} ${idOrName}`);
     if (!res || !res.ok) {
       const tool = await this.ensure();
       if (tool && tool.isNative) {
@@ -535,7 +537,6 @@ export default class SoundVolumeView {
       isMuted?: boolean;
       volume?: number;
     }
-
     if (res && res.ok && res.stdout) {
       try {
         const parsed = JSON.parse(res.stdout.trim()) as NativeDevice[];
@@ -554,6 +555,8 @@ export default class SoundVolumeView {
                 // Daemon zwraca isMuted — renderer inicjalizuje z niego
                 // stan pill "Wyciszony/Aktywny".
                 isMuted: typeof d.isMuted === 'boolean' ? d.isMuted : undefined,
+                // Daemon wysyła volume już jako procent (0-100)
+                volume: typeof d.volume === 'number' ? d.volume : undefined,
                 id: d.id
               };
             })
