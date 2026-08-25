@@ -192,6 +192,11 @@ export default class DiscordIntegration extends EventEmitter {
     if (nonce && this.pending.has(nonce)) {
       const resolve = this.pending.get(nonce)!;
       this.pending.delete(nonce);
+      if (payload.cmd === 'AUTHORIZE' || payload.cmd === 'AUTHENTICATE') {
+        // Pełna ramka diagnostycznie — puste data przy przyjętej zgodzie
+        // wskazuje np. brak Redirect URI w konfiguracji apki.
+        console.log(`[discord] ${payload.cmd} raw: ${JSON.stringify(payload).slice(0, 600)}`);
+      }
       const isError =
         payload.evt === 'error' ||
         (typeof payload.status === 'number' && payload.status >= 400);
