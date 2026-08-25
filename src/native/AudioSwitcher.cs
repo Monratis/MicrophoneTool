@@ -693,7 +693,12 @@ namespace AudioSwitcher
                         if (epv != null)
                         {
                             Guid ctx = Guid.Empty;
-                            epv.SetMute(mute, ref ctx);
+                            int hrMute = epv.SetMute(mute, ref ctx);
+                            if (hrMute != 0)
+                            {
+                                Console.Error.WriteLine("{\"ok\":false,\"error\":\"SetMute failed hr=0x" + hrMute.ToString("X8") + "\"}");
+                                return 1;
+                            }
                             Console.WriteLine("{\"ok\":true,\"isMuted\":" + (mute ? "true" : "false") + ",\"id\":" + EscapeJson(dev.Id) + "}");
                             return 0;
                         }
@@ -738,7 +743,12 @@ namespace AudioSwitcher
                         if (epv != null)
                         {
                             Guid ctx = Guid.Empty;
-                            epv.SetMasterVolumeLevelScalar(scalar, ref ctx);
+                            int hrVol = epv.SetMasterVolumeLevelScalar(scalar, ref ctx);
+                            if (hrVol != 0)
+                            {
+                                Console.Error.WriteLine("{\"ok\":false,\"error\":\"SetVolume failed hr=0x" + hrVol.ToString("X8") + "\"}");
+                                return 1;
+                            }
                             Console.WriteLine("{\"ok\":true,\"volume\":" + Math.Round(scalar * 100f) + ",\"id\":" + EscapeJson(dev.Id) + "}");
                             return 0;
                         }
