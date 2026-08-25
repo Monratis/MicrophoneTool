@@ -4,7 +4,7 @@ Instrukcje dla agentów AI i deweloperów pracujących nad tym repozytorium.
 
 ## Projekt
 
-**Auto Audio Switch** — automatyczne przełączanie domyślnego mikrofonu Windows wg obecności
+**DeskSense** (by Monra) — automatyczne przełączanie domyślnego mikrofonu Windows wg obecności
 użytkownika przy biurku (radar mmWave Seeed MR60BHA2 na XIAO ESP32-C6 przez USB/COM).
 Aplikacja Electron działa w System Tray. Język komunikatów UI i komentarzy: **polski**.
 
@@ -52,14 +52,14 @@ npm run package:installer         # tylko NSIS
 
 2. **Wiszący build**: stara instancja apki (tray!) blokuje pliki wyjściowe → makensis czeka
    W NIESKOŃCZONOŚCI ("output file is locked for writing"). `build.mjs` ubija procesy
-   `Auto Audio Switch*` przed pakowaniem. Nie testuj ręcznie gołym electron-builderem.
+   `DeskSense*` przed pakowaniem. Nie testuj ręcznie gołym electron-builderem.
 
 3. **esptool-js MUSI być wbundlowany**: surowe ESM z importami bez rozszerzeń (`./util`)
    → crash `ERR_MODULE_NOT_FOUND` na starcie w packaged app.
    `electron.vite.config.mjs`: `externalizeDepsPlugin({ exclude: ['esptool-js'] })`.
 
 4. **latest.yml**: electron-builder zapisuje w nim ZSANITOWANE nazwy plików
-   (`Auto-Audio-Switch-Setup-0.2.0.exe`) a realny plik ma spacje. Po patchu ikon hash'e
+   (`DeskSense-Setup-0.2.0.exe`) a realny plik ma spacje. Po patchu ikon hash'e
    są przeliczane w `build.mjs` (dopasowanie po normalizacji, oba formaty yml).
    Nie kopiuj latest.yml z dist/ bezpośrednio.
 
@@ -80,8 +80,8 @@ npm run package:installer         # tylko NSIS
    - `npm run typecheck` — zero błędów,
    - przy zmianach main process: `node scripts/build.mjs portable` + smoke test:
      ```powershell
-     Start-Process 'D:\MicrophoneTool\releases\Auto Audio Switch (Portable).exe'
-     Start-Sleep 12; Get-Process | Where-Object { $_.Name -like 'Auto Audio*' }
+     Start-Process 'D:\MicrophoneTool\releases\DeskSense (Portable).exe'
+     Start-Sleep 12; Get-Process | Where-Object { $_.Name -like 'DeskSense*' }
      # potem: Get-Process ... | Stop-Process -Force
      ```
    - "5 processes alive" = OK; brak procesów = crash main process.

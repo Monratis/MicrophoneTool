@@ -1,9 +1,9 @@
 {
-  "name": "auto-audio-input-switcher",
-  "version": "0.2.2",
-  "description": "Automatyczne przełączanie domyślnego mikrofonu w Windows wg obecności użytkownika (mmWave USB radar + Electron Tray)",
+  "name": "desksense",
+  "version": "0.3.0",
+  "description": "DeskSense — inteligentne automatyczne przełączanie mikrofonu wg obecności przy biurku (mmWave USB radar + Electron Tray)",
   "main": "out/main/index.js",
-  "author": "Monratis",
+  "author": "Monra",
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",
@@ -34,8 +34,8 @@
     "vite": "^8.2.2"
   },
   "build": {
-    "appId": "com.monratis.autoaudio",
-    "productName": "Auto Audio Switch",
+    "appId": "com.monratis.desksense",
+    "productName": "DeskSense",
     "npmRebuild": false,
     "compression": "normal",
     "icon": "build/icon.ico",

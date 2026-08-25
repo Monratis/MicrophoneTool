@@ -20,7 +20,7 @@ export const DEFAULTS: AppConfig = {
   micDeskEcho: 'default',
   micHeadsetEcho: 'default',
   discordGateFollowMic: true,
-  /** Application ID apki Auto Audio Switch (Discord Developer Portal) */
+  /** Application ID apki DeskSense (Discord Developer Portal) */
   discordClientId: '1238447097859145859',
   /**
    * Client Secret osadzony w apkce na stałe (decyzja właściciela — apka

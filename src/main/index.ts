@@ -124,7 +124,7 @@ function refreshSnapshot(): void {
 
 // ---------- lifecycle ----------
 
-app.setAppUserModelId('com.monratis.autoaudio');
+app.setAppUserModelId('com.monratis.desksense');
 
 app.whenReady().then(() => {
   cleanupStaleUpdateFiles();
@@ -210,7 +210,7 @@ app.whenReady().then(() => {
           ? ctx!.config.get('audioChimeOnDesk') !== false
           : ctx!.config.get('audioChimeOnAway') !== false);
       if (!chimeWillPlay) {
-        showWindowsNotification('Auto Audio Switch', `Aktywny mikrofon: ${p.device}`);
+        showWindowsNotification('DeskSense', `Aktywny mikrofon: ${p.device}`);
       }
     } else if (!p.ok && p.device) {
       pushEvent('toast', { error: true, message: `Nie udało się aktywować mikrofonu: ${p.device} — ponawiam w tle` });
@@ -256,7 +256,7 @@ app.whenReady().then(() => {
       const isMuted = res?.isMuted;
       pushEvent('toast', { message: isMuted ? 'Mikrofon wyciszony 🔇' : 'Mikrofon aktywny 🎙️' });
       showWindowsNotification(
-        'Auto Audio Switch',
+        'DeskSense',
         isMuted ? 'Mikrofon został wyciszony 🔇' : 'Wyciszenie mikrofonu wyłączone 🎙️'
       );
       refreshSnapshot();
@@ -290,7 +290,7 @@ app.whenReady().then(() => {
           ctx!.config.get('micHeadsetName') ||
           'nie wykryto';
         createNotification(
-          'Auto Audio Switch',
+          'DeskSense',
           `Wystartowała w tle. Aktywny mikrofon: ${name}`,
           ctx!.config.get('notifications')
         );
@@ -313,7 +313,7 @@ app.on('before-quit', (e) => {
     e.preventDefault();
     const choice = dialog.showMessageBoxSync({
       type: 'warning',
-      title: 'Auto Audio Switch',
+      title: 'DeskSense',
       message: 'Trwa wgrywanie firmware sensora.',
       detail: 'Przerwanie w połowie zapisu może wymagać awaryjnego wgrywania przez tryb ratunkowy.',
       buttons: ['Czekaj na zakończenie', 'Zamknij mimo to'],
@@ -334,6 +334,7 @@ app.on('before-quit', (e) => {
     void ctx.controller.stop();
     ctx.audio.shutdown();
   }
+  cleanupStaleUpdateFiles();
 });
 
 // Aplikacja działa w tray — zamknięcie okien nie kończy procesu.

@@ -50,22 +50,57 @@ export function getAppDataDir(): string {
 }
 
 /**
- * Sprzątanie staroć po sobie: pobrane instalatory aktualizacji i skrypty restartu
- * zostawiane wcześniej w %TEMP% nigdy nie były usuwane (setki MB śmieci).
+ * Sprzątanie staroci i plików tymczasowych po sobie: pobrane instalatory
+ * aktualizacji, firmware, skrypty restartu, osierocone foldery electron-download,
+ * rozpakowane wcześniej wersje portable (ns*.tmp) i tymczasowe raporty CSV
+ * zostawiane w %TEMP% są usuwane przy starcie i zamknięciu aplikacji.
  */
 export function cleanupStaleUpdateFiles(): void {
-  const targets = [
-    path.join(os.tmpdir(), 'AutoAudioSwitch-Update'),
-    path.join(os.tmpdir(), 'update_restart.bat'),
-    path.join(os.tmpdir(), 'update_run_installer.bat'),
-    path.join(os.tmpdir(), 'AutoAudioSwitch-Firmware')
+  const tmp = os.tmpdir();
+  const directTargets = [
+    path.join(tmp, 'AutoAudioSwitch-Update'),
+    path.join(tmp, 'DeskSense-Update'),
+    path.join(tmp, 'AutoAudioSwitch-Firmware'),
+    path.join(tmp, 'DeskSense-Firmware'),
+    path.join(tmp, 'update_restart.bat'),
+    path.join(tmp, 'update_run_installer.bat'),
+    path.join(tmp, 'desksense_update_restart.bat'),
+    path.join(tmp, 'desksense_update_run_installer.bat'),
+    path.join(tmp, 'svv.zip'),
+    path.join(tmp, 'svv_out.txt')
   ];
-  for (const t of targets) {
+
+  for (const t of directTargets) {
     try {
       fs.rmSync(t, { recursive: true, force: true, maxRetries: 2 });
     } catch {
       /* ignore */
     }
+  }
+
+  // Wyczyść osierocone pliki tymczasowe z poprzednich sesji, update'ów i kompilacji
+  try {
+    const files = fs.readdirSync(tmp);
+    for (const f of files) {
+      const lower = f.toLowerCase();
+      const isTarget =
+        (lower.startsWith('svv-') && lower.endsWith('.csv')) ||
+        lower.startsWith('desksense-') ||
+        lower.startsWith('autoaudioswitch-') ||
+        lower.startsWith('electron-download-') ||
+        (lower.startsWith('ns') && lower.endsWith('.tmp'));
+
+      if (isTarget) {
+        try {
+          const fullPath = path.join(tmp, f);
+          fs.rmSync(fullPath, { recursive: true, force: true });
+        } catch {
+          /* ignore zablokowane pliki aktualnie działających procesów */
+        }
+      }
+    }
+  } catch {
+    /* ignore */
   }
 }
 
@@ -165,11 +200,18 @@ export function ensureToastShortcut(): void {
       'Programs'
     );
     fs.mkdirSync(programsDir, { recursive: true });
-    shell.writeShortcutLink(path.join(programsDir, 'Auto Audio Switch.lnk'), 'replace', {
+
+    // Usuń stary skrót z poprzedniej nazwy jeśli istnieje
+    const oldShortcut = path.join(programsDir, 'Auto Audio Switch.lnk');
+    if (fs.existsSync(oldShortcut)) {
+      try { fs.unlinkSync(oldShortcut); } catch (_) {}
+    }
+
+    shell.writeShortcutLink(path.join(programsDir, 'DeskSense.lnk'), 'replace', {
       target: process.execPath,
       cwd: path.dirname(process.execPath),
-      appUserModelId: 'com.monratis.autoaudio',
-      description: 'Auto Audio Switch'
+      appUserModelId: 'com.monratis.desksense',
+      description: 'DeskSense'
     });
   } catch (err) {
     console.warn('[main] toast shortcut warning:', (err as Error).message);

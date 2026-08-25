@@ -86,7 +86,9 @@ execSync('npx electron-vite build', { stdio: 'inherit' });
 for (const procName of [
   appExeName,
   `${productName} (Portable).exe`,
-  `${productName} Setup ${version}.exe`
+  `${productName} Setup ${version}.exe`,
+  'Auto Audio Switch.exe',
+  'Auto Audio Switch (Portable).exe'
 ]) {
   try {
     execSync(`taskkill /F /T /IM "${procName}"`, { stdio: 'pipe' });

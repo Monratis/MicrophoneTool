@@ -208,7 +208,7 @@ export default class AppUpdater {
 
     const asset = this.updateInfo.asset;
     const token = this.config.get('githubToken');
-    const tempDir = path.join(os.tmpdir(), 'AutoAudioSwitch-Update');
+    const tempDir = path.join(os.tmpdir(), 'DeskSense-Update');
     fs.mkdirSync(tempDir, { recursive: true });
 
     const targetFile = path.join(tempDir, asset.name);
@@ -357,7 +357,7 @@ export default class AppUpdater {
           `start "" "${installerPath}" /S`,
           'del "%~f0"'
         ].join('\r\n');
-        const runScript = path.join(os.tmpdir(), 'update_run_installer.bat');
+        const runScript = path.join(os.tmpdir(), 'desksense_update_run_installer.bat');
         fs.writeFileSync(runScript, delayedRun, 'utf8');
         spawn('cmd.exe', ['/c', runScript], {
           detached: true,
@@ -367,7 +367,7 @@ export default class AppUpdater {
       } else {
         // Aktualizacja wersji portable: skrypt wsadowy podmieniający .exe.
         // EXE potrafi być zablokowany dłużej niż sekundę — ponawiamy kopię zanim odpalimy nową binarkę.
-        const batScript = path.join(os.tmpdir(), 'update_restart.bat');
+        const batScript = path.join(os.tmpdir(), 'desksense_update_restart.bat');
         const batContent = `@echo off
 timeout /t 2 /nobreak > nul
 copy /y "${installerPath}" "${currentExe}" > nul 2>&1

@@ -1,8 +1,8 @@
-version: 0.2.2
+version: 0.3.0
 files:
-  - url: Auto Audio Switch Setup 0.2.2.exe
-    sha512: 8UMd7jFELL9pCVcDLCkEncx4tnxqMBPDd4V0hx8Op0YnxJUIsSw+Y9tV4Jd2pYrCMo4RDeGm5+XougHDYEJOyg==
-    size: 105380938
-path: Auto Audio Switch Setup 0.2.2.exe
-sha512: 8UMd7jFELL9pCVcDLCkEncx4tnxqMBPDd4V0hx8Op0YnxJUIsSw+Y9tV4Jd2pYrCMo4RDeGm5+XougHDYEJOyg==
-releaseDate: '2026-08-25T17:12:29.438Z'
+  - url: DeskSense Setup 0.3.0.exe
+    sha512: l4E1cnKLPb9fbqfD89QpI+3qJuuDda/ENQ6SVll6DgcYi8h2PmG4RkblSpUL+ioguMxEKTtZgcV77ENkOrEn+g==
+    size: 105815927
+path: DeskSense Setup 0.3.0.exe
+sha512: l4E1cnKLPb9fbqfD89QpI+3qJuuDda/ENQ6SVll6DgcYi8h2PmG4RkblSpUL+ioguMxEKTtZgcV77ENkOrEn+g==
+releaseDate: '2026-08-25T21:49:25.872Z'

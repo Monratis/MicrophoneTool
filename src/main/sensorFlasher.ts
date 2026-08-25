@@ -288,7 +288,7 @@ export default class SensorFlasher {
 
   async downloadFirmware(asset: { name: string; size?: number; apiUrl?: string; downloadUrl?: string }): Promise<string> {
     const token = this.config.get('githubToken');
-    const tempDir = path.join(os.tmpdir(), 'AutoAudioSwitch-Firmware');
+    const tempDir = path.join(os.tmpdir(), 'DeskSense-Firmware');
     fs.mkdirSync(tempDir, { recursive: true });
 
     const targetFile = path.join(tempDir, asset.name);
@@ -307,7 +307,7 @@ export default class SensorFlasher {
           reject(new Error('Zbyt wiele przekierowań podczas pobierania firmware'));
           return;
         }
-        const headers: Record<string, string> = { 'User-Agent': 'AutoAudioSwitch-SensorFlasher' };
+        const headers: Record<string, string> = { 'User-Agent': 'DeskSense-SensorFlasher' };
         if (isPrivate && !isRedirect) {
           headers['Authorization'] = `Bearer ${(token || '').trim()}`;
           headers['Accept'] = 'application/octet-stream';
