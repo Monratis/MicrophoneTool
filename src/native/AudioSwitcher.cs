@@ -324,7 +324,7 @@ namespace AudioSwitcher
             GetEnumerator();
             GetPolicyConfig();
 
-            Console.WriteLine("{\"ready\":true,\"version\":\"0.2.0\"}");
+            Console.WriteLine("{\"ready\":true,\"version\":\"0.2.2\"}");
             Console.Out.Flush();
 
             string line;
