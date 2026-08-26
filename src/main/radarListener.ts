@@ -135,7 +135,7 @@ export default class RadarListener extends EventEmitter {
       const SerialPort = await this.loadSerialPort();
       // stop() mogło przyjść w trakcie await (np. flasher zwalnia port COM)
       if (!this.running) return;
-      const portName = this.lastPortName || (await this.resolvePort());
+      const portName = await this.resolvePort();
       if (!this.running) return;
       if (!portName) {
         this.emit('status', { connected: false, error: 'brak portu' } satisfies RadarStatusEvent);
@@ -158,14 +158,23 @@ export default class RadarListener extends EventEmitter {
 
       const port = new SerialPort({
         path: portName,
-        baudRate: this.config.get('baudRate') || 115200
+        baudRate: this.config.get('baudRate') || 115200,
+        autoOpen: true,
+        hupcl: false
       });
       this.port = port;
       port.on('open', () => {
         this.reconnectAttempts = 0;
         try {
-          port.set({ dtr: true, rts: false }, () => {});
-          port.write('\r\n', () => {});
+          // Na ESP32-C6 USB-CDC DTR=true oraz RTS=true są wymagane
+          // do poprawnej sygnalizacji gotowości odbiornika (CDC ACM handshake).
+          port.set({ dtr: true, rts: true }, () => {
+            try {
+              port.flush(() => {
+                port.write('\r\n', () => {});
+              });
+            } catch {}
+          });
         } catch {
           /* ignore */
         }
