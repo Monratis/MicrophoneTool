@@ -1,7 +1,7 @@
 // Ring buffer logów diagnostycznych + przechwytywanie konsoli procesu głównego.
 
 const logBuffer: string[] = [];
-const MAX_LOG_LINES = 500;
+const MAX_LOG_LINES = 20000;
 
 let sink: ((entry: string) => void) | null = null;
 

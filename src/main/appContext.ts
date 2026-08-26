@@ -8,8 +8,8 @@ import type AppController from './appController';
 import type RadarListener from './radarListener';
 import type AudioController from './audioController';
 import type AppUpdater from './updater';
-import type SensorFlasher from './sensorFlasher';
 import type SignalRGBIntegration from './signalrgbIntegration';
+import type HomeAssistantIntegration from './haIntegration';
 import type { PushEvent, Snapshot } from '../shared/types';
 
 /**
@@ -22,8 +22,8 @@ export interface AppContext {
   audio: AudioController;
   controller: AppController;
   updater: AppUpdater;
-  sensorFlasher: SensorFlasher;
   signalrgb: SignalRGBIntegration | null;
+  ha: HomeAssistantIntegration;
 
   appDataDir: string;
   settingsWindow: BrowserWindow | null;
@@ -168,16 +168,29 @@ export function getAutoStart(config: Config): boolean {
   return Boolean(config.get('autoStart'));
 }
 
-export function createNotification(title: string, body: string, notificationsEnabled: boolean): void {
+export function createNotification(
+  title: string,
+  body: string,
+  notificationsEnabled: boolean,
+  onClick?: () => void
+): void {
   if (Notification.isSupported() && notificationsEnabled) {
     try {
       const iconPath = resolveAppIcon();
-      new Notification({
+      const notif = new Notification({
         title,
         body,
         icon: fs.existsSync(iconPath) ? iconPath : undefined,
         silent: true
-      }).show();
+      });
+      if (onClick) {
+        notif.on('click', () => {
+          try {
+            onClick();
+          } catch (_) {}
+        });
+      }
+      notif.show();
     } catch {
       /* ignore */
     }

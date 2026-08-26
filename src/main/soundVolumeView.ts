@@ -5,6 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import AdmZip from 'adm-zip';
 import iconv from 'iconv-lite';
+import { appendLog } from './logger';
 import type Config from './config';
 import type { AudioDeviceItem } from '../shared/types';
 
@@ -94,6 +95,7 @@ export default class SoundVolumeView {
   private readonly subunitMap = new Map<string, SubunitInfo>();
   private subunitMapTimestamp = 0;
   private currentDefaultDevice: string | null = null;
+  private lastEnumSig = '';
 
   private daemonProc: ReturnType<typeof spawn> | null = null;
   private daemonRl: readline.Interface | null = null;
@@ -523,16 +525,21 @@ export default class SoundVolumeView {
     if (!deviceName) return { ok: false, stdout: '', stderr: 'Brak nazwy urządzenia' };
 
     if (this.currentDefaultDevice === deviceName) {
+      appendLog('AUDIO-SET', `Domyślny mikrofon jest już aktywny: "${deviceName}" (pomijam redundantny switch)`);
       return { ok: true, stdout: '{"ok":true,"cached":true}', stderr: '' };
     }
 
     const target = this.nameToIdMap.get(deviceName) || deviceName;
+    appendLog('AUDIO-SET', `Żądanie zmiany domyślnego mikrofonu Windows -> "${deviceName}" [target: ${target}]`);
 
     let res = await this.sendDaemonCommand(`set ${target}`);
 
     if (!res || !res.ok) {
       const tool = await this.ensure();
-      if (!tool) return { ok: false, stdout: '', stderr: 'Brak modułu audio' };
+      if (!tool) {
+        appendLog('AUDIO-ERR', `Brak modułu audio do przełączenia na "${deviceName}"`);
+        return { ok: false, stdout: '', stderr: 'Brak modułu audio' };
+      }
 
       if (tool.isNative) {
         res = await this.run(tool.path, ['set', target]);
@@ -544,8 +551,10 @@ export default class SoundVolumeView {
     if (res && res.ok) {
       this.currentDefaultDevice = deviceName;
       this.devicesCache = null;
+      appendLog('AUDIO-SET', `SUKCES: Domyślny mikrofon Windows zmieniony na "${deviceName}" ✓`);
       console.log(`[audio] Default recording device -> "${deviceName}" (<1ms)`);
     } else {
+      appendLog('AUDIO-ERR', `BŁĄD przełączania na "${deviceName}": ${res?.stderr || res?.stdout || 'Nieznany błąd'}`);
       console.error(`[audio] SetDefault failed for "${deviceName}":`, res?.stderr || res?.stdout);
     }
 
@@ -559,6 +568,7 @@ export default class SoundVolumeView {
       try {
         const parsed = JSON.parse(res.stdout);
         this.devicesCache = null;
+        appendLog('AUDIO-MUTE', `Toggle mute "${target || 'default'}": ${parsed.isMuted ? 'WYCISZONY' : 'ODCISZONY'} ✓`);
         return parsed;
       } catch {
         /* ignore */
@@ -575,6 +585,7 @@ export default class SoundVolumeView {
           this.devicesCache = null;
           await this.refreshSubunits(true);
           const entry = this.subunitMap.get((target || idOrName).toLowerCase());
+          appendLog('AUDIO-MUTE', `Toggle mute (KS Subunit) "${target || idOrName}": ${entry?.isMuted ? 'WYCISZONY' : 'ODCISZONY'} ✓`);
           console.log(`[audio] Hardware toggle mute via KS Subunit -> ${entry?.isMuted ? 'MUTED' : 'UNMUTED'} (${subunitTarget})`);
           return { ok: true, isMuted: entry?.isMuted };
         }
@@ -587,13 +598,16 @@ export default class SoundVolumeView {
       res = await this.run(tool.path, ['toggle-mute', idOrName]);
       if (res && res.ok && res.stdout) {
         try {
-          return JSON.parse(res.stdout);
+          const parsed = JSON.parse(res.stdout);
+          appendLog('AUDIO-MUTE', `Toggle mute (CLI) "${target || idOrName}": ${parsed.isMuted ? 'WYCISZONY' : 'ODCISZONY'} ✓`);
+          return parsed;
         } catch {
           /* ignore */
         }
       }
     }
 
+    appendLog('AUDIO-ERR', `Błąd toggle mute dla "${target || 'default'}"`);
     return res || { ok: false };
   }
 
@@ -605,8 +619,10 @@ export default class SoundVolumeView {
       try {
         const parsed = JSON.parse(res.stdout);
         this.devicesCache = null;
+        appendLog('AUDIO-MUTE', `${mute ? 'WYCISZONO' : 'ODCISZONO'} mikrofon "${target || 'default'}" ✓`);
         return parsed;
       } catch {
+        appendLog('AUDIO-MUTE', `${mute ? 'WYCISZONO' : 'ODCISZONO'} mikrofon "${target || 'default'}" ✓`);
         return { ok: true, isMuted: mute };
       }
     }
@@ -621,6 +637,7 @@ export default class SoundVolumeView {
           this.devicesCache = null;
           const entry = this.subunitMap.get((target || idOrName).toLowerCase());
           if (entry) entry.isMuted = mute;
+          appendLog('AUDIO-MUTE', `${mute ? 'WYCISZONO' : 'ODCISZONO'} mikrofon (KS Subunit) "${target || idOrName}" ✓`);
           console.log(`[audio] Hardware mute via KS Subunit -> ${mute ? 'MUTED' : 'UNMUTED'} (${subunitTarget})`);
           return { ok: true, isMuted: mute };
         }
@@ -631,10 +648,14 @@ export default class SoundVolumeView {
     const tool = await this.ensure();
     if (tool && tool.isNative) {
       res = await this.run(tool.path, [mute ? 'mute' : 'unmute', idOrName]);
-      if (res && res.ok) return { ok: true, isMuted: mute };
+      if (res && res.ok) {
+        appendLog('AUDIO-MUTE', `${mute ? 'WYCISZONO' : 'ODCISZONO'} mikrofon (CLI) "${target || idOrName}" ✓`);
+        return { ok: true, isMuted: mute };
+      }
     }
 
     this.devicesCache = null;
+    appendLog('AUDIO-ERR', `Błąd ustawiania mute=${mute} dla "${target || 'default'}"`);
     return res || { ok: false };
   }
 
@@ -646,6 +667,7 @@ export default class SoundVolumeView {
     // kończyć się cyfrą, co łamało parsowanie "ostatni token".
     let res = await this.sendDaemonCommand(`set-volume ${vol} ${idOrName}`);
     if (res && res.ok) {
+      appendLog('AUDIO-VOL', `Ustawiono głośność "${target || 'default'}" -> ${vol}% ✓`);
       return this.parseVolumeResponse(res);
     }
 
@@ -820,9 +842,15 @@ export default class SoundVolumeView {
           }
 
           this.devicesCache = { list, timestamp: now };
+          const sig = list.map((d) => `${d.name}:${d.isDefault ? '1' : '0'}:${d.isMuted ? 'M' : 'U'}`).join('|');
+          if (sig !== this.lastEnumSig) {
+            this.lastEnumSig = sig;
+            appendLog('AUDIO-ENUM', `Lista mikrofonów (${list.length}): ${list.map((d) => `"${d.name}"${d.isDefault ? ' [DOMYŚLNY]' : ''}`).join(', ')}`);
+          }
           return list;
         }
       } catch (err) {
+        appendLog('AUDIO-ERR', `Błąd parsowania listy urządzeń: ${(err as Error).message}`);
         console.error('[audioBackend] parse error:', (err as Error).message);
       }
     }

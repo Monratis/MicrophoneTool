@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { appendLog } from './logger';
 import type RadarListener from './radarListener';
 import type AudioController from './audioController';
 import type DiscordIntegration from './discordIntegration';
@@ -56,11 +57,42 @@ export default class AppController extends EventEmitter {
     radar.on('away', () => void this.onRadarState('away'));
     radar.on('status', (s) => this.emit('radarStatus', s));
     radar.on('error', (err) => this.emit('error', err));
+
+    if (this.discord) {
+      this.discord.on('authenticated', () => {
+        if (this.currentDevice) {
+          this.applyDiscordGate(this.currentDevice);
+          const targetMic =
+            this.currentDevice === 'desk'
+              ? this.config.get('micDeskName')
+              : this.config.get('micHeadsetName');
+          void this.discord?.notifyDeviceChanged(targetMic);
+        }
+      });
+    }
   }
 
   async start(): Promise<void> {
     if (this.discord) {
       this.discord.start();
+    }
+    // Wykryj aktualnie aktywny mikrofon w Windows przy starcie aplikacji
+    try {
+      const def = await this.audio.getCurrentDefault();
+      if (def?.name) {
+        const deskName = (this.config.get('micDeskName') || '').trim().toLowerCase();
+        const headName = (this.config.get('micHeadsetName') || '').trim().toLowerCase();
+        const curName = def.name.toLowerCase();
+        if (deskName && (curName.includes(deskName) || deskName.includes(curName))) {
+          this.currentDevice = 'desk';
+          this.lastAppliedOkState = 'desk';
+        } else if (headName && (curName.includes(headName) || headName.includes(curName))) {
+          this.currentDevice = 'headset';
+          this.lastAppliedOkState = 'headset';
+        }
+      }
+    } catch {
+      /* ignore */
     }
     await this.radar.start();
   }
@@ -225,6 +257,7 @@ export default class AppController extends EventEmitter {
   setMode(mode: AppMode): void {
     if (!['auto', 'desk', 'headset'].includes(mode)) return;
     this.mode = mode;
+    appendLog('APP-MODE', `Zmiana trybu pracy aplikacji na: ${mode.toUpperCase()}`);
     this.emit('mode', mode);
     if (mode !== 'auto') {
       void this.applyDevice(mode === 'desk' ? 'desk' : 'headset');
@@ -234,7 +267,11 @@ export default class AppController extends EventEmitter {
   }
 
   private async onRadarState(state: DeskState): Promise<void> {
-    if (this.mode !== 'auto') return;
+    appendLog('RADAR-EVENT', `Radar zgłasza zmianę stanu -> ${state === 'desk' ? 'OBECNY (DESK)' : 'POZA FOTELEM (AWAY)'}`);
+    if (this.mode !== 'auto') {
+      appendLog('RADAR-EVENT', `Ignoruję zmianę z radaru, ponieważ tryb aplikacji jest wymuszony na "${this.mode.toUpperCase()}"`);
+      return;
+    }
     await this.applyDevice(state === 'desk' ? 'desk' : 'headset');
   }
 
@@ -300,15 +337,15 @@ export default class AppController extends EventEmitter {
   }
 
   /** Dopasowuje profil głosowy Discorda do specyfiki aktywnego mikrofonu. */
-  private applyDiscordGate(state: DeviceState): void {    if (!this.discord || !this.config.get('discordGateFollowMic')) return;
+  private applyDiscordGate(state: DeviceState): void {
+    if (!this.discord || !this.config.get('discordGateFollowMic')) return;
     const rawGate = state === 'desk' ? this.config.get('micDeskGateDb') : this.config.get('micHeadsetGateDb');
     const krispRaw = state === 'desk' ? this.config.get('micDeskKrisp') : this.config.get('micHeadsetKrisp');
     const agcRaw = state === 'desk' ? this.config.get('micDeskAgc') : this.config.get('micHeadsetAgc');
     const echoRaw = state === 'desk' ? this.config.get('micDeskEcho') : this.config.get('micHeadsetEcho');
     const tri = (v: string | undefined): boolean | undefined => (v === 'on' ? true : v === 'off' ? false : undefined);
-    // gate < 0 = "nie ustawione" — NIE wysyłamy obiektu mode, żeby nie
-    // nadpisać trybu użytkownika (np. Push-to-Talk) ani auto-progu Discorda.
-    const gate = typeof rawGate === 'number' && rawGate >= 0 ? rawGate : undefined;
+    // Wartości dB są ujemne (np. -45 dB). Prawidłowy zakres progu bramki to -100 dB do 0 dB.
+    const gate = typeof rawGate === 'number' && Number.isFinite(rawGate) && rawGate <= 0 && rawGate >= -100 ? rawGate : undefined;
     void this.discord.applyMicSettings({
       gateDb: gate,
       krisp: tri(krispRaw),
@@ -357,8 +394,12 @@ export default class AppController extends EventEmitter {
     }
 
     // 2. Obsługa przełączania i wyciszania mikrofonów
-    if (this.currentDevice === state) return;
+    if (this.currentDevice === state) {
+      appendLog('SWITCH-ENG', `Profil "${state.toUpperCase()}" jest już aktywny — pomijam przełączanie.`);
+      return;
+    }
     if (this.switching) {
+      appendLog('SWITCH-ENG', `Przełączanie w toku — kolejkuje przejście na "${state.toUpperCase()}"`);
       this.pendingState = state;
       return;
     }
@@ -366,15 +407,15 @@ export default class AppController extends EventEmitter {
     this.currentDevice = state;
 
     const targetMic = state === 'desk' ? stationaryMic : mobileMic;
-    // Preferuj ID endpointu — stabilne nawet gdy Windows zmieni nazwę urządzenia
-    const targetId = state === 'desk' ? this.config.get('micDeskId') : this.config.get('micHeadsetId');
-    const target = targetId && targetId.trim() ? targetId.trim() : targetMic;
     const shouldSwitch =
       state === 'desk'
         ? this.config.get('switchMicOnDesk') !== false
         : this.config.get('switchMicOnAway') !== false;
 
+    appendLog('SWITCH-ENG', `Wykonywanie profilu "${state.toUpperCase()}": mikrofon="${targetMic || 'BRAK'}", auto-switch=${shouldSwitch ? 'TAK' : 'NIE'}`);
+
     if (!targetMic) {
+      appendLog('SWITCH-ENG', `UWAGA: Brak skonfigurowanego mikrofonu dla profilu "${state.toUpperCase()}".`);
       this.emit('switch', { state, device: null, switched: false, unconfigured: true });
       this.switching = false;
       return;
@@ -385,16 +426,19 @@ export default class AppController extends EventEmitter {
     try {
       let ok = true;
       if (shouldSwitch && targetMic) {
-        const res = await this.audio.setDefaultRecordingDevice(target);
+        const res = await this.audio.setDefaultRecordingDevice(targetMic);
         ok = res.ok;
         // Urządzenie chwilowo nieobecne → trzymaj się wyboru i ponawiaj aż wróci
         if (!ok) {
           this.lastAppliedOkState = null;
-          this.scheduleMicRetry(state, targetMic, target);
+          this.scheduleMicRetry(state, targetMic, targetMic);
         } else {
           this.lastAppliedOkState = state;
           this.clearMicRetry();
-          this.startDesiredWatch(state, targetMic, target);
+          this.startDesiredWatch(state, targetMic, targetMic);
+          if (this.discord) {
+            void this.discord.notifyDeviceChanged(targetMic);
+          }
           this.applyDiscordGate(state);
         }
       }
@@ -458,10 +502,6 @@ export default class AppController extends EventEmitter {
       }
       }
       await Promise.all(muteTasks);
-
-      if (this.discord) {
-        void this.discord.notifyDeviceChanged(targetMic);
-      }
 
       this.emit('switched', { state, device: targetMic, ok, switched: shouldSwitch });
     } catch (err) {

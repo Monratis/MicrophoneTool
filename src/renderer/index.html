@@ -7,10 +7,74 @@
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#1c2229" />
+    <meta name="color-scheme" content="dark" />
     <title>DeskSense</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background-color: #1c2229;
+        color: #f1f5f9;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        height: 100%;
+        overflow: hidden;
+      }
+      #root {
+        height: 100%;
+      }
+      .app-skeleton {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        background: #1c2229;
+      }
+      .skeleton-bar {
+        height: 46px;
+        background: #1f252d;
+        border-bottom: 1px solid #3b4756;
+      }
+      .skeleton-body {
+        display: flex;
+        flex: 1;
+      }
+      .skeleton-sidebar {
+        width: 78px;
+        background: #15191f;
+        border-right: 1px solid #3b4756;
+      }
+      .skeleton-content {
+        flex: 1;
+        padding: 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .skeleton-card {
+        height: 140px;
+        background: #2d3744;
+        border-radius: 10px;
+        animation: skeleton-pulse 1.2s infinite alternate ease-in-out;
+      }
+      @keyframes skeleton-pulse {
+        from { opacity: 0.6; }
+        to { opacity: 0.9; }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="app-skeleton">
+        <div class="skeleton-bar"></div>
+        <div class="skeleton-body">
+          <div class="skeleton-sidebar"></div>
+          <div class="skeleton-content">
+            <div class="skeleton-card" style="height: 180px;"></div>
+            <div class="skeleton-card"></div>
+          </div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

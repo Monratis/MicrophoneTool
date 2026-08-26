@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut } from 'electron';
+import { app, BrowserWindow, globalShortcut, session } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 
@@ -7,9 +7,10 @@ import RadarListener from './radarListener';
 import AudioController from './audioController';
 import AppController from './appController';
 import AppUpdater from './updater';
-import SensorFlasher from './sensorFlasher';
 import DiscordIntegration from './discordIntegration';
 import SignalRGBIntegration from './signalrgbIntegration';
+import HomeAssistantIntegration from './haIntegration';
+import DeviceWatcher from './deviceWatcher';
 import type { AppContext } from './appContext';
 import type { DeviceState } from '../shared/types';
 import {
@@ -48,6 +49,7 @@ process.on('unhandledRejection', (reason) => {
 
 let ctx: AppContext | null = null;
 let tray: Electron.Tray | null = null;
+let deviceWatcher: DeviceWatcher | null = null;
 let radarIssueToastShown = false;
 let lastRadarIssueToastAt = 0;
 let lastSnapshotPush = 0;
@@ -75,6 +77,7 @@ function buildSnapshot() {
         ctx.radar.state ?? (ctx.radar.presence ? ('desk' as const) : ('away' as const)),
       port: ctx.config.get('port')
     },
+    ha: ctx.ha.getStatus(),
     telemetry: ctx.radar.telemetry,
     config: { ...ctx.config.data }
   };
@@ -92,7 +95,9 @@ function pushEvent(type: string, payload: Record<string, unknown> = {}): void {
 
 function showWindowsNotification(title: string, body: string): void {
   if (ctx) {
-    createNotification(title, body, ctx.config.get('notifications'));
+    createNotification(title, body, ctx.config.get('notifications'), () => {
+      if (ctx) showSettings(ctx);
+    });
   }
 }
 
@@ -156,13 +161,35 @@ app.whenReady().then(() => {
   });
   const discord = new DiscordIntegration(config);
   const signalrgb = new SignalRGBIntegration({ config });
+  const ha = new HomeAssistantIntegration({ config, radar });
 
   const controller = new AppController(radar, audio, config, discord, signalrgb);
   const updater = new AppUpdater({ onEvent: (ev) => pushEvent(ev.type, ev), config });
-  const sensorFlasher = new SensorFlasher({ config, radar, onEvent: (ev) => pushEvent(ev.type, ev) });
 
   audio.on('toolStatus', (msg: string) => pushEvent('toast', { message: msg }));
   radar.on('telemetry', (tel) => pushEvent('telemetry', tel));
+  ha.on('status', () => refreshSnapshot());
+
+  controller.on('switch', (ev) => {
+    if (ev.device) {
+      appendLog('AUDIO', `Przełączanie mikrofonu: "${ev.device}" (${ev.state === 'desk' ? 'Stacjonarny' : 'Mobilny'}) | zmiana: ${ev.switched ? 'TAK' : 'NIE'}`);
+    }
+  });
+
+  controller.on('switched', (ev) => {
+    appendLog('AUDIO', `Potwierdzono stan domyślnego mikrofonu: "${ev.device}" (${ev.state}) ✓`);
+  });
+
+  controller.on('mode', (mode) => {
+    appendLog('MODE', `Zmiana trybu pracy aplikacji: ${mode.toUpperCase()}`);
+  });
+
+  radar.on('status', (s) => {
+    if (s.state) {
+      appendLog('RADAR', `Stan obecności: ${s.presence ? 'OBECNY' : 'BRAK'} | Tryb: ${s.state} | Dystans: ${s.telemetry?.distanceCm ?? '--'} cm`);
+    }
+  });
+
   applyAutoStart(config.get('autoStart'));
 
   ctx = {
@@ -171,8 +198,8 @@ app.whenReady().then(() => {
     audio,
     controller,
     updater,
-    sensorFlasher,
     signalrgb,
+    ha,
     appDataDir,
     settingsWindow: null,
     buildSnapshot,
@@ -240,10 +267,43 @@ app.whenReady().then(() => {
 
   tray = createTray(ctx);
 
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    if (permission === 'media') return callback(true);
+    callback(false);
+  });
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => {
+    if (permission === 'media') return true;
+    return false;
+  });
+
   registerIpc(ctx);
   createSettingsWindow(ctx);
   refreshSnapshot();
   void controller.start();
+  void ha.start();
+
+  // Watchdog urządzeń: wykrywa podłączanie/odłączanie mikrofonów i portów COM
+  // w tle (niezależnie od widoczności okna) i wypycha zmiany do UI.
+  deviceWatcher = new DeviceWatcher(audio, {
+    devicesChanged: (devices, added, removed) => {
+      ctx!.pushEvent('devices:changed', { devices, added, removed });
+      if (added.length > 0) {
+        pushEvent('toast', { message: `Wykryto nowy mikrofon: ${added.join(', ')}` });
+      }
+      refreshSnapshot();
+    },
+    portsChanged: (ports, added, removed) => {
+      ctx!.pushEvent('ports:changed', { ports, added, removed });
+      if (added.length > 0) {
+        // Nowy port COM może być radarem — przyspiesz przekierowanie połączenia,
+        // ale tylko gdy radar faktycznie nie jest podłączony (nie rozłączaj aktywnego).
+        const radarConnected = Boolean(ctx!.radar.port && ctx!.radar.port.isOpen);
+        if (!radarConnected) ctx!.restartRadar();
+      }
+      refreshSnapshot();
+    }
+  });
+  deviceWatcher.start();
 
   // Wygrzanie daemona audio w tle — pierwsze przełączenie mikrofonu
   // bez cold-startu procesu.
@@ -292,7 +352,10 @@ app.whenReady().then(() => {
         createNotification(
           'DeskSense',
           `Wystartowała w tle. Aktywny mikrofon: ${name}`,
-          ctx!.config.get('notifications')
+          ctx!.config.get('notifications'),
+          () => {
+            if (ctx) showSettings(ctx);
+          }
         );
       })
       .catch(() => {});
@@ -303,41 +366,56 @@ app.on('second-instance', () => {
   if (ctx) showSettings(ctx);
 });
 
-let forceQuitAfterWarn = false;
+let isCleanedUp = false;
 
 app.on('before-quit', (e) => {
-  // Twarda zasada: nigdy nie ubijamy esptool w połowie zapisu flash.
-  // Furtka: świadome "Zamknij mimo to" — użytkownik musi potwierdzić ryzyko,
-  // inaczej zawieszony flash zamieniłby apkę w niezanikalną.
-  if (ctx?.sensorFlasher.isFlashing && !forceQuitAfterWarn) {
-    e.preventDefault();
-    const choice = dialog.showMessageBoxSync({
-      type: 'warning',
-      title: 'DeskSense',
-      message: 'Trwa wgrywanie firmware sensora.',
-      detail: 'Przerwanie w połowie zapisu może wymagać awaryjnego wgrywania przez tryb ratunkowy.',
-      buttons: ['Czekaj na zakończenie', 'Zamknij mimo to'],
-      defaultId: 0,
-      cancelId: 0
-    });
-    if (choice === 1) {
-      forceQuitAfterWarn = true;
-      app.quit();
-    }
-    return;
-  }
+  if (isCleanedUp) return;
+  e.preventDefault();
   (app as Electron.App & { isQuitting?: boolean }).isQuitting = true;
   globalShortcut.unregisterAll();
-  // Sprzątanie: zatrzymaj radar i ubij rezydentny daemon AudioSwitcher.exe,
-  // inaczej proces dziecka zostaje jako sierota po zamknięciu aplikacji.
+
+  // Asynchroniczne sprzątanie: zwalnia port COM, zatrzymuje kontrolery i ubija daemony
+  const cleanupTasks: Promise<unknown>[] = [];
   if (ctx) {
-    void ctx.controller.stop();
+    cleanupTasks.push(
+      ctx.controller.stop().catch(() => {}),
+      ctx.ha.stop().catch(() => {})
+    );
     ctx.audio.shutdown();
   }
+  deviceWatcher?.stop();
   cleanupStaleUpdateFiles();
+
+  void Promise.all(cleanupTasks).finally(() => {
+    isCleanedUp = true;
+    app.quit();
+  });
 });
 
-// Aplikacja działa w tray — zamknięcie okien nie kończy procesu.
+const forceCleanup = () => {
+  if (ctx) {
+    try {
+      ctx.audio.shutdown();
+      if (ctx.radar.port) {
+        ctx.radar.port.removeAllListeners();
+        if (ctx.radar.port.isOpen) ctx.radar.port.close(() => {});
+        ctx.radar.port.destroy();
+      }
+    } catch {}
+  }
+};
+
+process.on('exit', forceCleanup);
+process.on('SIGINT', () => {
+  forceCleanup();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  forceCleanup();
+  process.exit(0);
+});
+
+// Aplikacja działa w tray — zamknięcie okien nie kończy procesu (czytanie radaru w tle).
 app.on('window-all-closed', () => {
   // keep running in tray
 });

@@ -16,9 +16,9 @@ export interface AppConfig {
   micDeskVolume: number;
   /** Głośność mikrofonu mobilnego 0-100; -1 = nie steruj głośnością */
   micHeadsetVolume: number;
-  /** Bramka VAD Discorda dla mikrofonu stacjonarnego (-90..0 dB); -1 = nie steruj (szanuj PTT/auto próg) */
+  /** Bramka VAD Discorda dla mikrofonu stacjonarnego (-100..0 dB); -1 = nie steruj (szanuj PTT/auto próg) */
   micDeskGateDb: number;
-  /** Bramka VAD Discorda dla mikrofonu mobilnego (-90..0 dB); -1 = nie steruj */
+  /** Bramka VAD Discorda dla mikrofonu mobilnego (-100..0 dB); -1 = nie steruj */
   micHeadsetGateDb: number;
   /** Wyciszenie szumów (Krisp) dla mikrofonu mobilnego */
   /** Wyciszenie szumów (Krisp) dla mikrofonu stacjonarnego */
@@ -48,6 +48,10 @@ export interface AppConfig {
   discordClientSecret: string;
   /** Redirect URI zarejestrowany w portalu deweloperskim (dla wymiany kodu) */
   discordRedirectUri: string;
+  /** Zapisany token dostępu OAuth2 (Bearer) */
+  discordAccessToken?: string;
+  /** Zapisany token odświeżania OAuth2 do bezobsługowego odnawiania sesji */
+  discordRefreshToken?: string;
   timeoutAwayMs: number;
   timeoutDeskMs: number;
   radarDistanceGateEnabled: boolean;
@@ -92,6 +96,32 @@ export interface AppConfig {
   globalShortcut: string;
   githubRepo: string;
   githubToken: string;
+  /** Integracja z Home Assistant OS (HAOS) */
+  haEnabled: boolean;
+  /** Adres URL instancji Home Assistant (np. http://homeassistant.local:8123 lub http://192.168.1.100:8123) */
+  haUrl: string;
+  /** Long-Lived Access Token wygenerowany w profilu Home Assistant */
+  haToken: string;
+  /** Identyfikator encji obecności w HA (np. binary_sensor.seeed_mr60bha2_presence) */
+  haPresenceEntity: string;
+  /** Opcjonalny identyfikator encji dystansu w HA (np. sensor.seeed_mr60bha2_distance) */
+  haDistanceEntity: string;
+  /** Opcjonalny identyfikator encji tętna w HA (np. sensor.seeed_mr60bha2_heart_rate) */
+  haHeartRateEntity: string;
+  /** Opcjonalny identyfikator encji oddechu w HA (np. sensor.seeed_mr60bha2_breath_rate) */
+  haBreathRateEntity: string;
+  /** Tryb cyfrowej stabilizacji i wygładzania odczytów radaru (ultra = mocny filtr medianowy+EMA, balanced = zbalansowany, raw = surowy) */
+  radarSmoothingMode: 'ultra' | 'balanced' | 'raw';
+}
+
+export interface HomeAssistantStatus {
+  enabled: boolean;
+  connected: boolean;
+  version?: string;
+  error?: string;
+  lastUpdate?: number;
+  entitiesCount?: number;
+  activeSource?: 'ha' | 'usb' | 'none';
 }
 
 export interface AutoTuningStatus {
@@ -114,6 +144,7 @@ export interface RadarTelemetry {
   distanceCm?: number;
   heartRate?: number;
   breathRate?: number;
+  illuminanceLux?: number;
   detectedPerson?: DetectedPerson;
   autoTuning?: AutoTuningStatus;
   lastUpdate?: number;
@@ -146,6 +177,7 @@ export interface Snapshot {
     pendingState: DeskState;
     port: string;
   };
+  ha?: HomeAssistantStatus;
   telemetry: RadarTelemetry;
   config: AppConfig;
 }
@@ -189,6 +221,14 @@ export interface PushEvent {
   device?: string | null;
   updateInfo?: UpdateInfo;
   status?: UpdaterStatus;
+  /** Aktualna lista urządzeń nagrywających (event devices:changed) */
+  devices?: AudioDeviceItem[];
+  /** Nazwy urządzeń, które się właśnie pojawiły */
+  added?: string[];
+  /** Nazwy urządzeń, które właśnie zniknęły */
+  removed?: string[];
+  /** Aktualna lista portów COM (event ports:changed) */
+  ports?: SerialPortInfo[];
   [key: string]: unknown;
 }
 
@@ -210,6 +250,9 @@ export interface Api {
   setVolume: (target: string, percent: number) => Promise<{ ok: boolean; volume?: number }>;
   getVolume: (target?: string) => Promise<{ ok: boolean; volume?: number }>;
   discordApplyVoice: (args: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }) => Promise<boolean>;
+  discordGetStatus: () => Promise<{ connected: boolean; ready: boolean; authenticated: boolean; user?: string }>;
+  discordGetVoiceSettings: () => Promise<{ thresholdDb?: number; autoThreshold?: boolean; krisp?: boolean; agc?: boolean; echo?: boolean } | null>;
+  discordAuthorize: () => Promise<boolean>;
   testDevice: (name: string) => Promise<Snapshot>;
   sleepDisplay: () => Promise<unknown>;
   wakeDisplay: () => Promise<unknown>;
@@ -217,23 +260,37 @@ export interface Api {
   resetConfig: () => Promise<Snapshot>;
   resetAutoTuning: () => Promise<AutoTuningStatus | null>;
   closeWindow: () => void;
+  minimizeWindow: () => void;
+  maximizeWindow: () => void;
+  isWindowMaximized: () => Promise<boolean>;
 
+  // Home Assistant Integration
+  haTestConnection: (opts?: { url?: string; token?: string }) => Promise<{ ok: boolean; message?: string; version?: string; error?: string }>;
+  haFetchEntities: (opts?: { url?: string; token?: string }) => Promise<{
+    ok: boolean;
+    message?: string;
+    error?: string;
+    binarySensors: { entity_id: string; name: string; state: string }[];
+    sensors: { entity_id: string; name: string; state: string; unit?: string }[];
+    recommended?: { presence?: string; distance?: string; heartRate?: string; breathRate?: string };
+  }>;
+
+  // SignalRGB Integration
   signalrgbProbe: () => Promise<{ connected: boolean; status?: number; data?: unknown }>;
   signalrgbTestAway: () => Promise<boolean>;
   signalrgbTestDesk: () => Promise<boolean>;
 
   openGitHubTokenPage: () => Promise<boolean>;
+  openExternal: (url: string) => Promise<boolean>;
+  copyToClipboard: (text: string) => Promise<boolean>;
   checkForUpdates: () => Promise<{ available: boolean; updateInfo?: UpdateInfo | null; error?: string; currentVersion: string }>;
   downloadUpdate: () => Promise<{ ok: boolean; file?: string } | null>;
   installUpdate: () => Promise<void | null>;
   getUpdaterStatus: () => Promise<UpdaterStatus | null>;
 
-  checkSensorFirmware: () => Promise<{ available: boolean; version?: string; name?: string; size?: number; error?: string; message?: string }>;
-  flashSensorFromGitHub: (opts?: { eraseAll?: boolean }) => Promise<{ ok: boolean; port?: string }>;
-  flashSensorFromFile: () => Promise<{ ok?: boolean; canceled?: boolean; port?: string }>;
-
   getLogs: () => Promise<string[]>;
   clearLogs: () => Promise<boolean>;
+  openLogsInNotepad: () => Promise<boolean>;
 
   onEvent: (cb: (e: PushEvent) => void) => () => void;
 }

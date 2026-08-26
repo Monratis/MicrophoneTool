@@ -29,6 +29,8 @@ export const DEFAULTS: AppConfig = {
    */
   discordClientSecret: 'xwmeOcXQP496dX5EYgXBFFcNyEUo30Z3',
   discordRedirectUri: 'https://discord.com',
+  discordAccessToken: '',
+  discordRefreshToken: '',
   timeoutAwayMs: 3000,
   timeoutDeskMs: 300,
   radarDistanceGateEnabled: true,
@@ -72,7 +74,15 @@ export const DEFAULTS: AppConfig = {
   autoDownloadTools: true,
   globalShortcut: 'CommandOrControl+Shift+M',
   githubRepo: 'Monratis/MicrophoneTool',
-  githubToken: process.env.GITHUB_TOKEN || ''
+  githubToken: process.env.GITHUB_TOKEN || '',
+  haEnabled: false,
+  haUrl: 'http://homeassistant.local:8123',
+  haToken: '',
+  haPresenceEntity: '',
+  haDistanceEntity: '',
+  haHeartRateEntity: '',
+  haBreathRateEntity: '',
+  radarSmoothingMode: 'ultra'
 };
 
 export default class Config {

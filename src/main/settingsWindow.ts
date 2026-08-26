@@ -13,15 +13,15 @@ export function createSettingsWindow(ctx: AppContext): void {
   const winIcon = resolveWindowIcon();
 
   settingsWindow = new BrowserWindow({
-    width: 780,
-    height: 860,
-    minWidth: 640,
-    minHeight: 680,
+    width: 1140,
+    height: 760,
+    minWidth: 880,
+    minHeight: 580,
     show: false,
     frame: false,
     resizable: true,
     skipTaskbar: true,
-    backgroundColor: '#0d0f14',
+    backgroundColor: '#1b2028',
     icon: winIcon ?? undefined,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
@@ -55,9 +55,17 @@ export function createSettingsWindow(ctx: AppContext): void {
   // (klik w tray, przycisk ✕, druga instancja).
   settingsWindow.on('show', () => {
     settingsWindow?.setSkipTaskbar(false);
+    settingsWindow?.webContents.send('push:event', { type: 'window:visibility', visible: true });
   });
   settingsWindow.on('hide', () => {
     settingsWindow?.setSkipTaskbar(true);
+    settingsWindow?.webContents.send('push:event', { type: 'window:visibility', visible: false });
+  });
+  settingsWindow.on('maximize', () => {
+    settingsWindow?.webContents.send('push:event', { type: 'window:state', isMaximized: true });
+  });
+  settingsWindow.on('unmaximize', () => {
+    settingsWindow?.webContents.send('push:event', { type: 'window:state', isMaximized: false });
   });
 
   ctx.settingsWindow = settingsWindow;

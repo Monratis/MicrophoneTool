@@ -83,18 +83,14 @@ execSync('npx electron-vite build', { stdio: 'inherit' });
 // Kill stale instances of the built app (e.g. still running in tray) —
 // they lock dist/ artifacts and makensis would wait for the unlock FOREVER
 // ("output file is locked for writing" hang).
-for (const procName of [
-  appExeName,
-  `${productName} (Portable).exe`,
-  `${productName} Setup ${version}.exe`,
-  'Auto Audio Switch.exe',
-  'Auto Audio Switch (Portable).exe'
-]) {
+for (const procName of [appExeName, `${productName} (Portable).exe`, 'DeskSense.exe', 'DeskSense (Portable).exe']) {
   try {
-    execSync(`taskkill /F /T /IM "${procName}"`, { stdio: 'pipe' });
-    console.log(`[build] Killed stale process locking build output: ${procName}`);
+    execSync(`taskkill /F /IM "${procName}" 2>nul`, { stdio: 'ignore' });
   } catch (_) {}
 }
+try {
+  execSync(`powershell -NoProfile -Command "Get-Process | Where-Object { $_.Name -like 'DeskSense*' -or $_.Name -like 'AudioSwitcher*' } | Stop-Process -Force"`, { stdio: 'ignore' });
+} catch (_) {}
 
 if (fs.existsSync(distDir)) {
   try {
@@ -122,12 +118,18 @@ execSync(`npx electron-builder ${targetFlag} --config.win.signExecutable=false -
 
 // --- 5. Copy release binaries ----------------------------------------------
 
+try {
+  execSync(`powershell -NoProfile -Command "Get-Process | Where-Object { $_.Name -like 'DeskSense*' -or $_.Name -like 'AudioSwitcher*' } | Stop-Process -Force"`, { stdio: 'ignore' });
+} catch (_) {}
+
 fs.mkdirSync(releasesDir, { recursive: true });
 
 // Remove stale artifacts so releases/ always reflects the last build mode
 for (const f of fs.readdirSync(releasesDir)) {
   if (f.endsWith('.exe') || f.endsWith('.blockmap') || f === 'latest.yml') {
-    fs.rmSync(path.join(releasesDir, f), { force: true, maxRetries: 3 });
+    try {
+      fs.rmSync(path.join(releasesDir, f), { force: true, maxRetries: 5, retryDelay: 300 });
+    } catch (_) {}
   }
 }
 

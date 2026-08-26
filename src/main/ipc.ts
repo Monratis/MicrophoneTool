@@ -1,4 +1,8 @@
-import { ipcMain, shell, dialog } from 'electron';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { exec } from 'node:child_process';
+import { ipcMain, shell, clipboard } from 'electron';
 import RadarListener from './radarListener';
 import type { AppContext } from './appContext';
 import { applyAutoStart } from './appContext';
@@ -21,6 +25,14 @@ export function registerIpc(ctx: AppContext): void {
   ipcMain.handle('config:update', (_e, patch: Record<string, unknown>) => {
     const prevBaud = ctx.config.get('baudRate');
     const prevPort = ctx.config.get('port');
+    const prevHaEnabled = ctx.config.get('haEnabled');
+    const prevHaUrl = ctx.config.get('haUrl');
+    const prevHaToken = ctx.config.get('haToken');
+    const prevHaPresence = ctx.config.get('haPresenceEntity');
+    const prevHaDistance = ctx.config.get('haDistanceEntity');
+    const prevHaHeart = ctx.config.get('haHeartRateEntity');
+    const prevHaBreath = ctx.config.get('haBreathRateEntity');
+
     for (const [key, value] of Object.entries(patch || {})) {
       if (key in ctx.config.data) {
         (ctx.config.data as unknown as Record<string, unknown>)[key] = value;
@@ -28,14 +40,30 @@ export function registerIpc(ctx: AppContext): void {
     }
     if (typeof patch?.autoStart === 'boolean') applyAutoStart(patch.autoStart);
     ctx.config.save();
+
     // Restart radaru przy zmianie portu LUB baudrate — inaczej radar
     // słuchałby starego portu do końca sesji.
     const radarNeedsRestart =
       Boolean(patch && 'baudRate' in patch && patch.baudRate !== prevBaud) ||
       Boolean(patch && 'port' in patch && patch.port !== prevPort);
+
+    // Przeładowanie Home Assistant przy zmianie parametrów integracji
+    const haNeedsReload =
+      Boolean(patch && 'haEnabled' in patch && patch.haEnabled !== prevHaEnabled) ||
+      Boolean(patch && 'haUrl' in patch && patch.haUrl !== prevHaUrl) ||
+      Boolean(patch && 'haToken' in patch && patch.haToken !== prevHaToken) ||
+      Boolean(patch && 'haPresenceEntity' in patch && patch.haPresenceEntity !== prevHaPresence) ||
+      Boolean(patch && 'haDistanceEntity' in patch && patch.haDistanceEntity !== prevHaDistance) ||
+      Boolean(patch && 'haHeartRateEntity' in patch && patch.haHeartRateEntity !== prevHaHeart) ||
+      Boolean(patch && 'haBreathRateEntity' in patch && patch.haBreathRateEntity !== prevHaBreath);
+
     if (radarNeedsRestart) {
       void ctx.restartRadar();
-    } else {
+    }
+    if (haNeedsReload) {
+      void ctx.ha.reload();
+    }
+    if (!radarNeedsRestart) {
       ctx.refreshSnapshot();
     }
     return ctx.buildSnapshot();
@@ -71,6 +99,19 @@ export function registerIpc(ctx: AppContext): void {
     async (_e, args: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }) =>
       ctx.controller.discord ? ctx.controller.discord.applyMicSettings(args || {}) : false
   );
+  ipcMain.handle('discord:getStatus', async () =>
+    ctx.controller.discord ? ctx.controller.discord.getStatus() : { connected: false, ready: false, authenticated: false }
+  );
+  ipcMain.handle('discord:getVoiceSettings', async () =>
+    ctx.controller.discord ? ctx.controller.discord.getVoiceSettings() : null
+  );
+  ipcMain.handle('discord:authorize', async () => {
+    if (ctx.controller.discord) {
+      ctx.controller.discord.authorizeManually();
+      return true;
+    }
+    return false;
+  });
   ipcMain.handle('config:reset', () => {
     for (const [key, value] of Object.entries(DEFAULTS)) {
       (ctx.config.data as unknown as Record<string, unknown>)[key] = value;
@@ -99,6 +140,14 @@ export function registerIpc(ctx: AppContext): void {
   ipcMain.handle('display:wake', async () => {
     return await ctx.audio.wakeDisplay();
   });
+
+  // Home Assistant (HAOS) IPC
+  ipcMain.handle('ha:testConnection', async (_e, opts?: { url?: string; token?: string }) =>
+    ctx.ha.testConnection(opts)
+  );
+  ipcMain.handle('ha:fetchEntities', async (_e, opts?: { url?: string; token?: string }) =>
+    ctx.ha.fetchEntities(opts)
+  );
 
   // SignalRGB IPC
   ipcMain.handle('signalrgb:probe', async () =>
@@ -137,35 +186,21 @@ export function registerIpc(ctx: AppContext): void {
     return status;
   });
 
-  // Sensor USB Firmware Flasher & Emergency Recovery IPC
-  ipcMain.handle('sensor:checkFirmware', async () => ctx.sensorFlasher.checkGitHubFirmware());
-  ipcMain.handle('sensor:flashFromGitHub', async (_e, opts?: { eraseAll?: boolean }) => {
-    const check = await ctx.sensorFlasher.checkGitHubFirmware();
-    if (!check.available || !check.name) {
-      throw new Error(check.message || check.error || 'Brak pliku firmware .bin na GitHubie');
+  // General External URL Opener IPC
+  ipcMain.handle('app:openExternal', (_e, url: string) => {
+    if (typeof url === 'string' && (url.startsWith('https://') || url.startsWith('http://'))) {
+      void shell.openExternal(url);
     }
-    const binPath = await ctx.sensorFlasher.downloadFirmware({
-      name: check.name,
-      size: check.size,
-      apiUrl: check.apiUrl,
-      downloadUrl: check.downloadUrl
-    });
-    // eraseAll wyłącznie dla jawnie żądanego trybu ratunkowego (unbrick) —
-    // normalna aktualizacja nie dotyka fabrycznej kalibracji radaru.
-    return await ctx.sensorFlasher.flashFirmware(binPath, null, { eraseAll: Boolean(opts?.eraseAll) });
+    return true;
   });
-  ipcMain.handle('sensor:flashFromFile', async () => {
-    const parent = getSettingsWindow();
-    const dialogOpts = {
-      title: 'Wybierz skompilowany plik firmware ESP32-C6 (.bin)',
-      filters: [{ name: 'Firmware Binary (*.bin)', extensions: ['bin'] }],
-      properties: ['openFile' as const]
-    };
-    const { canceled, filePaths } = parent
-      ? await dialog.showOpenDialog(parent, dialogOpts)
-      : await dialog.showOpenDialog(dialogOpts);
-    if (canceled || !filePaths || filePaths.length === 0) return { canceled: true };
-    return await ctx.sensorFlasher.flashFirmware(filePaths[0]);
+
+  // Native Clipboard IPC (unrestricted OS-level clipboard access)
+  ipcMain.handle('app:copyToClipboard', (_e, text: string) => {
+    if (typeof text === 'string') {
+      clipboard.writeText(text);
+      return true;
+    }
+    return false;
   });
 
   // Diagnostic Logs IPC
@@ -174,9 +209,41 @@ export function registerIpc(ctx: AppContext): void {
     clearLogs();
     return true;
   });
+  ipcMain.handle('logs:openInNotepad', () => {
+    try {
+      const logs = getLogs();
+      const tmpPath = path.join(os.tmpdir(), `DeskSense-Logs-${Date.now()}.txt`);
+      fs.writeFileSync(tmpPath, logs.join('\r\n'), 'utf8');
+      exec(`notepad.exe "${tmpPath}"`);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 
   ipcMain.on('window:close', () => {
     const win = getSettingsWindow();
     if (win) win.hide();
+  });
+
+  ipcMain.on('window:minimize', () => {
+    const win = getSettingsWindow();
+    if (win) win.minimize();
+  });
+
+  ipcMain.on('window:maximize', () => {
+    const win = getSettingsWindow();
+    if (win) {
+      if (win.isMaximized()) {
+        win.unmaximize();
+      } else {
+        win.maximize();
+      }
+    }
+  });
+
+  ipcMain.handle('window:isMaximized', () => {
+    const win = getSettingsWindow();
+    return win ? win.isMaximized() : false;
   });
 }

@@ -15,14 +15,26 @@ const api = {
   getVolume: (target?: string) => ipcRenderer.invoke('audio:getVolume', target),
   discordApplyVoice: (args: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }) =>
     ipcRenderer.invoke('discord:applyVoice', args),
+  discordGetStatus: () => ipcRenderer.invoke('discord:getStatus'),
+  discordGetVoiceSettings: () => ipcRenderer.invoke('discord:getVoiceSettings'),
+  discordAuthorize: () => ipcRenderer.invoke('discord:authorize'),
   testDevice: (name: string) => ipcRenderer.invoke('audio:testDevice', name),
   sleepDisplay: () => ipcRenderer.invoke('display:sleep'),
   wakeDisplay: () => ipcRenderer.invoke('display:wake'),
   openConfigDir: () => ipcRenderer.invoke('config:openDir'),
   resetConfig: () => ipcRenderer.invoke('config:reset'),
   closeWindow: () => ipcRenderer.send('window:close'),
+  minimizeWindow: () => ipcRenderer.send('window:minimize'),
+  maximizeWindow: () => ipcRenderer.send('window:maximize'),
+  isWindowMaximized: () => ipcRenderer.invoke('window:isMaximized'),
   // Radar Auto-Tuning
   resetAutoTuning: () => ipcRenderer.invoke('radar:resetAutoTuning'),
+
+  // Home Assistant (HAOS) Integration
+  haTestConnection: (opts?: { url?: string; token?: string }) =>
+    ipcRenderer.invoke('ha:testConnection', opts),
+  haFetchEntities: (opts?: { url?: string; token?: string }) =>
+    ipcRenderer.invoke('ha:fetchEntities', opts),
 
   // SignalRGB Integration
   signalrgbProbe: () => ipcRenderer.invoke('signalrgb:probe'),
@@ -36,15 +48,14 @@ const api = {
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   getUpdaterStatus: () => ipcRenderer.invoke('updater:status'),
 
-  // Sensor USB Firmware Flasher & Recovery
-  checkSensorFirmware: () => ipcRenderer.invoke('sensor:checkFirmware'),
-  flashSensorFromGitHub: (opts?: { eraseAll?: boolean }) =>
-    ipcRenderer.invoke('sensor:flashFromGitHub', opts),
-  flashSensorFromFile: () => ipcRenderer.invoke('sensor:flashFromFile'),
+  // External URL opener & Native Clipboard
+  openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
+  copyToClipboard: (text: string) => ipcRenderer.invoke('app:copyToClipboard', text),
 
   // Diagnostic Logs
   getLogs: () => ipcRenderer.invoke('logs:get'),
   clearLogs: () => ipcRenderer.invoke('logs:clear'),
+  openLogsInNotepad: () => ipcRenderer.invoke('logs:openInNotepad'),
 
   onEvent: (cb: (e: unknown) => void) => {
     const listener = (_e: IpcRendererEvent, payload: unknown): void => cb(payload);
