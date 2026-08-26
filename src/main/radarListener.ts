@@ -113,6 +113,22 @@ export default class RadarListener extends EventEmitter {
     await this.openPort();
   }
 
+  private async releasePortLocks(portName: string): Promise<void> {
+    try {
+      const currentPid = process.pid;
+      const { exec } = await import('node:child_process');
+      await new Promise<void>((resolve) => {
+        exec(
+          `powershell -NoProfile -Command "Get-Process | Where-Object { ($_.Name -like '*AudioSwitcher*' -or ($_.Name -like '*DeskSense*' -and $_.Id -ne ${currentPid})) } | Stop-Process -Force"`,
+          () => resolve()
+        );
+      });
+      appendLog('RADAR', `Wymuszono zwolnienie blokad portu ${portName}`);
+    } catch {
+      /* ignore */
+    }
+  }
+
   private async openPort(): Promise<void> {
     if (!this.running) return;
     try {
@@ -156,12 +172,16 @@ export default class RadarListener extends EventEmitter {
         this.emit('status', { port: portName, connected: true } satisfies RadarStatusEvent);
       });
       port.on('data', (chunk: Buffer) => this.onData(chunk));
-      port.on('error', (err: Error) => {
+      port.on('error', async (err: Error) => {
         try {
           port.removeAllListeners();
           port.destroy();
         } catch {}
         this.port = null;
+        appendLog('RADAR', `Błąd portu ${portName}: ${err.message}`);
+        if (/access denied|locked|ebusy|in use|permission/i.test(err.message)) {
+          await this.releasePortLocks(portName);
+        }
         this.emit('status', { connected: false, error: err.message } satisfies RadarStatusEvent);
         this.scheduleReconnect();
       });
@@ -172,7 +192,11 @@ export default class RadarListener extends EventEmitter {
         this.port = null;
         if (this.running) this.scheduleReconnect();
       });
-    } catch (err) {
+    } catch (err: any) {
+      appendLog('RADAR', `Błąd otwierania portu: ${err.message || err}`);
+      if (/access denied|locked|ebusy|in use|permission/i.test(String(err.message || err))) {
+        await this.releasePortLocks(this.lastPortName || 'COM');
+      }
       this.emit('status', { connected: false, error: (err as Error).message } satisfies RadarStatusEvent);
       this.scheduleReconnect();
     }

@@ -39,6 +39,13 @@ if (!gotSingleLock) {
   process.exit(0);
 }
 
+// Zwolnij ewentualne osierocone daemony i procesy z poprzedniej sesji
+try {
+  const currentPid = process.pid;
+  const { exec } = require('node:child_process');
+  exec(`powershell -NoProfile -Command "Get-Process | Where-Object { ($_.Name -like 'AudioSwitcher*') -or ($_.Name -like 'DeskSense*' -and $_.Id -ne ${currentPid}) } | Stop-Process -Force"`, () => {});
+} catch {}
+
 interceptConsole();
 
 // Siatka bezpieczeństwa dla apki żyjącej w tray tygodniami: przyszły
