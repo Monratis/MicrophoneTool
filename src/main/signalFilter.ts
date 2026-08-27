@@ -188,18 +188,11 @@ export class DistanceFilter {
   private kalman: KalmanStateTracker1D;
   private currentFloat = 0;
   private currentInt = 0;
-  private deadbandCm = 3.5; // Histereza 3.5 cm — całkowicie nieruchomy odczyt przy spoczynku
+  private deadbandCm = 3.0; // Histereza 3.0 cm — całkowicie nieruchomy odczyt przy spoczynku
   private rawMode = false;
   private initialized = false;
 
-  // Dynamic Target Envelope (Obwiednia Ciała i Fotela)
-  private envelopeHistory: number[] = [];
-  private envelopeSize = 12; // okno ~6-10 sekund
-  private envelopeFront = 0; // Leading Edge (klatka piersiowa / mostek)
-  private envelopeBack = 0;  // Trailing Edge (oparcie fotela)
-  private outOfEnvelopeStreak = 0;
-
-  constructor(deadbandCm = 3.5, medianSize = 9) {
+  constructor(deadbandCm = 3.0, medianSize = 7) {
     this.median = new MedianFilter(medianSize);
     this.kalman = new KalmanStateTracker1D(4.0, 0.4);
     this.deadbandCm = deadbandCm;
@@ -208,15 +201,13 @@ export class DistanceFilter {
   setMode(mode: 'ultra' | 'balanced' | 'raw'): void {
     if (mode === 'ultra') {
       this.rawMode = false;
-      this.median.setSize(9);
-      this.envelopeSize = 14;
-      this.kalman.setParameters(6.0, 0.2);
+      this.median.setSize(7);
+      this.kalman.setParameters(5.0, 0.25);
       this.deadbandCm = 3.5; // Histereza 3.5 cm — idealnie stabilne siedzenie przy biurku
     } else if (mode === 'balanced') {
       this.rawMode = false;
-      this.median.setSize(7);
-      this.envelopeSize = 10;
-      this.kalman.setParameters(3.5, 0.5);
+      this.median.setSize(5);
+      this.kalman.setParameters(3.0, 0.6);
       this.deadbandCm = 2.5; // Histereza 2.5 cm
     } else {
       this.rawMode = true;
@@ -241,7 +232,8 @@ export class DistanceFilter {
       return this.currentInt;
     }
 
-    // 1. Filtracja szumów i outlierów
+    // 1. Filtracja szumów i outlierów (Median Window)
+    // Mediana z 5-7 próbek w 100% eliminuje chwilowe odbicia od klawiatury (50 cm) lub ściany (150 cm)
     let candidate = valCm;
     if (this.initialized && this.currentFloat > 0) {
       const jump = Math.abs(valCm - this.currentFloat);
@@ -255,59 +247,16 @@ export class DistanceFilter {
     if (!this.initialized || this.currentFloat <= 0) {
       this.currentFloat = medianVal;
       this.currentInt = Math.round(medianVal);
-      this.envelopeFront = medianVal;
-      this.envelopeBack = medianVal;
-      this.envelopeHistory = [medianVal];
       this.kalman.update(medianVal);
       this.initialized = true;
       return this.currentInt;
     }
 
-    // 3. Śledzenie Obwiedni Ciała i Fotela (Dynamic Target Envelope)
-    this.envelopeHistory.push(medianVal);
-    if (this.envelopeHistory.length > this.envelopeSize) {
-      this.envelopeHistory.shift();
-    }
-
-    const sortedEnv = [...this.envelopeHistory].sort((a, b) => a - b);
-    // Przednia krawędź (Leading Edge): dolny kwantyl (klatka piersiowa / mostek)
-    const envMin = sortedEnv[Math.floor(sortedEnv.length * 0.15)] || sortedEnv[0];
-    // Tylna krawędź (Trailing Edge): górny kwantyl (oparcie fotela)
-    const envMax = sortedEnv[Math.floor(sortedEnv.length * 0.85)] || sortedEnv[sortedEnv.length - 1];
-    const depthSpan = envMax - envMin;
-
-    // 4. Rozpoznawanie: Czy odbicie jest wewnątrz fizycznej głębokości ciała i fotela (span <= 24 cm)?
-    const isInsideBodyEnvelope = depthSpan <= 24 && Math.abs(medianVal - this.currentFloat) <= 22;
-
-    let targetAnchor: number;
-
-    if (isInsideBodyEnvelope) {
-      this.outOfEnvelopeStreak = 0;
-      this.envelopeFront = envMin;
-      this.envelopeBack = envMax;
-
-      // Gdy przeskakują prążki ciała/fotela (np. 74.6 <-> 80.4 <-> 86.1 cm),
-      // kotwiczymy pozycję na przedniej krawędzi (mostek)
-      targetAnchor = envMin;
-    } else {
-      // Sprawdzamy czy to trwałe przesunięcie w przestrzeni (np. odepchnięcie fotela o 30 cm)
-      this.outOfEnvelopeStreak++;
-      if (this.outOfEnvelopeStreak >= 4) {
-        // Potwierdzony ruch: cała obwiednia przemieszcza się na nową pozycję
-        targetAnchor = medianVal;
-        this.envelopeFront = medianVal;
-        this.envelopeBack = medianVal;
-      } else {
-        // Chwilowy skok: trzymamy bieżącą kotwicę
-        targetAnchor = this.currentFloat;
-      }
-    }
-
-    // 5. 1D Kinematyczny Filtr Kalmana (estymacja pozycji i prędkości)
-    const kalmanState = this.kalman.update(targetAnchor);
+    // 3. 1D Kinematyczny Filtr Kalmana (estymacja pozycji i prędkości)
+    const kalmanState = this.kalman.update(medianVal);
     this.currentFloat = kalmanState.position;
 
-    // 6. Histereza / martwa strefa (tłumi szum fazowy i mikroruchy klatki piersiowej)
+    // 4. Histereza / martwa strefa (tłumi szum fazowy i mikroruchy klatki piersiowej)
     if (Math.abs(this.currentFloat - this.currentInt) >= this.deadbandCm) {
       this.currentInt = Math.round(this.currentFloat);
     }
@@ -316,10 +265,11 @@ export class DistanceFilter {
   }
 
   getEnvelope(): { front: number; back: number; span: number; velocity: number } {
+    const pos = Math.round(this.currentFloat);
     return {
-      front: Math.round(this.envelopeFront),
-      back: Math.round(this.envelopeBack),
-      span: Math.max(0, Math.round(this.envelopeBack - this.envelopeFront)),
+      front: pos > 0 ? Math.max(10, pos - 6) : 0,
+      back: pos > 0 ? pos + 12 : 0,
+      span: pos > 0 ? 18 : 0,
       velocity: Math.round(this.kalman.getVelocity() * 10) / 10
     };
   }
@@ -328,10 +278,6 @@ export class DistanceFilter {
     this.currentFloat = 0;
     this.currentInt = 0;
     this.initialized = false;
-    this.envelopeHistory = [];
-    this.envelopeFront = 0;
-    this.envelopeBack = 0;
-    this.outOfEnvelopeStreak = 0;
     this.median.reset();
     this.kalman.reset();
   }

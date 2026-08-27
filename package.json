@@ -1,6 +1,6 @@
 {
   "name": "desksense",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "DeskSense — inteligentne automatyczne przełączanie mikrofonu wg obecności przy biurku (mmWave USB radar + Electron Tray)",
   "main": "out/main/index.js",
   "author": "Monra",
