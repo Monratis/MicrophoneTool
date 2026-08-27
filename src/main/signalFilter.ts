@@ -86,6 +86,13 @@ export class DistanceFilter {
   private rawMode = false;
   private initialized = false;
 
+  // Dynamic Target Envelope (Obwiednia Ciała i Fotela)
+  private envelopeHistory: number[] = [];
+  private envelopeSize = 12; // okno ~6-10 sekund
+  private envelopeFront = 0; // Leading Edge (klatka piersiowa / mostek)
+  private envelopeBack = 0;  // Trailing Edge (oparcie fotela)
+  private outOfEnvelopeStreak = 0;
+
   constructor(baseAlpha = 0.08, deadbandCm = 3.5, medianSize = 9) {
     this.median = new MedianFilter(medianSize);
     this.baseAlpha = baseAlpha;
@@ -96,12 +103,14 @@ export class DistanceFilter {
     if (mode === 'ultra') {
       this.rawMode = false;
       this.median.setSize(9);
-      this.baseAlpha = 0.08;
+      this.envelopeSize = 14;
+      this.baseAlpha = 0.06;
       this.deadbandCm = 3.5; // Histereza 3.5 cm — idealnie stabilne siedzenie przy biurku
     } else if (mode === 'balanced') {
       this.rawMode = false;
       this.median.setSize(7);
-      this.baseAlpha = 0.16;
+      this.envelopeSize = 10;
+      this.baseAlpha = 0.12;
       this.deadbandCm = 2.5; // Histereza 2.5 cm
     } else {
       this.rawMode = true;
@@ -126,44 +135,84 @@ export class DistanceFilter {
       return this.currentInt;
     }
 
-    // Stopień 1: Ograniczanie pojedynczych szpilek odbić (Outlier Clamping)
-    // Pojedynczy odczyt skaczący o >60 cm (np. odbicie od ściany z tyłu zamiast klatki)
-    // zostaje ograniczony do +/- 45 cm od bieżącej pozycji, dopóki mediana go nie potwierdzi
+    // 1. Filtracja szumów i outlierów
     let candidate = valCm;
     if (this.initialized && this.currentFloat > 0) {
       const jump = Math.abs(valCm - this.currentFloat);
-      if (jump > 60) {
-        candidate = valCm > this.currentFloat ? this.currentFloat + 45 : Math.max(10, this.currentFloat - 45);
+      if (jump > 55) {
+        candidate = valCm > this.currentFloat ? this.currentFloat + 40 : Math.max(10, this.currentFloat - 40);
       }
     }
-
-    // Stopień 2: Filtr medianowy (wymaga większości próbek w oknie)
     const medianVal = this.median.push(candidate);
 
+    // 2. Inicjalizacja początkowa
     if (!this.initialized || this.currentFloat <= 0) {
       this.currentFloat = medianVal;
       this.currentInt = Math.round(medianVal);
+      this.envelopeFront = medianVal;
+      this.envelopeBack = medianVal;
+      this.envelopeHistory = [medianVal];
       this.initialized = true;
       return this.currentInt;
     }
 
-    // Stopień 3: 3-Strefowy adaptacyjny EMA
-    const delta = Math.abs(medianVal - this.currentFloat);
-    let effAlpha = this.baseAlpha;
-    if (delta <= 5.0) {
-      // Strefa spoczynku (oddychanie, mikroruchy, szum fazowy) — bardzo mocne tłumienie
-      effAlpha = Math.max(0.04, this.baseAlpha * 0.5);
-    } else if (delta <= 25.0) {
-      // Strefa zmiany pozycji w fotelu (płynne dociąganie)
-      effAlpha = this.baseAlpha;
-    } else {
-      // Strefa wejścia/wyjścia z biurka — szybka konwergencja
-      effAlpha = Math.min(0.50, this.baseAlpha * 3.0);
+    // 3. Śledzenie Obwiedni Ciała i Fotela (Dynamic Target Envelope)
+    this.envelopeHistory.push(medianVal);
+    if (this.envelopeHistory.length > this.envelopeSize) {
+      this.envelopeHistory.shift();
     }
 
-    this.currentFloat = this.currentFloat + effAlpha * (medianVal - this.currentFloat);
+    const sortedEnv = [...this.envelopeHistory].sort((a, b) => a - b);
+    // Przednia krawędź (Leading Edge): dolny kwantyl (klatka piersiowa / mostek)
+    const envMin = sortedEnv[Math.floor(sortedEnv.length * 0.15)] || sortedEnv[0];
+    // Tylna krawędź (Trailing Edge): górny kwantyl (oparcie fotela)
+    const envMax = sortedEnv[Math.floor(sortedEnv.length * 0.85)] || sortedEnv[sortedEnv.length - 1];
+    const depthSpan = envMax - envMin;
 
-    // Histereza / martwa strefa (tłumi szum fazowy i mikroruchy klatki piersiowej)
+    // 4. Rozpoznawanie: Czy odbicie jest wewnątrz fizycznej głębokości ciała i fotela (span <= 24 cm)?
+    const isInsideBodyEnvelope = depthSpan <= 24 && Math.abs(medianVal - this.currentFloat) <= 22;
+
+    let targetAnchor: number;
+
+    if (isInsideBodyEnvelope) {
+      this.outOfEnvelopeStreak = 0;
+      this.envelopeFront = envMin;
+      this.envelopeBack = envMax;
+
+      // Gdy przeskakują prążki ciała/fotela (np. 74.6 <-> 80.4 <-> 86.1 cm),
+      // kotwiczymy pozycję na przedniej krawędzi (mostek) z ultra-wysoką stabilnością
+      targetAnchor = envMin;
+    } else {
+      // Sprawdzamy czy to trwałe przesunięcie w przestrzeni (np. odepchnięcie fotela o 30 cm)
+      this.outOfEnvelopeStreak++;
+      if (this.outOfEnvelopeStreak >= 4) {
+        // Potwierdzony ruch: cała obwiednia przemieszcza się na nową pozycję
+        targetAnchor = medianVal;
+        this.envelopeFront = medianVal;
+        this.envelopeBack = medianVal;
+      } else {
+        // Chwilowy skok: trzymamy bieżącą kotwicę
+        targetAnchor = this.currentFloat;
+      }
+    }
+
+    // 5. 3-Strefowy adaptacyjny EMA dla wyznaczonej kotwicy
+    const delta = Math.abs(targetAnchor - this.currentFloat);
+    let effAlpha = this.baseAlpha;
+    if (isInsideBodyEnvelope || delta <= 5.0) {
+      // Wewnątrz obwiedni ciała lub przy spoczynku — maksymalne zamrożenie drgań
+      effAlpha = Math.max(0.03, this.baseAlpha * 0.4);
+    } else if (delta <= 20.0) {
+      // Płynna zmiana pozycji w fotelu
+      effAlpha = this.baseAlpha;
+    } else {
+      // Prawdziwe wejście/wyjście lub przesunięcie fotela — szybka konwergencja
+      effAlpha = Math.min(0.50, this.baseAlpha * 3.5);
+    }
+
+    this.currentFloat = this.currentFloat + effAlpha * (targetAnchor - this.currentFloat);
+
+    // 6. Histereza / martwa strefa (tłumi szum fazowy i mikroruchy klatki piersiowej)
     if (Math.abs(this.currentFloat - this.currentInt) >= this.deadbandCm) {
       this.currentInt = Math.round(this.currentFloat);
     }
@@ -171,10 +220,22 @@ export class DistanceFilter {
     return this.currentInt;
   }
 
+  getEnvelope(): { front: number; back: number; span: number } {
+    return {
+      front: Math.round(this.envelopeFront),
+      back: Math.round(this.envelopeBack),
+      span: Math.max(0, Math.round(this.envelopeBack - this.envelopeFront))
+    };
+  }
+
   reset(): void {
     this.currentFloat = 0;
     this.currentInt = 0;
     this.initialized = false;
+    this.envelopeHistory = [];
+    this.envelopeFront = 0;
+    this.envelopeBack = 0;
+    this.outOfEnvelopeStreak = 0;
     this.median.reset();
   }
 }

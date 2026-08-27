@@ -1028,13 +1028,15 @@ private radarAmbiguous = false;
     this.applySmoothingConfig();
 
     const smoothedCm = this.distanceFilter.push(distCm);
+    const env = this.distanceFilter.getEnvelope();
+    const envInfo = env.span > 0 ? ` [obwiednia ciała/fotela: ${env.front}–${env.back} cm]` : '';
 
     this.telemetry.distanceCm = smoothedCm;
     this.telemetry.lastUpdate = Date.now();
 
     appendLog(
       'RADAR-DSP',
-      `Dystans: ${smoothedCm} cm (surowy: ${distCm} cm)${this.radarAmbiguous ? ' — CEL NIEPEWNY (kot?)' : ''}`
+      `Dystans: ${smoothedCm} cm (surowy: ${distCm} cm)${envInfo}${this.radarAmbiguous ? ' — CEL NIEPEWNY (kot?)' : ''}`
     );
 
     this.feedAutoTuner({
