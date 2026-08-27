@@ -77,11 +77,117 @@ export class ExponentialSmoothingFilter {
   }
 }
 
+/**
+ * 1D Kinematyczny Filtr Kalmana estymujący stan [pozycja x, prędkość v].
+ * - Stan: x (pozycja w cm), v (prędkość w cm/s)
+ * - Macierz kowariancji błędu P (2x2)
+ * - Adaptacyjny szum procesu Q i szum pomiaru R
+ */
+export class KalmanStateTracker1D {
+  private x = 0; // pozycja (cm)
+  private v = 0; // prędkość (cm/s)
+  private p11 = 10.0;
+  private p12 = 0.0;
+  private p21 = 0.0;
+  private p22 = 10.0;
+
+  private lastTimeMs = 0;
+  private r = 4.0; // Szum pomiarowy radaru (cm^2)
+  private qBase = 0.4; // Bazowy szum przyspieszenia (cm^2/s^4)
+  private initialized = false;
+
+  constructor(r = 4.0, qBase = 0.4) {
+    this.r = r;
+    this.qBase = qBase;
+  }
+
+  setParameters(r: number, qBase: number): void {
+    this.r = Math.max(0.1, r);
+    this.qBase = Math.max(0.01, qBase);
+  }
+
+  update(z: number, nowMs = Date.now()): { position: number; velocity: number } {
+    if (!this.initialized || this.lastTimeMs === 0) {
+      this.x = z;
+      this.v = 0;
+      this.p11 = 5.0;
+      this.p12 = 0.0;
+      this.p21 = 0.0;
+      this.p22 = 5.0;
+      this.lastTimeMs = nowMs;
+      this.initialized = true;
+      return { position: this.x, velocity: this.v };
+    }
+
+    const dt = Math.min(1.0, Math.max(0.04, (nowMs - this.lastTimeMs) / 1000));
+    this.lastTimeMs = nowMs;
+
+    // 1. Predykcja stanu (Time Update: x = x + v*dt, v = v)
+    const xPred = this.x + this.v * dt;
+    const vPred = this.v;
+
+    // Adaptacyjny szum procesu Q: w spoczynku znikomy, przy ruchu dynamicznie rośnie
+    const innovation = z - xPred;
+    const isMoving = Math.abs(innovation) > 8.0 || Math.abs(this.v) > 4.0;
+    const qAcc = isMoving ? this.qBase * 15.0 : this.qBase;
+
+    const q11 = 0.25 * dt * dt * dt * dt * qAcc;
+    const q12 = 0.5 * dt * dt * dt * qAcc;
+    const q21 = q12;
+    const q22 = dt * dt * qAcc;
+
+    // P_pred = F * P * F' + Q
+    const p11Pred = this.p11 + dt * (this.p21 + this.p12) + dt * dt * this.p22 + q11;
+    const p12Pred = this.p12 + dt * this.p22 + q12;
+    const p21Pred = this.p21 + dt * this.p22 + q21;
+    const p22Pred = this.p22 + q22;
+
+    // 2. Korekta pomiarowa (Measurement Update)
+    const rEff = isMoving ? this.r * 0.4 : this.r;
+    const s = p11Pred + rEff;
+
+    // Wzmocnienie Kalmana K = P_pred * H' * inv(S)
+    const k1 = p11Pred / s;
+    const k2 = p21Pred / s;
+
+    // Aktualizacja stanu
+    this.x = xPred + k1 * innovation;
+    this.v = vPred + k2 * innovation;
+
+    // Aktualizacja kowariancji błędu P = (I - K * H) * P_pred
+    this.p11 = (1 - k1) * p11Pred;
+    this.p12 = (1 - k1) * p12Pred;
+    this.p21 = p21Pred - k2 * p11Pred;
+    this.p22 = p22Pred - k2 * p12Pred;
+
+    return { position: this.x, velocity: this.v };
+  }
+
+  getPosition(): number {
+    return this.x;
+  }
+
+  getVelocity(): number {
+    return this.v;
+  }
+
+  reset(): void {
+    this.x = 0;
+    this.v = 0;
+    this.p11 = 10.0;
+    this.p12 = 0.0;
+    this.p21 = 0.0;
+    this.p22 = 10.0;
+    this.lastTimeMs = 0;
+    this.initialized = false;
+  }
+}
+
 export class DistanceFilter {
   private median: MedianFilter;
+  private kalman: KalmanStateTracker1D;
   private currentFloat = 0;
   private currentInt = 0;
-  private baseAlpha = 0.08;
   private deadbandCm = 3.5; // Histereza 3.5 cm — całkowicie nieruchomy odczyt przy spoczynku
   private rawMode = false;
   private initialized = false;
@@ -93,9 +199,9 @@ export class DistanceFilter {
   private envelopeBack = 0;  // Trailing Edge (oparcie fotela)
   private outOfEnvelopeStreak = 0;
 
-  constructor(baseAlpha = 0.08, deadbandCm = 3.5, medianSize = 9) {
+  constructor(deadbandCm = 3.5, medianSize = 9) {
     this.median = new MedianFilter(medianSize);
-    this.baseAlpha = baseAlpha;
+    this.kalman = new KalmanStateTracker1D(4.0, 0.4);
     this.deadbandCm = deadbandCm;
   }
 
@@ -104,18 +210,18 @@ export class DistanceFilter {
       this.rawMode = false;
       this.median.setSize(9);
       this.envelopeSize = 14;
-      this.baseAlpha = 0.06;
+      this.kalman.setParameters(6.0, 0.2);
       this.deadbandCm = 3.5; // Histereza 3.5 cm — idealnie stabilne siedzenie przy biurku
     } else if (mode === 'balanced') {
       this.rawMode = false;
       this.median.setSize(7);
       this.envelopeSize = 10;
-      this.baseAlpha = 0.12;
+      this.kalman.setParameters(3.5, 0.5);
       this.deadbandCm = 2.5; // Histereza 2.5 cm
     } else {
       this.rawMode = true;
       this.median.setSize(1);
-      this.baseAlpha = 1.0;
+      this.kalman.setParameters(0.1, 10.0);
       this.deadbandCm = 0;
     }
   }
@@ -152,6 +258,7 @@ export class DistanceFilter {
       this.envelopeFront = medianVal;
       this.envelopeBack = medianVal;
       this.envelopeHistory = [medianVal];
+      this.kalman.update(medianVal);
       this.initialized = true;
       return this.currentInt;
     }
@@ -180,7 +287,7 @@ export class DistanceFilter {
       this.envelopeBack = envMax;
 
       // Gdy przeskakują prążki ciała/fotela (np. 74.6 <-> 80.4 <-> 86.1 cm),
-      // kotwiczymy pozycję na przedniej krawędzi (mostek) z ultra-wysoką stabilnością
+      // kotwiczymy pozycję na przedniej krawędzi (mostek)
       targetAnchor = envMin;
     } else {
       // Sprawdzamy czy to trwałe przesunięcie w przestrzeni (np. odepchnięcie fotela o 30 cm)
@@ -196,21 +303,9 @@ export class DistanceFilter {
       }
     }
 
-    // 5. 3-Strefowy adaptacyjny EMA dla wyznaczonej kotwicy
-    const delta = Math.abs(targetAnchor - this.currentFloat);
-    let effAlpha = this.baseAlpha;
-    if (isInsideBodyEnvelope || delta <= 5.0) {
-      // Wewnątrz obwiedni ciała lub przy spoczynku — maksymalne zamrożenie drgań
-      effAlpha = Math.max(0.03, this.baseAlpha * 0.4);
-    } else if (delta <= 20.0) {
-      // Płynna zmiana pozycji w fotelu
-      effAlpha = this.baseAlpha;
-    } else {
-      // Prawdziwe wejście/wyjście lub przesunięcie fotela — szybka konwergencja
-      effAlpha = Math.min(0.50, this.baseAlpha * 3.5);
-    }
-
-    this.currentFloat = this.currentFloat + effAlpha * (targetAnchor - this.currentFloat);
+    // 5. 1D Kinematyczny Filtr Kalmana (estymacja pozycji i prędkości)
+    const kalmanState = this.kalman.update(targetAnchor);
+    this.currentFloat = kalmanState.position;
 
     // 6. Histereza / martwa strefa (tłumi szum fazowy i mikroruchy klatki piersiowej)
     if (Math.abs(this.currentFloat - this.currentInt) >= this.deadbandCm) {
@@ -220,11 +315,12 @@ export class DistanceFilter {
     return this.currentInt;
   }
 
-  getEnvelope(): { front: number; back: number; span: number } {
+  getEnvelope(): { front: number; back: number; span: number; velocity: number } {
     return {
       front: Math.round(this.envelopeFront),
       back: Math.round(this.envelopeBack),
-      span: Math.max(0, Math.round(this.envelopeBack - this.envelopeFront))
+      span: Math.max(0, Math.round(this.envelopeBack - this.envelopeFront)),
+      velocity: Math.round(this.kalman.getVelocity() * 10) / 10
     };
   }
 
@@ -237,6 +333,7 @@ export class DistanceFilter {
     this.envelopeBack = 0;
     this.outOfEnvelopeStreak = 0;
     this.median.reset();
+    this.kalman.reset();
   }
 }
 
