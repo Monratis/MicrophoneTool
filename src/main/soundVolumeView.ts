@@ -474,6 +474,7 @@ export default class SoundVolumeView {
       const tool = await this.ensure();
       if (tool && tool.isNative) {
         await this.sendDaemonCommand('ping');
+        await this.listRecordingDevices(true);
       }
     } catch {
       /* warmup best-effort */

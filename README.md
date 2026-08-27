@@ -101,7 +101,62 @@ Port wybierany jest z configu lub wykrywany po VID/PID:
 
 ---
 
-## 6. Samoleczenie (auto-heal)
+## 6. Passthrough na XIAO ESP32-C6 (wymagany firmware)
+
+XIAO ESP32-C6 musi działać jako **transparentny mostek** między radarem a PC —
+przekazuje ramki radaru z UART0 na port USB (COM). Bez tego DeskSense nie dostaje żadnych danych.
+
+### Dlaczego passthrough
+
+Radar MR60BHA2 jest w kitcie fabrycznie podpięty do UART0 XIAO:
+
+- D6 (GPIO16, TX) → RX radaru
+- D7 (GPIO17, RX) → TX radaru
+
+Port USB-C XIAO pojawia się w Windows jako `COMx` (VID `0x303A` / PID `0x1001`).
+Passthrough łączy te dwa światy na **115200 baud**.
+
+### Wgrywanie przez Arduino IDE
+
+1. Zainstaluj **Arduino IDE 2.x**.
+2. `File → Preferences` → pole *Additional boards manager URLs*:
+   ```
+   https://espressif.github.io/arduino-esp32/package_esp32_index.json
+   ```
+   → `Tools → Board → Boards Manager…` → zainstaluj **esp32 by Espressif** (v3.x).
+3. `Tools → Manage Libraries…` → zainstaluj **Seeed_Arduino_mmWave**.
+4. `File → Examples → Seeed_Arduino_mmWave → passthrough_mode`.
+5. Wybierz płytkę: **XIAO_ESP32C6** (FQBN `esp32:esp32:XIAO_ESP32C6` — UWAGA:
+   architektura to `esp32`, **nie** `esp32c6`).
+6. Wybierz port COM (XIAO ESP32-C6) i kliknij **Upload**.
+7. Serial Monitor na **115200**: powinien pokazywać strumień binarnych ramek
+   (zaczynających się od bajtu `0x01`). Pusto = mostek nie działa / zły firmware.
+
+### Wgrywanie przez arduino-cli (terminal)
+
+```bash
+arduino-cli core update-index
+arduino-cli core install esp32:esp32
+arduino-cli lib install Seeed_Arduino_mmWave
+arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32C6 passthrough_mode
+arduino-cli upload -p COM3 --fqbn esp32:esp32:XIAO_ESP32C6 passthrough_mode
+```
+
+### Co robi ten kod
+
+Dwukierunkowy mostek na 115200: `Serial` (USB-CDC) ↔ `mmWaveSerial(0)` (UART0 = D6/D7 radaru).
+Przykład z biblioteki (wymaga `#include "Seeed_Arduino_mmWave.h"` — używa tylko nagłówka).
+
+### Dane
+
+Radar streamuje **surowe ramki binarne ESPHome (`0x01`)** — to samo, co parsuje
+`radarListener.ts`. Floaty w tych ramkach są **little-endian** (typy: `0x0A14` oddech,
+`0x0A15` tętno, `0x0A16` dystans, `0x0F09` obecność). Ramki fabryczne `0x53 0x59`
+są nadal obsługiwane.
+
+---
+
+## 7. Samoleczenie (auto-heal)
 
 Soft sam rozwiązuje problemy, gdzie się da:
 
@@ -120,7 +175,7 @@ vs. słuchawki („Headset/Headphones/Słuchawki”), z odrzuceniem „Stereo Mi
 
 ---
 
-## 7. Menu tray
+## 8. Menu tray
 
 - `Stan: Przy biurku / Poza biurkiem`
 - `Tryb: Auto (radar) / Biurkowy / Słuchawki`
@@ -137,7 +192,7 @@ zielony = przy biurku, bursztyn = poza biurkiem.
 
 ---
 
-## 8. Konfiguracja (`config.json`)
+## 9. Konfiguracja (`config.json`)
 
 Lokalizacja: `%APPDATA%/Audio Switcher/config.json`
 
@@ -161,7 +216,7 @@ Lokalizacja: `%APPDATA%/Audio Switcher/config.json`
 
 ---
 
-## 9. IPC (most preload → renderer)
+## 10. IPC (most preload → renderer)
 
 | Kanał             | Typ      | Opis                                            |
 |-------------------|----------|-------------------------------------------------|
@@ -177,7 +232,7 @@ Lokalizacja: `%APPDATA%/Audio Switcher/config.json`
 
 ---
 
-## 10. Instalacja i budowanie
+## 11. Instalacja i budowanie
 
 Wymagania programowe:
 - Node.js >= 20
@@ -213,7 +268,7 @@ Aplikacja posiada zoptymalizowany skrypt budowania dopasowujący się do liczby 
 
 ---
 
-## 11. Struktura projektu
+## 12. Struktura projektu
 
 ```
 ├── src/
@@ -240,19 +295,20 @@ Aplikacja posiada zoptymalizowany skrypt budowania dopasowujący się do liczby 
 
 ---
 
-## 13. Rozwiązywanie problemów
+## 14. Rozwiązywanie problemów
 
 | Objaw                                | Przyczyna / rozwiązanie                                          |
 |--------------------------------------|------------------------------------------------------------------|
 | „Nie udało się ustawić mikrofonu”    | sprawdź czy mikrofon jest podłączony i aktywny w systemie Windows |
 | zła nazwa w configu                  | użyj „Wykryj urządzenia nagrywające” albo wpisz nazwę z ustawień dźwięku Windows |
 | radar nie wykryty (COM)              | sprawdź VID/PID (sec. 5.3); odłącz/podłącz USB; wybierz port ręcznie |
+| COM jest, ale brak danych            | wgraj firmware passthrough na XIAO (sec. 6) — mostek UART→USB |
 | przełączanie na chwilę zanika        | zwiększ `timeoutAwayMs` (histereza)                              |
 | brak reakcji po zmianie ustawień     | zmiana mock/baud/port restartuje radar automatycznie             |
 | Chrome: „Unable to move the cache”   | drobny błąd GPU cache — nie wpływa na działanie                  |
 
 ---
 
-## 14. Licencja
+## 15. Licencja
 
 MIT

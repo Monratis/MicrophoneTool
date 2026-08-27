@@ -11,6 +11,7 @@ import DiscordIntegration from './discordIntegration';
 import SignalRGBIntegration from './signalrgbIntegration';
 import HomeAssistantIntegration from './haIntegration';
 import DeviceWatcher from './deviceWatcher';
+import ActivityWatcher from './activityWatcher';
 import type { AppContext } from './appContext';
 import type { DeviceState } from '../shared/types';
 import {
@@ -160,7 +161,9 @@ app.whenReady().then(() => {
   });
 
   const config = new Config(resolveConfigPath(appDataDir));
+  const activityWatcher = new ActivityWatcher(config);
   const radar = new RadarListener(config);
+  radar.setActivityWatcher(activityWatcher);
   const audio = new AudioController({
     binDir: resolveBinDir(),
     toolsDir: path.join(appDataDir, 'tools'),
@@ -204,6 +207,7 @@ app.whenReady().then(() => {
     radar,
     audio,
     controller,
+    activityWatcher,
     updater,
     signalrgb,
     ha,
@@ -286,6 +290,7 @@ app.whenReady().then(() => {
   registerIpc(ctx);
   createSettingsWindow(ctx);
   refreshSnapshot();
+  activityWatcher.start();
   void controller.start();
   void ha.start();
 
@@ -319,7 +324,7 @@ app.whenReady().then(() => {
   // Global hotkey: Ctrl+Shift+M -> szybkie wyciszenie/odciszenie
   try {
     const registered = globalShortcut.register(config.get('globalShortcut'), async () => {
-      const res = await ctx!.audio.toggleMute();
+      const res = await ctx!.controller.toggleDeviceMute();
       const isMuted = res?.isMuted;
       pushEvent('toast', { message: isMuted ? 'Mikrofon wyciszony 🔇' : 'Mikrofon aktywny 🎙️' });
       showWindowsNotification(
@@ -384,6 +389,7 @@ app.on('before-quit', (e) => {
   // Asynchroniczne sprzątanie: zwalnia port COM, zatrzymuje kontrolery i ubija daemony
   const cleanupTasks: Promise<unknown>[] = [];
   if (ctx) {
+    ctx.activityWatcher.stop();
     cleanupTasks.push(
       ctx.controller.stop().catch(() => {}),
       ctx.ha.stop().catch(() => {})

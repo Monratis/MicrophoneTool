@@ -54,6 +54,12 @@ export interface AppConfig {
   discordRefreshToken?: string;
   timeoutAwayMs: number;
   timeoutDeskMs: number;
+  /** Po ilu ms bitu obecności bez potwierdzenia (dystans w bramce/biometria/wejście) wygasić obecność jako fałszywy cel */
+  ghostTimeoutMs: number;
+  /** Jak długo goły bit obecności nie może ponownie włączyć obecności po wykryciu fałszywego celu */
+  ghostLockoutMs: number;
+  /** Wykorzystuje aktywność klawiatury i myszy (GetLastInputInfo) jako potwierdzenie obecności */
+  userInputPresenceEnabled: boolean;
   radarDistanceGateEnabled: boolean;
   /** Wstrzymuje bramkę odległości/filtr zwierzaka, gdy radar nie potrafi rozstrzygnąć,
    *  którego celu (użytkownik vs kot) dotyczy odczyt dystansu/biometrii. */
@@ -270,6 +276,7 @@ export interface Api {
   minimizeWindow: () => void;
   maximizeWindow: () => void;
   isWindowMaximized: () => Promise<boolean>;
+  toggleDevTools: () => void;
 
   // Home Assistant Integration
   haTestConnection: (opts?: { url?: string; token?: string }) => Promise<{ ok: boolean; message?: string; version?: string; error?: string }>;

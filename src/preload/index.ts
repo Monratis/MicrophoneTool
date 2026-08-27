@@ -27,6 +27,7 @@ const api = {
   minimizeWindow: () => ipcRenderer.send('window:minimize'),
   maximizeWindow: () => ipcRenderer.send('window:maximize'),
   isWindowMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+  toggleDevTools: () => ipcRenderer.send('window:toggleDevTools'),
   // Radar Auto-Tuning
   resetAutoTuning: () => ipcRenderer.invoke('radar:resetAutoTuning'),
 

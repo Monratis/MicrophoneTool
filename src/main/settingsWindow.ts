@@ -25,11 +25,25 @@ export function createSettingsWindow(ctx: AppContext): void {
     icon: winIcon ?? undefined,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
-      // Preload korzysta wyłącznie z ipcRenderer/contextBridge — działa w sandboksie.
-      sandbox: true,
+      // contextIsolation + własny preload zapewniają izolację procesu.
+      // sandbox: true jest zbędne przy contextIsolation i łamie startupData na Electron 43.
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: true
+    }
+  });
+
+  settingsWindow.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL) => {
+    console.error(`[settingsWindow] did-fail-load: code=${errorCode} desc="${errorDescription}" url="${validatedURL}"`);
+  });
+
+  settingsWindow.webContents.on('render-process-gone', (_e, details) => {
+    console.error('[settingsWindow] render-process-gone:', details);
+  });
+
+  settingsWindow.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+    if (level >= 2) {
+      console.warn(`[renderer console] [lvl ${level}] ${message} (${sourceId}:${line})`);
     }
   });
 

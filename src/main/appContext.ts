@@ -10,6 +10,7 @@ import type AudioController from './audioController';
 import type AppUpdater from './updater';
 import type SignalRGBIntegration from './signalrgbIntegration';
 import type HomeAssistantIntegration from './haIntegration';
+import type ActivityWatcher from './activityWatcher';
 import type { PushEvent, Snapshot } from '../shared/types';
 
 /**
@@ -21,6 +22,7 @@ export interface AppContext {
   radar: RadarListener;
   audio: AudioController;
   controller: AppController;
+  activityWatcher: ActivityWatcher;
   updater: AppUpdater;
   signalrgb: SignalRGBIntegration | null;
   ha: HomeAssistantIntegration;

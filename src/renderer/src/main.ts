@@ -509,36 +509,72 @@ class AppUI {
   }
 
   async init() {
-    this.snap = await window.api.getState();
-    this.form = { ...this.snap.config };
-    if (this.snap.telemetry) {
-      this.telemetry = { ...this.snap.telemetry };
+    try {
+      if (window.api && typeof window.api.getState === 'function') {
+        this.snap = await window.api.getState();
+      }
+    } catch (err) {
+      console.error('[DeskSense] Błąd pobierania stanu początkowego:', err);
     }
-    this.ports = await window.api.getPorts();
-    await this.loadAudioDevices();
+
+    if (this.snap) {
+      this.form = { ...this.snap.config };
+      if (this.snap.telemetry) {
+        this.telemetry = { ...this.snap.telemetry };
+      }
+    }
 
     try {
-      this.isMaximized = await window.api.isWindowMaximized();
+      if (window.api && typeof window.api.getPorts === 'function') {
+        this.ports = (await window.api.getPorts()) || [];
+      }
+    } catch (err) {
+      console.error('[DeskSense] Błąd pobierania listy portów:', err);
+    }
+
+    try {
+      await this.loadAudioDevices();
+    } catch (err) {
+      console.error('[DeskSense] Błąd ładowania urządzeń audio:', err);
+    }
+
+    try {
+      if (window.api && typeof window.api.isWindowMaximized === 'function') {
+        this.isMaximized = await window.api.isWindowMaximized();
+      }
     } catch (_) {}
 
     try {
-      this.logs = (await window.api.getLogs()) || [];
+      if (window.api && typeof window.api.getLogs === 'function') {
+        this.logs = (await window.api.getLogs()) || [];
+      }
     } catch (_) {}
 
-    const upd = await window.api.getUpdaterStatus();
-    if (upd) this.updater = upd;
+    try {
+      if (window.api && typeof window.api.getUpdaterStatus === 'function') {
+        const upd = await window.api.getUpdaterStatus();
+        if (upd) this.updater = upd;
+      }
+    } catch (_) {}
 
-    window.api.onEvent((e: PushEvent) => this.handleEvent(e));
+    try {
+      if (window.api && typeof window.api.onEvent === 'function') {
+        window.api.onEvent((e: PushEvent) => this.handleEvent(e));
+      }
+    } catch (err) {
+      console.error('[DeskSense] Błąd rejestracji push:event:', err);
+    }
 
     this.lastDeviceSig = this.deviceListSig(this.audioDevices);
     this.lastPortSig = this.portListSig(this.ports);
 
     // Initialize VAD gate thresholds in engine
-    this.vuEngine.deskGateDb = this.form.micDeskGateDb ?? -45;
-    this.vuEngine.headGateDb = this.form.micHeadsetGateDb ?? -45;
-
-    // Start Live Audio VU-Meter if window is visible
-    void this.vuEngine.start(this.form.micDeskName, this.form.micHeadsetName);
+    if (this.form) {
+      this.vuEngine.deskGateDb = this.form.micDeskGateDb ?? -45;
+      this.vuEngine.headGateDb = this.form.micHeadsetGateDb ?? -45;
+      // Start Live Audio VU-Meter if window is visible
+      void this.vuEngine.start(this.form.micDeskName, this.form.micHeadsetName);
+    }
 
     // Bluetooth & Window Visibility Lifecycle Management
     document.addEventListener('visibilitychange', () => {
@@ -572,10 +608,13 @@ class AppUI {
       void this.pollHardwareLists();
     }, 3000);
 
-    this.render();
-
     document.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Escape') {
+      if (ev.key === 'F12' || ((ev.ctrlKey || ev.metaKey) && ev.shiftKey && ev.key.toLowerCase() === 'i')) {
+        ev.preventDefault();
+        try {
+          window.api?.toggleDevTools?.();
+        } catch (_) {}
+      } else if (ev.key === 'Escape') {
         if (this.wizardOpen) {
           ev.preventDefault();
           this.closeCalibrationWizard();
@@ -1178,13 +1217,13 @@ class AppUI {
     const val = this.vadResults.optimalGateDb;
     if (this.vadTarget === 'desk') {
       this.patchForm({ micDeskGateDb: val }, true);
-      if ((this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+      if (this.isMicActive('desk') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ gateDb: val });
       }
       this.pushToast(`Zastosowano próg Discord dla Mikrofonu Biurkowego: ${val} dB ✓`);
     } else {
       this.patchForm({ micHeadsetGateDb: val }, true);
-      if (this.snap?.state === 'headset' && this.form?.discordIntegration) {
+      if (this.isMicActive('headset') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ gateDb: val });
       }
       this.pushToast(`Zastosowano próg Discord dla Mikrofonu Mobilnego: ${val} dB ✓`);
@@ -1383,6 +1422,19 @@ class AppUI {
 
   render() {
     if (!this.snap || !this.form) {
+      this.root.innerHTML = `
+        <div class="app" style="display: flex; align-items: center; justify-content: center; height: 100%; background: #1c2229; color: #94a3b8; font-family: sans-serif;">
+          <div style="text-align: center; padding: 24px;">
+            <div style="font-size: 32px; margin-bottom: 12px;">🎙️</div>
+            <div style="font-size: 15px; color: #f1f5f9; font-weight: 600; margin-bottom: 6px;">DeskSense — Inicjalizacja…</div>
+            <div style="font-size: 12px; color: #64748b; margin-bottom: 16px;">Trwa łączenie z usługą audio i sensorem mmWave</div>
+            <button id="btn-fallback-reload" style="padding: 6px 14px; background: #2d3744; color: #f1f5f9; border: 1px solid #3b4756; border-radius: 6px; cursor: pointer; font-size: 12px;">Odśwież połączenie</button>
+          </div>
+        </div>
+      `;
+      document.getElementById('btn-fallback-reload')?.addEventListener('click', () => {
+        void this.init();
+      });
       return;
     }
 
@@ -1528,6 +1580,25 @@ class AppUI {
     this.renderToasts();
   }
 
+  private isMicActive(target: 'desk' | 'headset'): boolean {
+    if (!this.snap || !this.form) return target === 'desk';
+    if (this.snap.state === target) return true;
+    if (!this.snap.state) {
+      const defaultMic = this.audioDevices.find((d) => d.isDefault)?.name;
+      const configuredName = target === 'desk' ? this.form.micDeskName : this.form.micHeadsetName;
+      if (
+        defaultMic &&
+        configuredName &&
+        (defaultMic.toLowerCase().includes(configuredName.toLowerCase()) ||
+          configuredName.toLowerCase().includes(defaultMic.toLowerCase()))
+      ) {
+        return true;
+      }
+      return target === 'desk';
+    }
+    return false;
+  }
+
   // ---------- COMPLETE ALL-IN-ONE HOME DASHBOARD ----------
   private renderHomeTab(): string {
     if (!this.snap || !this.form) return '';
@@ -1536,9 +1607,8 @@ class AppUI {
     const deskVol = this.initVolumePercent(form.micDeskName, form.micDeskVolume);
     const headVol = this.initVolumePercent(form.micHeadsetName, form.micHeadsetVolume);
 
-    const defaultMic = this.audioDevices.find((d) => d.isDefault)?.name;
-    const isDeskActive = snap.state === 'desk' || (!snap.state && defaultMic && form.micDeskName && defaultMic.toLowerCase().includes(form.micDeskName.toLowerCase()));
-    const isHeadsetActive = snap.state === 'headset' || (!snap.state && defaultMic && form.micHeadsetName && defaultMic.toLowerCase().includes(form.micHeadsetName.toLowerCase()));
+    const isDeskActive = this.isMicActive('desk');
+    const isHeadsetActive = this.isMicActive('headset');
 
     // Dynamic gate geometry
     const minGate = form.radarMinDistanceCm ?? 40;
@@ -2047,6 +2117,13 @@ class AppUI {
           </div>
           <div class="fc-field-row">
             <div>
+              <div class="fc-field-label">⌨️ Aktywność klawiatury i myszy</div>
+              <div class="fc-field-desc">Zapobiega fałszywemu wygaszaniu obecności podczas pisania i klikania</div>
+            </div>
+            <button class="fc-switch ${form.userInputPresenceEnabled !== false ? 'active' : ''}" id="sw-user-input-presence" aria-checked="${form.userInputPresenceEnabled !== false}" role="switch"></button>
+          </div>
+          <div class="fc-field-row">
+            <div>
               <div class="fc-field-label">Filtr szumów & DSP</div>
               <div class="fc-field-desc">Stabilizacja odczytów radaru (filtr medianowy + EMA)</div>
             </div>
@@ -2055,6 +2132,26 @@ class AppUI {
               <option value="balanced" ${form.radarSmoothingMode === 'balanced' ? 'selected' : ''}>Zbalansowany</option>
               <option value="raw" ${form.radarSmoothingMode === 'raw' ? 'selected' : ''}>Szybki / Surowy</option>
             </select>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">👻 Filtr fałszywego celu (duch)</div>
+              <div class="fc-field-desc">Po jakim czasie bez dystansu w bramce/biometrii wygasić zablokowany bit obecności (wykrywa odbicia / obiekty statyczne)</div>
+            </div>
+            <div style="display: flex; gap: 4px; align-items: center">
+              <input type="number" class="fc-input" id="inp-timeout-ghost" value="${form.ghostTimeoutMs ?? 12000}" style="width: 90px" min="3000" max="120000" step="500" />
+              <span style="font-size: 11px; color: var(--fc-text-muted)">ms</span>
+            </div>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Blokada po wykryciu ducha</div>
+              <div class="fc-field-desc">Jak długo goły bit obecności nie może włączyć mikrofonu po fałszywym celu (realny dowód znosi blokadę)</div>
+            </div>
+            <div style="display: flex; gap: 4px; align-items: center">
+              <input type="number" class="fc-input" id="inp-timeout-ghost-lock" value="${form.ghostLockoutMs ?? 60000}" style="width: 90px" min="10000" max="600000" step="5000" />
+              <span style="font-size: 11px; color: var(--fc-text-muted)">ms</span>
+            </div>
           </div>
         </div>
       </div>
@@ -3013,23 +3110,37 @@ class AppUI {
 
     byId('btn-vad-sync-desk')?.addEventListener('click', async () => {
       const s = await window.api.discordGetVoiceSettings();
-      if (s && typeof s.thresholdDb === 'number') {
-        this.patchForm({ micDeskGateDb: s.thresholdDb });
-        this.vuEngine.deskGateDb = s.thresholdDb;
-        this.pushToast(`Pobrano próg z Discorda dla biurka: ${s.thresholdDb} dB ✓`);
+      if (s) {
+        const patch: Partial<Snapshot['config']> = {};
+        if (typeof s.thresholdDb === 'number') {
+          patch.micDeskGateDb = s.thresholdDb;
+          this.vuEngine.deskGateDb = s.thresholdDb;
+        }
+        if (typeof s.krisp === 'boolean') patch.micDeskKrisp = s.krisp ? 'on' : 'off';
+        if (typeof s.agc === 'boolean') patch.micDeskAgc = s.agc ? 'on' : 'off';
+        if (typeof s.echo === 'boolean') patch.micDeskEcho = s.echo ? 'on' : 'off';
+        this.patchForm(patch, true);
+        this.pushToast(`Pobrano profil głosu z Discorda dla biurka ✓`);
       } else {
-        this.pushToast('Nie udało się pobrać progu z Discorda — upewnij się, że autoryzowano OAuth Discorda.', true);
+        this.pushToast('Nie udało się pobrać profilu z Discorda — upewnij się, że autoryzowano OAuth Discorda.', true);
       }
     });
 
     byId('btn-vad-sync-headset')?.addEventListener('click', async () => {
       const s = await window.api.discordGetVoiceSettings();
-      if (s && typeof s.thresholdDb === 'number') {
-        this.patchForm({ micHeadsetGateDb: s.thresholdDb });
-        this.vuEngine.headGateDb = s.thresholdDb;
-        this.pushToast(`Pobrano próg z Discorda dla słuchawek: ${s.thresholdDb} dB ✓`);
+      if (s) {
+        const patch: Partial<Snapshot['config']> = {};
+        if (typeof s.thresholdDb === 'number') {
+          patch.micHeadsetGateDb = s.thresholdDb;
+          this.vuEngine.headGateDb = s.thresholdDb;
+        }
+        if (typeof s.krisp === 'boolean') patch.micHeadsetKrisp = s.krisp ? 'on' : 'off';
+        if (typeof s.agc === 'boolean') patch.micHeadsetAgc = s.agc ? 'on' : 'off';
+        if (typeof s.echo === 'boolean') patch.micHeadsetEcho = s.echo ? 'on' : 'off';
+        this.patchForm(patch, true);
+        this.pushToast(`Pobrano profil głosu z Discorda dla słuchawek ✓`);
       } else {
-        this.pushToast('Nie udało się pobrać progu z Discorda — upewnij się, że autoryzowano OAuth Discorda.', true);
+        this.pushToast('Nie udało się pobrać profilu z Discorda — upewnij się, że autoryzowano OAuth Discorda.', true);
       }
     });
 
@@ -3050,21 +3161,21 @@ class AppUI {
     // Quick VAD Presets Desk
     byId('preset-vad-desk-quiet')?.addEventListener('click', () => {
       this.patchForm({ micDeskGateDb: -55 }, true);
-      if ((this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+      if (this.isMicActive('desk') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ gateDb: -55 });
       }
       this.pushToast('Ustawiono próg VAD: -55 dB (Cichy pokój)');
     });
     byId('preset-vad-desk-std')?.addEventListener('click', () => {
       this.patchForm({ micDeskGateDb: -45 }, true);
-      if ((this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+      if (this.isMicActive('desk') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ gateDb: -45 });
       }
       this.pushToast('Ustawiono próg VAD: -45 dB (Zbalansowany)');
     });
     byId('preset-vad-desk-noisy')?.addEventListener('click', () => {
       this.patchForm({ micDeskGateDb: -35 }, true);
-      if ((this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+      if (this.isMicActive('desk') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ gateDb: -35 });
       }
       this.pushToast('Ustawiono próg VAD: -35 dB (Głośna klawiatura / Tło)');
@@ -3073,21 +3184,21 @@ class AppUI {
     // Quick VAD Presets Headset
     byId('preset-vad-headset-quiet')?.addEventListener('click', () => {
       this.patchForm({ micHeadsetGateDb: -55 }, true);
-      if (this.snap?.state === 'headset' && this.form?.discordIntegration) {
+      if (this.isMicActive('headset') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ gateDb: -55 });
       }
       this.pushToast('Ustawiono próg VAD: -55 dB (Ciche otoczenie)');
     });
     byId('preset-vad-headset-std')?.addEventListener('click', () => {
       this.patchForm({ micHeadsetGateDb: -45 }, true);
-      if (this.snap?.state === 'headset' && this.form?.discordIntegration) {
+      if (this.isMicActive('headset') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ gateDb: -45 });
       }
       this.pushToast('Ustawiono próg VAD: -45 dB (Zbalansowany)');
     });
     byId('preset-vad-headset-noisy')?.addEventListener('click', () => {
       this.patchForm({ micHeadsetGateDb: -35 }, true);
-      if (this.snap?.state === 'headset' && this.form?.discordIntegration) {
+      if (this.isMicActive('headset') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ gateDb: -35 });
       }
       this.pushToast('Ustawiono próg VAD: -35 dB (Głośne tło)');
@@ -3097,7 +3208,7 @@ class AppUI {
     const onDeskMicSelect = (sel: HTMLSelectElement) => {
       const opt = sel.selectedOptions[0];
       const name = sel.value;
-      const vol = this.initVolumePercent(name, undefined);
+      const vol = this.initVolumePercent(name, this.form?.micDeskVolume);
       this.patchForm({ micDeskName: name, micDeskId: opt?.getAttribute('data-id') || '', micDeskVolume: vol });
       const elRng = byId('rng-vol-desk') as HTMLInputElement | null;
       const elVal = byId('val-vol-desk');
@@ -3127,7 +3238,7 @@ class AppUI {
     const onHeadsetMicSelect = (sel: HTMLSelectElement) => {
       const opt = sel.selectedOptions[0];
       const name = sel.value;
-      const vol = this.initVolumePercent(name, undefined);
+      const vol = this.initVolumePercent(name, this.form?.micHeadsetVolume);
       this.patchForm({ micHeadsetName: name, micHeadsetId: opt?.getAttribute('data-id') || '', micHeadsetVolume: vol });
       const elRng = byId('rng-vol-headset') as HTMLInputElement | null;
       const elVal = byId('val-vol-headset');
@@ -3170,14 +3281,14 @@ class AppUI {
     });
     byId('rng-gate-desk')?.addEventListener('change', (e) => {
       const val = Math.max(-100, Math.min(0, Number((e.target as HTMLInputElement).value)));
-      if ((this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+      if (this.isMicActive('desk') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ gateDb: val });
       }
     });
 
     const updateDeskKrisp = (mode: 'default' | 'on' | 'off') => {
       this.patchForm({ micDeskKrisp: mode });
-      if (mode !== 'default' && (this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+      if (mode !== 'default' && this.isMicActive('desk') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ krisp: mode === 'on' });
       }
     };
@@ -3185,7 +3296,7 @@ class AppUI {
 
     const updateDeskAgc = (mode: 'default' | 'on' | 'off') => {
       this.patchForm({ micDeskAgc: mode });
-      if (mode !== 'default' && (this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+      if (mode !== 'default' && this.isMicActive('desk') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ agc: mode === 'on' });
       }
     };
@@ -3194,7 +3305,7 @@ class AppUI {
     byId('settings-echo-desk')?.addEventListener('change', (e) => {
       const mode = (e.target as HTMLSelectElement).value as any;
       this.patchForm({ micDeskEcho: mode });
-      if (mode !== 'default' && (this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+      if (mode !== 'default' && this.isMicActive('desk') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ echo: mode === 'on' });
       }
     });
@@ -3215,7 +3326,7 @@ class AppUI {
     });
     byId('rng-gate-headset')?.addEventListener('change', (e) => {
       const val = Math.max(-100, Math.min(0, Number((e.target as HTMLInputElement).value)));
-      if (this.snap?.state === 'headset' && this.form?.discordIntegration) {
+      if (this.isMicActive('headset') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ gateDb: val });
       }
     });
@@ -3245,13 +3356,13 @@ class AppUI {
         if (isDesk) {
           this.vuEngine.deskGateDb = clampedDb;
           this.patchForm({ micDeskGateDb: clampedDb }, false);
-          if ((this.snap?.state ?? 'desk') === 'desk' && this.form?.discordIntegration) {
+          if (this.isMicActive('desk') && this.form?.discordIntegration) {
             void window.api.discordApplyVoice({ gateDb: clampedDb });
           }
         } else {
           this.vuEngine.headGateDb = clampedDb;
           this.patchForm({ micHeadsetGateDb: clampedDb }, false);
-          if (this.snap?.state === 'headset' && this.form?.discordIntegration) {
+          if (this.isMicActive('headset') && this.form?.discordIntegration) {
             void window.api.discordApplyVoice({ gateDb: clampedDb });
           }
         }
@@ -3264,7 +3375,7 @@ class AppUI {
 
     const updateHeadsetKrisp = (mode: 'default' | 'on' | 'off') => {
       this.patchForm({ micHeadsetKrisp: mode });
-      if (mode !== 'default' && this.snap?.state === 'headset' && this.form?.discordIntegration) {
+      if (mode !== 'default' && this.isMicActive('headset') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ krisp: mode === 'on' });
       }
     };
@@ -3272,7 +3383,7 @@ class AppUI {
 
     const updateHeadsetAgc = (mode: 'default' | 'on' | 'off') => {
       this.patchForm({ micHeadsetAgc: mode });
-      if (mode !== 'default' && this.snap?.state === 'headset' && this.form?.discordIntegration) {
+      if (mode !== 'default' && this.isMicActive('headset') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ agc: mode === 'on' });
       }
     };
@@ -3281,7 +3392,7 @@ class AppUI {
     byId('settings-echo-headset')?.addEventListener('change', (e) => {
       const mode = (e.target as HTMLSelectElement).value as any;
       this.patchForm({ micHeadsetEcho: mode });
-      if (mode !== 'default' && this.snap?.state === 'headset' && this.form?.discordIntegration) {
+      if (mode !== 'default' && this.isMicActive('headset') && this.form?.discordIntegration) {
         void window.api.discordApplyVoice({ echo: mode === 'on' });
       }
     });
@@ -3316,15 +3427,25 @@ class AppUI {
     });
 
     byId('btn-discord-sync')?.addEventListener('click', async () => {
-      const isDesk = (this.snap?.state ?? 'desk') === 'desk';
-      const gateDb = isDesk ? (this.form?.micDeskGateDb ?? -36) : (this.form?.micHeadsetGateDb ?? -32);
-      const krisp = isDesk ? this.form?.micDeskKrisp === 'on' : this.form?.micHeadsetKrisp === 'on';
-      const agc = isDesk ? this.form?.micDeskAgc === 'on' : this.form?.micHeadsetAgc === 'on';
-      const echo = isDesk ? this.form?.micDeskEcho === 'on' : this.form?.micHeadsetEcho === 'on';
+      const isDesk = this.isMicActive('desk');
+      const rawGate = isDesk ? this.form?.micDeskGateDb : this.form?.micHeadsetGateDb;
+      const gateDb =
+        typeof rawGate === 'number' && Number.isFinite(rawGate) && rawGate <= 0 && rawGate >= -100 && rawGate !== -1
+          ? rawGate
+          : undefined;
+      const krispMode = isDesk ? this.form?.micDeskKrisp : this.form?.micHeadsetKrisp;
+      const agcMode = isDesk ? this.form?.micDeskAgc : this.form?.micHeadsetAgc;
+      const echoMode = isDesk ? this.form?.micDeskEcho : this.form?.micHeadsetEcho;
+      const tri = (v: string | undefined): boolean | undefined => (v === 'on' ? true : v === 'off' ? false : undefined);
 
-      const ok = await window.api.discordApplyVoice({ gateDb, krisp, agc, echo });
+      const ok = await window.api.discordApplyVoice({
+        gateDb,
+        krisp: tri(krispMode),
+        agc: tri(agcMode),
+        echo: tri(echoMode)
+      });
       if (ok) {
-        this.pushToast(`Zsynchronizowano profil głosu Discord: ${gateDb} dB ✓`);
+        this.pushToast(`Zsynchronizowano profil głosu Discord (${isDesk ? 'Biurko' : 'Słuchawki'}) ✓`);
       } else {
         this.pushToast('Discord nie przyjął zmian profilu (kliknij "Autoryzuj Discord")', true);
       }
@@ -3355,6 +3476,16 @@ class AppUI {
       const val = !(this.form?.petFilterEnabled ?? true);
       this.patchForm({ petFilterEnabled: val }, false);
       const btn = byId('sw-pet-filter');
+      if (btn) {
+        btn.className = `fc-switch ${val ? 'active' : ''}`;
+        btn.setAttribute('aria-checked', String(val));
+      }
+    });
+
+    byId('sw-user-input-presence')?.addEventListener('click', () => {
+      const val = !(this.form?.userInputPresenceEnabled !== false);
+      this.patchForm({ userInputPresenceEnabled: val }, false);
+      const btn = byId('sw-user-input-presence');
       if (btn) {
         btn.className = `fc-switch ${val ? 'active' : ''}`;
         btn.setAttribute('aria-checked', String(val));
@@ -3565,6 +3696,14 @@ class AppUI {
     byId('inp-timeout-desk')?.addEventListener('input', (e) => {
       const v = Number((e.target as HTMLInputElement).value);
       if (!isNaN(v)) this.patchForm({ timeoutDeskMs: v });
+    });
+    byId('inp-timeout-ghost')?.addEventListener('input', (e) => {
+      const v = Number((e.target as HTMLInputElement).value);
+      if (!isNaN(v)) this.patchForm({ ghostTimeoutMs: v });
+    });
+    byId('inp-timeout-ghost-lock')?.addEventListener('input', (e) => {
+      const v = Number((e.target as HTMLInputElement).value);
+      if (!isNaN(v)) this.patchForm({ ghostLockoutMs: v });
     });
     byId('sel-radar-smoothing')?.addEventListener('change', (e) => {
       const val = (e.target as HTMLSelectElement).value as 'ultra' | 'balanced' | 'raw';
@@ -3968,10 +4107,30 @@ class AppUI {
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+function bootstrap() {
   const root = document.getElementById('root');
   if (root) {
     const app = new AppUI(root);
-    app.init();
+    void app.init().catch((err) => {
+      console.error('[DeskSense] Błąd krytyczny podczas startu AppUI:', err);
+    });
+  } else {
+    console.error('[DeskSense] Nie znaleziono kontenera #root w dokumencie HTML.');
   }
+}
+
+// Obsługa błędów globalnych w rendererze
+window.addEventListener('error', (e) => {
+  console.error('[DeskSense Renderer Error]:', e.error || e.message);
 });
+
+window.addEventListener('unhandledrejection', (e) => {
+  console.error('[DeskSense Renderer Unhandled Rejection]:', e.reason);
+});
+
+// Bezpieczne uruchomienie: jeśli DOM jest już załadowany (np. skrypty modułowe), uruchom od razu
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', bootstrap);
+} else {
+  bootstrap();
+}

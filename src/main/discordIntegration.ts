@@ -200,9 +200,13 @@ export default class DiscordIntegration extends EventEmitter {
       }
       const isError =
         payload.evt === 'error' ||
+        payload.evt === 'ERROR' ||
+        (typeof payload.data?.code === 'number' && payload.data.code >= 4000) ||
         (typeof payload.status === 'number' && payload.status >= 400);
       if (isError) {
-        console.warn(`[discord] ${String(payload.cmd)} odrzucone: ${JSON.stringify(payload.data ?? payload.message ?? '')}`);
+        const errMsg = payload.data?.message || payload.message || JSON.stringify(payload.data ?? '');
+        console.warn(`[discord] ${String(payload.cmd)} odrzucone: ${errMsg}`);
+        appendLog('DISCORD', `Błąd komendy ${String(payload.cmd)}: ${errMsg}`);
       }
       resolve({ ok: !isError, data: payload.data });
     }
@@ -313,13 +317,12 @@ export default class DiscordIntegration extends EventEmitter {
         );
         return;
       }
-      // Najpierw pełne scopes głosowe; przy odrzuceniu fallback do minimalnych (identify+rpc).
-      // Zestaw zgodny z działającym pluginem Deckboard (github.com/aislandener/discord-deckboard).
+      // Zestaw uprawnień wymaganych do sterowania wejściem i profilami głosu w Discordzie.
       // Uwaga: scope 'rpc' NIE istnieje w liście scopes na Developer Portalu — to scope
       // lokalny IPC; dodanie go w kodzie jest poprawne i wymagane.
       const scopeSets: string[][] = [
-        ['identify', 'rpc', 'rpc.notifications.read', 'rpc.voice.read', 'rpc.voice.write', 'rpc.activities.write'],
-        ['identify', 'rpc']
+        ['identify', 'rpc', 'rpc.voice.read', 'rpc.voice.write'],
+        ['identify', 'rpc', 'rpc.voice.read', 'rpc.voice.write', 'rpc.notifications.read', 'rpc.activities.write']
       ];
       let authResp: { ok: boolean; data?: unknown } = { ok: false, data: undefined };
       for (const scopes of scopeSets) {

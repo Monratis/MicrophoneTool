@@ -113,7 +113,7 @@ export default class AutoTuner {
         }
       }
 
-      if (breathRate >= 9 && breathRate <= 22) {
+      if (breathRate >= 8 && breathRate <= 32) {
         if (this.breathRateMean === 0) {
           this.breathRateMean = breathRate;
         } else {
@@ -181,7 +181,7 @@ export default class AutoTuner {
       heartRateMax: hr > 0 ? Math.min(130, Math.max(cfgHrMax, hr + 18)) : cfgHrMax,
       breathRateAvg: br || 0,
       breathRateMin: br > 0 ? Math.max(7, br - 5) : 10,
-      breathRateMax: br > 0 ? Math.min(26, br + 5) : 20,
+      breathRateMax: br > 0 ? Math.min(32, Math.max(26, br + 6)) : 22,
       isCalibrated: this.samplesCount >= 20 && hr > 0
     };
   }

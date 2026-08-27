@@ -836,11 +836,60 @@ namespace AudioSwitcher
 
         private static AudioDevice FindMatchingDevice(List<AudioDevice> devices, string target)
         {
+            if (string.IsNullOrEmpty(target) || devices == null || devices.Count == 0) return null;
+
             var match = devices.Find(d => string.Equals(d.Id, target, StringComparison.OrdinalIgnoreCase));
-            if (match == null) match = devices.Find(d => string.Equals(d.Name, target, StringComparison.Ordinal));
-            if (match == null) match = devices.Find(d => string.Equals(d.Name, target, StringComparison.OrdinalIgnoreCase));
-            if (match == null) match = devices.Find(d => d.Name.IndexOf(target, StringComparison.OrdinalIgnoreCase) >= 0);
-            return match;
+            if (match != null) return match;
+
+            match = devices.Find(d => string.Equals(d.Name, target, StringComparison.Ordinal));
+            if (match != null) return match;
+
+            match = devices.Find(d => string.Equals(d.Name, target, StringComparison.OrdinalIgnoreCase));
+            if (match != null) return match;
+
+            match = devices.Find(d => d.Name.IndexOf(target, StringComparison.OrdinalIgnoreCase) >= 0);
+            if (match != null) return match;
+
+            match = devices.Find(d => target.IndexOf(d.Name, StringComparison.OrdinalIgnoreCase) >= 0);
+            if (match != null) return match;
+
+            string cleanTarget = CleanDeviceName(target);
+            if (!string.IsNullOrEmpty(cleanTarget))
+            {
+                match = devices.Find(d => string.Equals(CleanDeviceName(d.Name), cleanTarget, StringComparison.OrdinalIgnoreCase));
+                if (match != null) return match;
+
+                match = devices.Find(d => CleanDeviceName(d.Name).IndexOf(cleanTarget, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                          cleanTarget.IndexOf(CleanDeviceName(d.Name), StringComparison.OrdinalIgnoreCase) >= 0);
+                if (match != null) return match;
+            }
+
+            return null;
+        }
+
+        private static string CleanDeviceName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "";
+            string s = name.Trim();
+            if ((s.StartsWith("Mikrofon (", StringComparison.OrdinalIgnoreCase) ||
+                 s.StartsWith("Microphone (", StringComparison.OrdinalIgnoreCase) ||
+                 s.StartsWith("Zestaw słuchawkowy (", StringComparison.OrdinalIgnoreCase) ||
+                 s.StartsWith("Headset (", StringComparison.OrdinalIgnoreCase)) && s.EndsWith(")"))
+            {
+                int open = s.IndexOf('(');
+                s = s.Substring(open + 1, s.Length - open - 2).Trim();
+            }
+            else if (s.StartsWith("Mikrofon - ", StringComparison.OrdinalIgnoreCase) ||
+                     s.StartsWith("Microphone - ", StringComparison.OrdinalIgnoreCase))
+            {
+                s = s.Substring(s.IndexOf('-') + 1).Trim();
+            }
+            else if (s.StartsWith("Mikrofon ", StringComparison.OrdinalIgnoreCase) ||
+                     s.StartsWith("Microphone ", StringComparison.OrdinalIgnoreCase))
+            {
+                s = s.Substring(s.IndexOf(' ') + 1).Trim();
+            }
+            return s;
         }
 
         private static string EscapeJson(string s)

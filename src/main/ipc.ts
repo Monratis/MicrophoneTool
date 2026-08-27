@@ -57,11 +57,27 @@ export function registerIpc(ctx: AppContext): void {
       Boolean(patch && 'haHeartRateEntity' in patch && patch.haHeartRateEntity !== prevHaHeart) ||
       Boolean(patch && 'haBreathRateEntity' in patch && patch.haBreathRateEntity !== prevHaBreath);
 
+    const discordVoiceNeedsUpdate =
+      Boolean(patch) &&
+      ('micDeskGateDb' in patch ||
+        'micDeskKrisp' in patch ||
+        'micDeskAgc' in patch ||
+        'micDeskEcho' in patch ||
+        'micHeadsetGateDb' in patch ||
+        'micHeadsetKrisp' in patch ||
+        'micHeadsetAgc' in patch ||
+        'micHeadsetEcho' in patch ||
+        'discordGateFollowMic' in patch ||
+        'discordIntegration' in patch);
+
     if (radarNeedsRestart) {
       void ctx.restartRadar();
     }
     if (haNeedsReload) {
       void ctx.ha.reload();
+    }
+    if (discordVoiceNeedsUpdate && ctx.controller.currentDevice) {
+      ctx.controller.applyDiscordGate(ctx.controller.currentDevice);
     }
     if (!radarNeedsRestart) {
       ctx.refreshSnapshot();
@@ -79,7 +95,7 @@ export function registerIpc(ctx: AppContext): void {
     return { devices, recommended };
   });
   ipcMain.handle('audio:toggleMute', async (_e, target?: string) => {
-    const res = await ctx.audio.toggleMute(target);
+    const res = await ctx.controller.toggleDeviceMute(target);
     ctx.refreshSnapshot();
     return res;
   });
@@ -90,8 +106,20 @@ export function registerIpc(ctx: AppContext): void {
   });
   ipcMain.handle(
     'audio:setVolume',
-    async (_e, args: { target: string; percent: number }) =>
-      ctx.controller.setDeviceVolume(args.target, args.percent)
+    async (_e, args: { target: string; percent: number }) => {
+      const res = await ctx.controller.setDeviceVolume(args.target, args.percent);
+      const deskName = (ctx.config.get('micDeskName') || '').trim().toLowerCase();
+      const headName = (ctx.config.get('micHeadsetName') || '').trim().toLowerCase();
+      const targetLower = (args.target || '').trim().toLowerCase();
+      if (deskName && (targetLower.includes(deskName) || deskName.includes(targetLower))) {
+        ctx.config.set('micDeskVolume', args.percent);
+        ctx.config.save();
+      } else if (headName && (targetLower.includes(headName) || headName.includes(targetLower))) {
+        ctx.config.set('micHeadsetVolume', args.percent);
+        ctx.config.save();
+      }
+      return res;
+    }
   );
   ipcMain.handle('audio:getVolume', async (_e, target?: string) => ctx.audio.getVolume(target ?? ''));
   ipcMain.handle(
@@ -245,5 +273,16 @@ export function registerIpc(ctx: AppContext): void {
   ipcMain.handle('window:isMaximized', () => {
     const win = getSettingsWindow();
     return win ? win.isMaximized() : false;
+  });
+
+  ipcMain.on('window:toggleDevTools', () => {
+    const win = getSettingsWindow();
+    if (win) {
+      if (win.webContents.isDevToolsOpened()) {
+        win.webContents.closeDevTools();
+      } else {
+        win.webContents.openDevTools({ mode: 'detach' });
+      }
+    }
   });
 }
