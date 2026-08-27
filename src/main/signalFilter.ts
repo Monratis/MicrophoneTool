@@ -7,11 +7,11 @@ export class MedianFilter {
   private size: number;
 
   constructor(size = 5) {
-    this.size = size;
+    this.size = Math.max(1, size);
   }
 
   setSize(size: number): void {
-    this.size = Math.max(3, size);
+    this.size = Math.max(1, size);
     if (this.buffer.length > this.size) {
       this.buffer = this.buffer.slice(-this.size);
     }
@@ -24,7 +24,7 @@ export class MedianFilter {
     }
     const sorted = [...this.buffer].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 !== 0 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+    return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
   reset(): void {
@@ -33,76 +33,185 @@ export class MedianFilter {
 }
 
 export class ExponentialSmoothingFilter {
-  private current = 0;
+  private currentFloat = 0;
+  private currentInt = 0;
   private alpha: number;
+  private deadband: number;
 
-  constructor(alpha = 0.18) {
+  constructor(alpha = 0.16, deadband = 1.5) {
     this.alpha = alpha;
+    this.deadband = deadband;
   }
 
   setAlpha(alpha: number): void {
     this.alpha = Math.max(0.02, Math.min(1.0, alpha));
   }
 
+  setDeadband(deadband: number): void {
+    this.deadband = Math.max(0, deadband);
+  }
+
   push(val: number): number {
-    if (this.current <= 0 || Math.abs(val - this.current) > 130) {
-      this.current = val;
-    } else {
-      const delta = Math.abs(val - this.current);
-      // Adaptacyjny alpha: przy rzeczywistym odejściu/wstawaniu przyspiesz reakcję
-      const effAlpha = delta > 40 ? Math.min(0.65, this.alpha * 2.2) : this.alpha;
-      this.current = this.current + effAlpha * (val - this.current);
+    if (val <= 0) return this.currentInt;
+    if (this.currentFloat <= 0 || Math.abs(val - this.currentFloat) > 90) {
+      this.currentFloat = val;
+      this.currentInt = Math.round(val);
+      return this.currentInt;
     }
-    return Math.round(this.current);
+
+    const delta = Math.abs(val - this.currentFloat);
+    // Adaptacyjny współczynnik alpha przy nagłej zmianie fizjologicznej
+    const effAlpha = delta > 25 ? Math.min(0.60, this.alpha * 2.2) : this.alpha;
+    this.currentFloat = this.currentFloat + effAlpha * (val - this.currentFloat);
+
+    // Histereza / martwa strefa (zapobiega drganiom o +-1 jednostkę przy spoczynku)
+    if (Math.abs(this.currentFloat - this.currentInt) >= this.deadband) {
+      this.currentInt = Math.round(this.currentFloat);
+    }
+    return this.currentInt;
   }
 
   reset(): void {
-    this.current = 0;
+    this.currentFloat = 0;
+    this.currentInt = 0;
   }
 }
 
 export class DistanceFilter {
-  private current = 0;
-  private alpha = 0.4;
-  private stepThresholdCm = 15;
+  private median: MedianFilter;
+  private currentFloat = 0;
+  private currentInt = 0;
+  private baseAlpha = 0.08;
+  private deadbandCm = 3.5; // Histereza 3.5 cm — całkowicie nieruchomy odczyt przy spoczynku
+  private rawMode = false;
+  private initialized = false;
 
-  constructor(alpha = 0.4, stepThresholdCm = 15) {
-    this.alpha = alpha;
-    this.stepThresholdCm = stepThresholdCm;
+  constructor(baseAlpha = 0.08, deadbandCm = 3.5, medianSize = 9) {
+    this.median = new MedianFilter(medianSize);
+    this.baseAlpha = baseAlpha;
+    this.deadbandCm = deadbandCm;
   }
 
   setMode(mode: 'ultra' | 'balanced' | 'raw'): void {
     if (mode === 'ultra') {
-      this.alpha = 0.35;
-      this.stepThresholdCm = 15;
+      this.rawMode = false;
+      this.median.setSize(9);
+      this.baseAlpha = 0.08;
+      this.deadbandCm = 3.5; // Histereza 3.5 cm — idealnie stabilne siedzenie przy biurku
     } else if (mode === 'balanced') {
-      this.alpha = 0.6;
-      this.stepThresholdCm = 10;
+      this.rawMode = false;
+      this.median.setSize(7);
+      this.baseAlpha = 0.16;
+      this.deadbandCm = 2.5; // Histereza 2.5 cm
     } else {
-      this.alpha = 1.0;
-      this.stepThresholdCm = 0;
+      this.rawMode = true;
+      this.median.setSize(1);
+      this.baseAlpha = 1.0;
+      this.deadbandCm = 0;
     }
+  }
+
+  setDeadband(cm: number): void {
+    this.deadbandCm = Math.max(0, cm);
   }
 
   push(valCm: number): number {
-    if (valCm <= 0 || valCm > 600) return this.current;
-    if (this.current <= 0) {
-      this.current = valCm;
-      return Math.round(this.current);
+    // Zero-Loss: Nieprawidłowe lub zerowe wartości nie niszczą buforów i zwracają ostatnią stabilną odległość
+    if (valCm <= 0 || valCm > 600) return this.currentInt;
+
+    if (this.rawMode) {
+      this.currentFloat = valCm;
+      this.currentInt = Math.round(valCm);
+      this.initialized = true;
+      return this.currentInt;
     }
-    const delta = Math.abs(valCm - this.current);
-    // Skokowa zmiana pozycji (np. podejście, siadanie, wstanie) — natychmiastowa reakcja w 1. klatce
-    if (delta >= this.stepThresholdCm) {
-      this.current = valCm;
+
+    // Stopień 1: Ograniczanie pojedynczych szpilek odbić (Outlier Clamping)
+    // Pojedynczy odczyt skaczący o >60 cm (np. odbicie od ściany z tyłu zamiast klatki)
+    // zostaje ograniczony do +/- 45 cm od bieżącej pozycji, dopóki mediana go nie potwierdzi
+    let candidate = valCm;
+    if (this.initialized && this.currentFloat > 0) {
+      const jump = Math.abs(valCm - this.currentFloat);
+      if (jump > 60) {
+        candidate = valCm > this.currentFloat ? this.currentFloat + 45 : Math.max(10, this.currentFloat - 45);
+      }
+    }
+
+    // Stopień 2: Filtr medianowy (wymaga większości próbek w oknie)
+    const medianVal = this.median.push(candidate);
+
+    if (!this.initialized || this.currentFloat <= 0) {
+      this.currentFloat = medianVal;
+      this.currentInt = Math.round(medianVal);
+      this.initialized = true;
+      return this.currentInt;
+    }
+
+    // Stopień 3: 3-Strefowy adaptacyjny EMA
+    const delta = Math.abs(medianVal - this.currentFloat);
+    let effAlpha = this.baseAlpha;
+    if (delta <= 5.0) {
+      // Strefa spoczynku (oddychanie, mikroruchy, szum fazowy) — bardzo mocne tłumienie
+      effAlpha = Math.max(0.04, this.baseAlpha * 0.5);
+    } else if (delta <= 25.0) {
+      // Strefa zmiany pozycji w fotelu (płynne dociąganie)
+      effAlpha = this.baseAlpha;
     } else {
-      // Drobne fluktuacje oddechowe/pozycyjne — płynne wygładzenie
-      this.current = this.current + this.alpha * (valCm - this.current);
+      // Strefa wejścia/wyjścia z biurka — szybka konwergencja
+      effAlpha = Math.min(0.50, this.baseAlpha * 3.0);
     }
-    return Math.round(this.current);
+
+    this.currentFloat = this.currentFloat + effAlpha * (medianVal - this.currentFloat);
+
+    // Histereza / martwa strefa (tłumi szum fazowy i mikroruchy klatki piersiowej)
+    if (Math.abs(this.currentFloat - this.currentInt) >= this.deadbandCm) {
+      this.currentInt = Math.round(this.currentFloat);
+    }
+
+    return this.currentInt;
   }
 
   reset(): void {
-    this.current = 0;
+    this.currentFloat = 0;
+    this.currentInt = 0;
+    this.initialized = false;
+    this.median.reset();
+  }
+}
+
+export class IlluminanceFilter {
+  private currentFloat = 0;
+  private currentOutput = 0;
+  private alpha = 0.15;
+  private deadbandLux = 2.0;
+
+  constructor(alpha = 0.15, deadbandLux = 2.0) {
+    this.alpha = alpha;
+    this.deadbandLux = deadbandLux;
+  }
+
+  push(valLux: number): number {
+    if (valLux < 0 || valLux > 120000) return this.currentOutput;
+    if (this.currentFloat <= 0) {
+      this.currentFloat = valLux;
+      this.currentOutput = Math.round(valLux * 10) / 10;
+      return this.currentOutput;
+    }
+
+    const delta = Math.abs(valLux - this.currentFloat);
+    const effAlpha = delta > 40 ? 0.6 : this.alpha;
+    this.currentFloat = this.currentFloat + effAlpha * (valLux - this.currentFloat);
+
+    if (Math.abs(this.currentFloat - this.currentOutput) >= this.deadbandLux) {
+      this.currentOutput = Math.round(this.currentFloat * 10) / 10;
+    }
+
+    return this.currentOutput;
+  }
+
+  reset(): void {
+    this.currentFloat = 0;
+    this.currentOutput = 0;
   }
 }
 
@@ -117,7 +226,7 @@ export class PresenceDebounceFilter {
   }
 
   setHoldOffMs(ms: number): void {
-    this.holdOffMs = Math.max(500, ms);
+    this.holdOffMs = Math.max(800, ms);
   }
 
   process(rawPresent: boolean, onStateChange: (effective: boolean) => void): boolean {

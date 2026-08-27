@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { SerialPort } from 'serialport';
 import AutoTuner from './autoTuner';
-import { MedianFilter, ExponentialSmoothingFilter, PresenceDebounceFilter, DistanceFilter } from './signalFilter';
+import { MedianFilter, ExponentialSmoothingFilter, PresenceDebounceFilter, DistanceFilter, IlluminanceFilter } from './signalFilter';
 import { appendLog } from './logger';
 import type Config from './config';
 import type { DeskState, DetectedPerson, RadarTelemetry } from '../shared/types';
@@ -50,6 +50,7 @@ export default class RadarListener extends EventEmitter {
   state: DeskState | null = null;
   private deskTimer: NodeJS.Timeout | null = null;
   private awayTimer: NodeJS.Timeout | null = null;
+  private watchdogTimer: NodeJS.Timeout | null = null;
   private running = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   reconnectAttempts = 0;
@@ -58,15 +59,33 @@ export default class RadarListener extends EventEmitter {
   private lineBuffer = '';
   private rawBuffer: Buffer = Buffer.alloc(0);
 
+  // Znaczniki czasu dla niezależnego wygaszania telemetrycznego i watchdoga ciszy
+  private lastPresencePacketTime = 0;
+  private lastDistanceTime = 0;
+  private lastHeartRateTime = 0;
+  private lastBreathRateTime = 0;
+  private lastAnyPacketTime = 0;
+  private lastTargetCountTime = 0;
+
   // Cyfrowe filtry DSP dla całkowitej stabilizacji sygnału
   private distanceFilter = new DistanceFilter();
   private heartMedian = new MedianFilter(5);
-  private heartEMA = new ExponentialSmoothingFilter(0.2);
+  private heartEMA = new ExponentialSmoothingFilter(0.16, 2.0);
   private breathMedian = new MedianFilter(5);
-  private breathEMA = new ExponentialSmoothingFilter(0.2);
-  private presenceFilter = new PresenceDebounceFilter(2500);
+  private breathEMA = new ExponentialSmoothingFilter(0.16, 1.5);
+  private illuminanceFilter = new IlluminanceFilter(0.15, 2.0);
+  private presenceFilter = new PresenceDebounceFilter(2000);
   private outOfGateStreak = 0;
   private lastLoggedLux: number | null = null;
+
+// Wykrywanie niejednoznaczności celu: MR60BHA2 raportuje dystans/biometrię tylko
+// dla JEDNEGO (najsilniejszego) celu. Kot obok użytkownika może "podkraść" odczyt.
+// UWAGA: rozpiętość surowego dystansu NIE jest sygnałem kota — moduł naturalnie
+// oscyluje 57-80 cm przy ruszającym się człowieku. Polegamy wyłącznie na twardych
+// sygnałach: liczbie celów (>=2) i sygnaturze zwierzaka po ludzkim tętnie.
+private radarAmbiguous = false;
+  private ambigStreak = 0;
+  private lastHumanHrAt = 0;
 
   telemetry: RadarTelemetry;
 
@@ -77,6 +96,8 @@ export default class RadarListener extends EventEmitter {
     this.telemetry = {
       presence: false,
       distanceCm: 0,
+      distanceTrusted: true,
+      targetCount: undefined,
       heartRate: 0,
       breathRate: 0,
       illuminanceLux: undefined,
@@ -110,7 +131,79 @@ export default class RadarListener extends EventEmitter {
   async start(): Promise<void> {
     this.running = true;
     this.reconnectAttempts = 0;
+    this.startWatchdog();
     await this.openPort();
+  }
+
+  private startWatchdog(): void {
+    if (this.watchdogTimer) return;
+    this.watchdogTimer = setInterval(() => this.onWatchdogTick(), 1000);
+  }
+
+  private stopWatchdog(): void {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+  }
+
+  private onWatchdogTick(): void {
+    if (!this.running) return;
+    const now = Date.now();
+
+    // 1. Wygaszanie przedawnionej telemetrii biometrycznej (stale decay po 3.5s ciszy na danym sensorze)
+    let telemetryChanged = false;
+    if (this.telemetry.heartRate && this.lastHeartRateTime > 0 && now - this.lastHeartRateTime > 3500) {
+      this.telemetry.heartRate = 0;
+      this.heartMedian.reset();
+      this.heartEMA.reset();
+      telemetryChanged = true;
+    }
+    if (this.telemetry.breathRate && this.lastBreathRateTime > 0 && now - this.lastBreathRateTime > 3500) {
+      this.telemetry.breathRate = 0;
+      this.breathMedian.reset();
+      this.breathEMA.reset();
+      telemetryChanged = true;
+    }
+    if (this.telemetry.distanceCm && this.lastDistanceTime > 0 && now - this.lastDistanceTime > 3500) {
+      this.telemetry.distanceCm = 0;
+      this.telemetry.distanceTrusted = true;
+      this.distanceFilter.reset();
+      this.radarAmbiguous = false;
+      this.ambigStreak = 0;
+      telemetryChanged = true;
+    }
+    // Wygaszanie liczby celów — sensor przestał raportować point cloud
+    if (this.telemetry.targetCount !== undefined && this.lastTargetCountTime > 0 && now - this.lastTargetCountTime > 4000) {
+      this.telemetry.targetCount = undefined;
+      this.updateAmbiguity();
+      telemetryChanged = true;
+    }
+
+    if (telemetryChanged) {
+      this.evaluateBiometrics();
+      this.scheduleTelemetry();
+    }
+
+    // 2. Watchdog obecności: jeśli aplikacja uważa, że użytkownik jest przy biurku,
+    // ale od >4500 ms nie przyszedł ŻADEN odczyt obecności ani aktywny odczyt biometrii/dystansu
+    if (this.presence) {
+      const lastBioTime = Math.max(
+        this.lastPresencePacketTime,
+        this.lastDistanceTime,
+        this.lastHeartRateTime,
+        this.lastBreathRateTime
+      );
+      const silenceDuration = lastBioTime > 0 ? now - lastBioTime : (this.lastAnyPacketTime > 0 ? now - this.lastAnyPacketTime : 5000);
+
+      if (silenceDuration > 4500) {
+        appendLog(
+          'RADAR',
+          `Brak sygnału obecności/biometrii przez ${(silenceDuration / 1000).toFixed(1)}s — automatyczne wygaszenie obecności (watchdog)`
+        );
+        this.handleRawPresence(false);
+      }
+    }
   }
 
   private async releasePortLocks(portName: string): Promise<void> {
@@ -188,6 +281,7 @@ export default class RadarListener extends EventEmitter {
         } catch {}
         this.port = null;
         appendLog('RADAR', `Błąd portu ${portName}: ${err.message}`);
+        this.handleRawPresence(false);
         if (/access denied|locked|ebusy|in use|permission/i.test(err.message)) {
           await this.releasePortLocks(portName);
         }
@@ -199,10 +293,12 @@ export default class RadarListener extends EventEmitter {
           port.removeAllListeners();
         } catch {}
         this.port = null;
+        this.handleRawPresence(false);
         if (this.running) this.scheduleReconnect();
       });
     } catch (err: any) {
       appendLog('RADAR', `Błąd otwierania portu: ${err.message || err}`);
+      this.handleRawPresence(false);
       if (/access denied|locked|ebusy|in use|permission/i.test(String(err.message || err))) {
         await this.releasePortLocks(this.lastPortName || 'COM');
       }
@@ -228,6 +324,7 @@ export default class RadarListener extends EventEmitter {
 
   async stop(): Promise<void> {
     this.running = false;
+    this.stopWatchdog();
     if (this.deskTimer) clearTimeout(this.deskTimer);
     if (this.awayTimer) clearTimeout(this.awayTimer);
     if (this.reconnectTimer) {
@@ -245,6 +342,7 @@ export default class RadarListener extends EventEmitter {
         p.destroy();
       } catch {}
     }
+    this.handleRawPresence(false);
   }
 
   private async resolvePort(): Promise<string | null> {
@@ -279,6 +377,7 @@ export default class RadarListener extends EventEmitter {
   }
 
   private onData(chunk: Buffer): void {
+    this.lastAnyPacketTime = Date.now();
     if (this.listenerCount('raw') > 0) {
       this.emit('raw', chunk.toString('utf8'));
     }
@@ -308,7 +407,15 @@ export default class RadarListener extends EventEmitter {
       if (line.charCodeAt(0) === 123) {
         try {
           const json = JSON.parse(line) as Record<string, unknown>;
-          if (json.distance !== undefined) this.updateDistance(Number(json.distance));
+          if (json.distance !== undefined) {
+            const dist = Number(json.distance);
+            if (dist > 0) {
+              this.updateDistance(dist);
+            } else {
+              this.updateDistance(0);
+              this.handleRawPresence(false);
+            }
+          }
           if (
             json.heartRate !== undefined ||
             json.heart_rate !== undefined ||
@@ -350,8 +457,11 @@ export default class RadarListener extends EventEmitter {
       }
 
       // ESPHome log formats (np. 'Distance to detection object': Sending state 74.62000 cm...)
+      // ESPHome log formats (np. 'Distance to detection object': Sending state 74.62000 cm...)
       if (line.includes('state') || line.includes('[sensor') || line.includes('[binary_sensor')) {
-        const esphomeMatch = line.match(/'([^']+)':\s*(?:Sending state|Got state|state:?)\s*([^\s,;]+)/i);
+        // ESPHome log formats. Starsze firmware loguje 'X': Sending state 74.62 cm,
+        // nowsze (np. kit V4.3.1) 'X' >> 74.62 cm. Obsługujemy obie formy.
+        const esphomeMatch = line.match(/'([^']+)'\s*(?::\s*(?:Sending state|Got state|state:?)|\s*>>)\s*([^\s,;]+)/i);
         if (esphomeMatch) {
           const entity = esphomeMatch[1].toLowerCase();
           const stateVal = esphomeMatch[2].trim();
@@ -364,7 +474,8 @@ export default class RadarListener extends EventEmitter {
             }
           }
 
-          // Dystans
+          // Dystans: Pomiary > 0 aktualizują filtr i potwierdzają obecność.
+          // Zero/brak odczytu NIE gasi obecności (to tylko chwilowy brak locka fazy radaru).
           if (entity.includes('distance') || entity.includes('odległość') || entity.includes('dystans') || entity.includes('detection object')) {
             const val = parseFloat(stateVal);
             if (Number.isFinite(val) && val > 0) {
@@ -374,39 +485,52 @@ export default class RadarListener extends EventEmitter {
             }
           }
 
-          // Tętno
+          // Tętno: Pomiary w normie potwierdzają obecność.
           if (entity.includes('heart') || entity.includes('tętno') || entity.includes('bpm')) {
             const bpm = Math.round(parseFloat(stateVal));
             if (bpm >= 30 && bpm <= 240) {
               this.updateHeartRate(bpm);
               this.handleRawPresence(true);
+            } else if (bpm === 0) {
+              this.updateHeartRate(0);
             }
           }
 
-          // Oddech
+          // Oddech: Pomiary w normie potwierdzają obecność.
           if (entity.includes('breath') || entity.includes('oddech') || entity.includes('respiratory') || entity.includes('rpm')) {
             const rpm = Math.round(parseFloat(stateVal));
             if (rpm >= 2 && rpm <= 70) {
               this.updateBreathRate(rpm);
               this.handleRawPresence(true);
+            } else if (rpm === 0) {
+              this.updateBreathRate(0);
             }
           }
 
-          // Liczba wykrytych obiektów (Target Number)
+          // Liczba wykrytych obiektów (Target Number) — kluczowe dla odróżnienia
+          // kota od użytkownika: >=2 cele przy obecnym człowieku = niejednoznaczność.
+          // Liczba 0 przy bezruchu NIE gasi obecności.
           if (entity.includes('target number') || entity.includes('targets')) {
-            const count = parseFloat(stateVal);
-            if (Number.isFinite(count)) {
-              this.handleRawPresence(count > 0);
+            const count = Math.round(parseFloat(stateVal));
+            if (Number.isFinite(count) && count >= 0) {
+              this.telemetry.targetCount = Math.max(0, Math.min(5, count));
+              this.lastTargetCountTime = Date.now();
+              this.updateAmbiguity();
+              if (count > 0) {
+                this.handleRawPresence(true);
+              }
               continue;
             }
           }
 
           // Encje binarne obecności (Person Information, Has Target, Someone Present itp.)
+          // To jest NADRZĘDNE ŹRÓDŁO PRAWDY (Primary Hardware Authority) o obecności człowieka.
           if (
             entity.includes('person') ||
             entity.includes('presence') ||
             entity.includes('occupan') ||
             entity.includes('has target') ||
+            entity.includes('has_target') ||
             entity.includes('someone') ||
             entity.includes('target_info')
           ) {
@@ -414,7 +538,7 @@ export default class RadarListener extends EventEmitter {
             if (upperState === 'ON' || upperState === 'TRUE' || upperState === '1') {
               this.handleRawPresence(true);
               continue;
-            } else if (upperState === 'OFF' || upperState === 'FALSE' || upperState === '0') {
+            } else if (upperState === 'OFF' || upperState === 'FALSE' || upperState === '0' || upperState === 'CLEAR') {
               this.handleRawPresence(false);
               continue;
             }
@@ -430,31 +554,42 @@ export default class RadarListener extends EventEmitter {
           }
 
           // Fallback dla innych linii logów ESPHome
-          const distMatch = line.match(/(?:distance|odległość|Distance to detection object)[^:]*:\s*(?:(?:Got|Sending)\s+state\s+)?([0-9.]+)/i);
+          const distMatch = line.match(/(?:distance|odległość|Distance to detection object)[^:]*?(?::\s*(?:(?:Got|Sending)\s+state\s+)?|>>\s*)([0-9.]+)/i);
           if (distMatch) {
             const val = parseFloat(distMatch[1]);
             if (val > 0) {
               const distCm = val < 10 && !line.toLowerCase().includes('cm') ? Math.round(val * 100) : Math.round(val);
               this.updateDistance(distCm);
+              this.handleRawPresence(true);
             }
           }
-          const hrMatch = line.match(/(?:heart|tętno|Real-time heart rate|bpm)[^:]*:\s*(?:(?:Got|Sending)\s+state\s+)?([0-9.]+)/i);
+          const hrMatch = line.match(/(?:heart|tętno|Real-time heart rate|bpm)[^:]*?(?::\s*(?:(?:Got|Sending)\s+state\s+)?|>>\s*)([0-9.]+)/i);
           if (hrMatch) {
             const bpm = Math.round(parseFloat(hrMatch[1]));
-            if (bpm >= 30 && bpm <= 240) this.updateHeartRate(bpm);
+            if (bpm >= 30 && bpm <= 240) {
+              this.updateHeartRate(bpm);
+              this.handleRawPresence(true);
+            } else if (bpm === 0) {
+              this.updateHeartRate(0);
+            }
           }
-          const brMatch = line.match(/(?:breath|oddech|respiratory|Real-time respiratory rate|rpm)[^:]*:\s*(?:(?:Got|Sending)\s+state\s+)?([0-9.]+)/i);
+          const brMatch = line.match(/(?:breath|oddech|respiratory|Real-time respiratory rate|rpm)[^:]*?(?::\s*(?:(?:Got|Sending)\s+state\s+)?|>>\s*)([0-9.]+)/i);
           if (brMatch) {
             const rpm = Math.round(parseFloat(brMatch[1]));
-            if (rpm >= 2 && rpm <= 70) this.updateBreathRate(rpm);
+            if (rpm >= 2 && rpm <= 70) {
+              this.updateBreathRate(rpm);
+              this.handleRawPresence(true);
+            } else if (rpm === 0) {
+              this.updateBreathRate(0);
+            }
           }
-          const presenceMatch = line.match(/(?:person information|has target|has_target|target_info|presence|occupancy|target number)[^:]*:\s*(?:(?:Got|Sending)\s+state\s+)?(ON|OFF|true|false|[0-9.]+)/i);
+          const presenceMatch = line.match(/(?:person information|has target|has_target|target_info|presence|occupancy)[^:]*?(?::\s*(?:(?:Got|Sending)\s+state\s+)?|>>\s*)(ON|OFF|true|false|[0-9.]+)/i);
           if (presenceMatch) {
             const st = presenceMatch[1].toUpperCase();
-            if (st === 'ON' || st === 'TRUE' || parseFloat(st) > 0) {
+            if (st === 'ON' || st === 'TRUE' || (parseFloat(st) > 0 && !isNaN(parseFloat(st)))) {
               this.handleRawPresence(true);
               continue;
-            } else if (st === 'OFF' || st === 'FALSE' || parseFloat(st) === 0) {
+            } else if (st === 'OFF' || st === 'FALSE') {
               this.handleRawPresence(false);
               continue;
             }
@@ -469,24 +604,37 @@ export default class RadarListener extends EventEmitter {
         if (val > 0) {
           const distCm = val < 10 ? Math.round(val * 100) : Math.round(val);
           this.updateDistance(distCm);
+          this.handleRawPresence(true);
         }
       }
       const plainHrMatch = line.match(/^heart_rate:\s*([0-9.]+)/i);
       if (plainHrMatch) {
-        this.updateHeartRate(Math.round(parseFloat(plainHrMatch[1])));
+        const bpm = Math.round(parseFloat(plainHrMatch[1]));
+        if (bpm >= 30 && bpm <= 240) {
+          this.updateHeartRate(bpm);
+          this.handleRawPresence(true);
+        } else if (bpm === 0) {
+          this.updateHeartRate(0);
+        }
       }
       const plainBrMatch = line.match(/^breath_rate:\s*([0-9.]+)/i);
       if (plainBrMatch) {
-        this.updateBreathRate(Math.round(parseFloat(plainBrMatch[1])));
+        const rpm = Math.round(parseFloat(plainBrMatch[1]));
+        if (rpm >= 2 && rpm <= 70) {
+          this.updateBreathRate(rpm);
+          this.handleRawPresence(true);
+        } else if (rpm === 0) {
+          this.updateBreathRate(0);
+        }
       }
 
       if (/^(presence|someone|occupied|target:\s*1|desk)/i.test(line)) {
-        if (/0|false|nobody|away|empty/i.test(line)) {
+        if (/0|false|nobody|away|empty|clear/i.test(line)) {
           this.handleRawPresence(false);
         } else {
           this.handleRawPresence(true);
         }
-      } else if (/^(nobody|away|unoccupied|target:\s*0|empty)/i.test(line)) {
+      } else if (/^(nobody|away|unoccupied|target:\s*0|empty|clear)/i.test(line)) {
         this.handleRawPresence(false);
       }
     }
@@ -503,43 +651,93 @@ export default class RadarListener extends EventEmitter {
    *   [7]=cksum nagłówka (XOR b0..b6, inv) | [8..8+len)=payload | ostatni=cksum danych
    * Typy: 0x0A14 oddech, 0x0A15 tętno, 0x0A16 dystans, 0x0F09 obecność.
    */
+  /**
+   * Parser binarnego protokołu Seeed MR60BHA2 (zarówno surowe ramki fabryczne 0x53 0x59,
+   * jak i ramki ESPHome seeed_mr60bha2 0x01).
+   */
   private scanBinaryFrames(): void {
-    while (this.rawBuffer.length >= 8) {
-      if (this.rawBuffer[0] !== 0x01) {
-        const idx = this.rawBuffer.indexOf(0x01);
-        if (idx === -1) {
-          this.rawBuffer = Buffer.alloc(0);
+    while (this.rawBuffer.length >= 7) {
+      // Szukanie początku ramki (0x53 0x59 lub 0x01)
+      if (
+        this.rawBuffer[0] !== 0x01 &&
+        !(this.rawBuffer[0] === 0x53 && this.rawBuffer.length >= 2 && this.rawBuffer[1] === 0x59)
+      ) {
+        let nextIdx = -1;
+        for (let i = 1; i < this.rawBuffer.length; i++) {
+          if (
+            this.rawBuffer[i] === 0x01 ||
+            (this.rawBuffer[i] === 0x53 && i + 1 < this.rawBuffer.length && this.rawBuffer[i + 1] === 0x59)
+          ) {
+            nextIdx = i;
+            break;
+          }
+        }
+        if (nextIdx === -1) {
+          this.rawBuffer =
+            this.rawBuffer.length > 0 && this.rawBuffer[this.rawBuffer.length - 1] === 0x53
+              ? this.rawBuffer.subarray(this.rawBuffer.length - 1)
+              : Buffer.alloc(0);
           return;
         }
-        this.rawBuffer = this.rawBuffer.slice(idx);
+        this.rawBuffer = this.rawBuffer.subarray(nextIdx);
         continue;
       }
 
-      const len = (this.rawBuffer[3] << 8) | this.rawBuffer[4];
-      if (len > 64) {
-        this.rawBuffer = this.rawBuffer.slice(1);
-        continue;
-      }
-      const total = 8 + len + 1;
-      if (this.rawBuffer.length < total) return;
+      // 1. Obsługa fabrycznej ramki binarnej Seeed mmWave (0x53 0x59 ...)
+      if (this.rawBuffer[0] === 0x53 && this.rawBuffer.length >= 2 && this.rawBuffer[1] === 0x59) {
+        if (this.rawBuffer.length < 7) return;
+        const len = (this.rawBuffer[4] << 8) | this.rawBuffer[5];
+        if (len > 64) {
+          this.rawBuffer = this.rawBuffer.subarray(2);
+          continue;
+        }
+        const total = 6 + len + 1;
+        if (this.rawBuffer.length < total) return;
 
-      const frame = this.rawBuffer.subarray(0, total);
-      let hc = 0;
-      for (let i = 0; i < 7; i++) hc ^= frame[i];
-      if ((~hc & 0xff) !== frame[7]) {
-        this.rawBuffer = this.rawBuffer.slice(1);
-        continue;
-      }
-      let dc = 0;
-      for (let i = 8; i < 8 + len; i++) dc ^= frame[i];
-      if ((~dc & 0xff) !== frame[8 + len]) {
-        this.rawBuffer = this.rawBuffer.slice(1);
-        continue;
+        const frame = this.rawBuffer.subarray(0, total);
+        let sum = 0;
+        for (let i = 0; i < total - 1; i++) {
+          sum = (sum + frame[i]) & 0xff;
+        }
+        if (sum === frame[total - 1]) {
+          this.parseBinaryFrame(frame);
+          this.rawBuffer = this.rawBuffer.subarray(total);
+          continue;
+        } else {
+          this.rawBuffer = this.rawBuffer.subarray(2);
+          continue;
+        }
       }
 
-      const type = (frame[5] << 8) | frame[6];
-      this.dispatchRadarFrame(type, frame.subarray(8, 8 + len));
-      this.rawBuffer = this.rawBuffer.slice(total);
+      // 2. Obsługa ramki binarnej ESPHome (0x01 ...)
+      if (this.rawBuffer[0] === 0x01) {
+        if (this.rawBuffer.length < 8) return;
+        const len = (this.rawBuffer[3] << 8) | this.rawBuffer[4];
+        if (len > 64) {
+          this.rawBuffer = this.rawBuffer.subarray(1);
+          continue;
+        }
+        const total = 8 + len + 1;
+        if (this.rawBuffer.length < total) return;
+
+        const frame = this.rawBuffer.subarray(0, total);
+        let hc = 0;
+        for (let i = 0; i < 7; i++) hc ^= frame[i];
+        if ((~hc & 0xff) !== frame[7]) {
+          this.rawBuffer = this.rawBuffer.subarray(1);
+          continue;
+        }
+        let dc = 0;
+        for (let i = 8; i < 8 + len; i++) dc ^= frame[i];
+        if ((~dc & 0xff) !== frame[8 + len]) {
+          this.rawBuffer = this.rawBuffer.subarray(1);
+          continue;
+        }
+
+        const type = (frame[5] << 8) | frame[6];
+        this.dispatchRadarFrame(type, frame.subarray(8, 8 + len));
+        this.rawBuffer = this.rawBuffer.subarray(total);
+      }
     }
   }
 
@@ -547,6 +745,12 @@ export default class RadarListener extends EventEmitter {
   private payloadFloat(p: Buffer): number {
     if (p.length < 4) return NaN;
     return Buffer.from([p[3], p[2], p[1], p[0]]).readFloatLE(0);
+  }
+
+  /** U32 z payloadu — te same odwrócone bajty co float (do licznika celów / dop / cluster). */
+  private payloadU32(p: Buffer): number {
+    if (p.length < 4) return 0;
+    return Buffer.from([p[3], p[2], p[1], p[0]]).readUInt32LE(0);
   }
 
   private dispatchRadarFrame(type: number, p: Buffer): void {
@@ -562,19 +766,38 @@ export default class RadarListener extends EventEmitter {
       case 0x0a15: {
         const bpm = Math.round(this.payloadFloat(p));
         if (bpm >= 30 && bpm <= 240) this.updateHeartRate(bpm);
+        else if (bpm === 0) this.updateHeartRate(0);
         break;
       }
       case 0x0a14: {
         const rpm = Math.round(this.payloadFloat(p));
         if (rpm >= 5 && rpm <= 70) this.updateBreathRate(rpm);
+        else if (rpm === 0) this.updateBreathRate(0);
         break;
       }
       case 0x0a16: {
-        const f = this.payloadFloat(p);
-        if (Number.isFinite(f) && f > 0 && f <= 800) {
-          // Firmware potrafi raportować w metrach albo cm — heurystyka jak w ścieżce tekstowej
-          const cm = f < 10 ? Math.round(f * 100) : Math.round(f);
-          this.updateDistance(cm);
+        // Dystans: [u32 rangeFlag][f32 odległość] — float na offsecie 4.
+        // Wartość w cm (ESPHome loguje 74.62 cm bez konwersji); starsze firmware
+        // potrafi wysyłać metry — heurystyka jak w ścieżce tekstowej.
+        if (p.length >= 8 && p[0] !== 0) {
+          const f = this.payloadFloat(p.subarray(4));
+          if (Number.isFinite(f) && f > 0 && f <= 800) {
+            const cm = f < 10 ? Math.round(f * 100) : Math.round(f);
+            this.updateDistance(cm);
+            this.handleRawPresence(true);
+          }
+        }
+        break;
+      }
+      case 0x0a04:
+      case 0x0a08: {
+        // Point cloud / Target Info: [u32 liczba celów] + N × {x f32, y f32, dop i32, cluster i32}
+        if (p.length >= 4) {
+          const count = this.payloadU32(p.subarray(0, 4));
+          this.telemetry.targetCount = Math.max(0, Math.min(5, count));
+          this.lastTargetCountTime = Date.now();
+          this.updateAmbiguity();
+          this.scheduleTelemetry();
         }
         break;
       }
@@ -584,46 +807,139 @@ export default class RadarListener extends EventEmitter {
   }
 
   private parseBinaryFrame(buf: Buffer): void {
-    if (buf.length < 4 || buf[0] !== 0x53 || buf[1] !== 0x59) return;
+    if (buf.length < 6 || buf[0] !== 0x53 || buf[1] !== 0x59) return;
 
-    for (let i = 2; i < buf.length - 1; i++) {
-      if (buf[i] === 0x0a && buf[i + 1] === 0x16 && i + 3 < buf.length) {
-        const dist = (buf[i + 2] << 8) | buf[i + 3];
-        this.updateDistance(dist > 500 ? Math.round(dist / 10) : dist);
+    const control = buf[2];
+    const command = buf[3];
+    const len = (buf[4] << 8) | buf[5];
+    const payload = buf.subarray(6, 6 + len);
+
+    // 1. Obecność / Status obecności człowieka
+    if (
+      (control === 0x80 && command === 0x01) ||
+      (control === 0x0f && (command === 0x09 || command === 0x01)) ||
+      (control === 0x01 && command === 0x01)
+    ) {
+      if (payload.length >= 1) {
+        const val = payload[0];
+        this.handleRawPresence(val !== 0x00);
       }
-      if (buf[i] === 0x0a && buf[i + 1] === 0x15 && i + 2 < buf.length) {
-        const bpm = buf[i + 2];
-        if (bpm >= 30 && bpm <= 240) {
-          this.updateHeartRate(bpm);
-        }
-      }
-      if (buf[i] === 0x0a && buf[i + 1] === 0x14 && i + 2 < buf.length) {
-        const rpm = buf[i + 2];
-        if (rpm >= 5 && rpm <= 70) {
-          this.updateBreathRate(rpm);
-        }
-      }
-      if ((buf[i] === 0x80 || buf[i] === 0x01) && buf[i + 1] === 0x01 && i + 2 < buf.length) {
-        const val = buf[i + 2];
-        this.handleRawPresence(val === 0x01);
-        return;
-      }
-      if (buf[i] === 0x0f && buf[i + 1] === 0x09 && i + 2 < buf.length) {
-        const val = buf[i + 2];
-        this.handleRawPresence(val === 0x01);
-        return;
-      }
-      if (buf[i] === 0x80 && buf[i + 1] === 0x02 && i + 2 < buf.length) {
-        const val = buf[i + 2];
+      return;
+    }
+
+    // 2. Ruch / Aktywność (Motion)
+    if ((control === 0x80 && command === 0x02) || (control === 0x0f && command === 0x02)) {
+      if (payload.length >= 1) {
+        const val = payload[0];
         this.handleRawPresence(val === 0x01 || val === 0x02);
-        return;
       }
+      return;
+    }
+
+    // 3. Parametr ruchu ciała
+    if (control === 0x80 && command === 0x03) {
+      if (payload.length >= 1 && payload[0] > 0) {
+        this.handleRawPresence(true);
+      }
+      return;
+    }
+
+    // 4. Dystans (Distance)
+    if ((control === 0x0a && (command === 0x16 || command === 0x03)) || control === 0x84) {
+      if (payload.length >= 4) {
+        const f = this.payloadFloat(payload);
+        if (Number.isFinite(f) && f > 0 && f <= 800) {
+          const cm = f < 10 ? Math.round(f * 100) : Math.round(f);
+          this.updateDistance(cm);
+          this.handleRawPresence(true);
+        }
+      } else if (payload.length >= 2) {
+        const raw = (payload[0] << 8) | payload[1];
+        if (raw > 0) {
+          const dist = raw > 500 && raw < 10000 ? Math.round(raw / 10) : raw;
+          this.updateDistance(dist);
+          this.handleRawPresence(true);
+        }
+      }
+      return;
+    }
+
+    // 5. Tętno (Heart Rate)
+    if ((control === 0x0a && (command === 0x15 || command === 0x02)) || control === 0x85) {
+      const bpm = payload.length >= 4 ? Math.round(this.payloadFloat(payload)) : payload[0];
+      if (bpm >= 30 && bpm <= 240) {
+        this.updateHeartRate(bpm);
+        this.handleRawPresence(true);
+      } else if (bpm === 0) {
+        this.updateHeartRate(0);
+      }
+      return;
+    }
+
+    // 6. Oddech (Breath Rate)
+    if ((control === 0x0a && (command === 0x14 || command === 0x01)) || control === 0x86) {
+      const rpm = payload.length >= 4 ? Math.round(this.payloadFloat(payload)) : payload[0];
+      if (rpm >= 2 && rpm <= 70) {
+        this.updateBreathRate(rpm);
+        this.handleRawPresence(true);
+      } else if (rpm === 0) {
+        this.updateBreathRate(0);
+      }
+      return;
     }
   }
 
   private feedAutoTuner(sample: Sample): void {
+    // Niejednoznaczny cel (kot) — nie karmimy auto-tunera dystansem/biometrią
+    // należącymi do kota, bo zafałszowałyby wyuczoną strefę biurka.
+    if (this.radarAmbiguous) return;
     this.autoTuner.feedSample(sample);
     this.telemetry.autoTuning = this.autoTuner.getStatus();
+  }
+
+  /**
+   * Ocena wiarygodności celu: MR60BHA2 raportuje tylko JEDEN dystans (najsilniejszy
+   * cel). Kot w pobliżu biurka powoduje albo (a) przeskakiwanie celu — duża rozpiętość
+   * odczytów w oknie, albo (b) nagłe pojawienie się sygnatury zwierzaka po ludzkim
+   * tętnie. W obu przypadkach dystans NIE należy do użytkownika — oznaczamy go jako
+   * niewiarygodny i wstrzymujemy nadpisywanie obecności bramką/filtrem zwierzaka.
+   */
+  private updateAmbiguity(): void {
+    if (this.config.get('radarAmbiguityGuardEnabled') === false) {
+      this.ambigStreak = 0;
+      this.setAmbiguous(false);
+      return;
+    }
+
+    // Radar śledzi >=2 cele jednocześnie (kot + użytkownik): pojedynczy odczyt
+    // dystansu/biometrii NIE należy wiarygodnie do użytkownika.
+    const multiTarget = (this.telemetry.targetCount ?? 0) >= 2;
+
+    // Sygnatura zwierzaka tuż po ludzkim tętnie = radar przeskoczył z użytkownika na kota,
+    // a obecność człowieka (binarny sygnał) wciąż jest prawdziwa — nie wygaszaj obecności.
+    const petAfterHuman =
+      this.presence &&
+      this.telemetry.detectedPerson === 'pet' &&
+      this.lastHumanHrAt > 0 &&
+      Date.now() - this.lastHumanHrAt < 10000;
+
+    // Histereza na 3 kolejnych odczytach (stabilizacja sygnału).
+    this.ambigStreak = multiTarget || petAfterHuman ? Math.min(5, this.ambigStreak + 1) : Math.max(0, this.ambigStreak - 1);
+    this.setAmbiguous(this.ambigStreak >= 3);
+  }
+
+  private setAmbiguous(ambiguous: boolean): void {
+    if (this.radarAmbiguous === ambiguous) return;
+    this.radarAmbiguous = ambiguous;
+    this.telemetry.distanceTrusted = !ambiguous;
+    if (ambiguous) {
+      // Nie pozwól, by stary licznik "poza strefą" z okresu przed kotem
+      // natychmiast wygasił obecność po wyjściu z niejednoznaczności.
+      this.outOfGateStreak = 0;
+      appendLog('RADAR-AMBIG', 'Wykryto niejednoznaczność celu (kot?) — wstrzymano bramkę odległości i filtr zwierzaka');
+    } else {
+      appendLog('RADAR-AMBIG', 'Cel znów jednoznaczny — bramka odległości i filtr zwierzaka aktywne');
+    }
   }
 
   private lastTelemetryEmit = 0;
@@ -640,7 +956,7 @@ export default class RadarListener extends EventEmitter {
     const t = this.telemetry;
     const tun = t.autoTuning;
     const sig =
-      `${t.presence ? 1 : 0}|${t.distanceCm ?? 0}|${t.heartRate ?? 0}|${t.breathRate ?? 0}|${t.illuminanceLux ?? ''}|` +
+      `${t.presence ? 1 : 0}|${t.distanceCm ?? 0}|${t.distanceTrusted === false ? 0 : 1}|${t.targetCount ?? 0}|${t.heartRate ?? 0}|${t.breathRate ?? 0}|${t.illuminanceLux ?? ''}|` +
       `${t.detectedPerson ?? ''}|${tun?.mode ?? ''}|${Math.floor((tun?.samplesCount ?? 0) / 10)}|` +
       `${Math.round((tun?.noiseFloor ?? 0) / 5)}`;
     if (sig === this.lastTelemetrySig) return;
@@ -668,7 +984,7 @@ export default class RadarListener extends EventEmitter {
     const t = this.telemetry;
     const tun = t.autoTuning;
     return (
-      `${t.presence ? 1 : 0}|${t.distanceCm ?? 0}|${t.heartRate ?? 0}|${t.breathRate ?? 0}|${t.illuminanceLux ?? ''}|` +
+      `${t.presence ? 1 : 0}|${t.distanceCm ?? 0}|${t.distanceTrusted === false ? 0 : 1}|${t.targetCount ?? 0}|${t.heartRate ?? 0}|${t.breathRate ?? 0}|${t.illuminanceLux ?? ''}|` +
       `${t.detectedPerson ?? ''}|${tun?.mode ?? ''}|${Math.floor((tun?.samplesCount ?? 0) / 10)}|` +
       `${Math.round((tun?.noiseFloor ?? 0) / 5)}`
     );
@@ -679,27 +995,36 @@ export default class RadarListener extends EventEmitter {
     this.distanceFilter.setMode(mode);
     if (mode === 'ultra') {
       this.heartMedian.setSize(5);
-      this.heartEMA.setAlpha(0.16);
+      this.heartEMA.setAlpha(0.12);
+      this.heartEMA.setDeadband(2.0);
       this.breathMedian.setSize(5);
-      this.breathEMA.setAlpha(0.16);
-      this.presenceFilter.setHoldOffMs(1800);
+      this.breathEMA.setAlpha(0.12);
+      this.breathEMA.setDeadband(1.5);
+      this.presenceFilter.setHoldOffMs(2000);
     } else if (mode === 'balanced') {
       this.heartMedian.setSize(5);
-      this.heartEMA.setAlpha(0.25);
+      this.heartEMA.setAlpha(0.20);
+      this.heartEMA.setDeadband(1.5);
       this.breathMedian.setSize(5);
-      this.breathEMA.setAlpha(0.25);
-      this.presenceFilter.setHoldOffMs(1200);
+      this.breathEMA.setAlpha(0.20);
+      this.breathEMA.setDeadband(1.0);
+      this.presenceFilter.setHoldOffMs(1500);
     } else {
       this.heartMedian.setSize(3);
-      this.heartEMA.setAlpha(0.5);
+      this.heartEMA.setAlpha(0.6);
+      this.heartEMA.setDeadband(0);
       this.breathMedian.setSize(3);
-      this.breathEMA.setAlpha(0.5);
+      this.breathEMA.setAlpha(0.6);
+      this.breathEMA.setDeadband(0);
       this.presenceFilter.setHoldOffMs(600);
     }
   }
 
   private updateDistance(distCm: number): void {
-    if (distCm <= 0 || distCm > 800) return;
+    if (distCm <= 0 || distCm > 800) {
+      return;
+    }
+    this.lastDistanceTime = Date.now();
     this.applySmoothingConfig();
 
     const smoothedCm = this.distanceFilter.push(distCm);
@@ -707,7 +1032,10 @@ export default class RadarListener extends EventEmitter {
     this.telemetry.distanceCm = smoothedCm;
     this.telemetry.lastUpdate = Date.now();
 
-    appendLog('RADAR-DSP', `Dystans: ${smoothedCm} cm (surowy: ${distCm} cm)`);
+    appendLog(
+      'RADAR-DSP',
+      `Dystans: ${smoothedCm} cm (surowy: ${distCm} cm)${this.radarAmbiguous ? ' — CEL NIEPEWNY (kot?)' : ''}`
+    );
 
     this.feedAutoTuner({
       distanceCm: smoothedCm,
@@ -722,8 +1050,23 @@ export default class RadarListener extends EventEmitter {
   }
 
   private updateHeartRate(bpm: number): void {
-    if (bpm < 30 || bpm > 240) return;
+    if (bpm < 30 || bpm > 240) {
+      if (bpm === 0) {
+        this.telemetry.heartRate = 0;
+        this.heartMedian.reset();
+        this.heartEMA.reset();
+      }
+      return;
+    }
+    this.lastHeartRateTime = Date.now();
     this.applySmoothingConfig();
+
+    // Pamiętamy, że radar mierzył tętno typowe dla człowieka. Gdy później nagle
+    // pojawia się sygnatura zwierzaka przy OBECNEJ obecności — radar przeskoczył
+    // na kota, a nie że człowiek wyszedł (patrz updateAmbiguity).
+    if (bpm >= 45 && bpm <= 110) {
+      this.lastHumanHrAt = Date.now();
+    }
 
     const medianBpm = this.heartMedian.push(bpm);
     const smoothedBpm = this.heartEMA.push(medianBpm);
@@ -746,7 +1089,15 @@ export default class RadarListener extends EventEmitter {
   }
 
   private updateBreathRate(rpm: number): void {
-    if (rpm < 2 || rpm > 70) return;
+    if (rpm < 2 || rpm > 70) {
+      if (rpm === 0) {
+        this.telemetry.breathRate = 0;
+        this.breathMedian.reset();
+        this.breathEMA.reset();
+      }
+      return;
+    }
+    this.lastBreathRateTime = Date.now();
     this.applySmoothingConfig();
 
     const medianRpm = this.breathMedian.push(rpm);
@@ -771,12 +1122,11 @@ export default class RadarListener extends EventEmitter {
 
   private updateIlluminance(lux: number): void {
     if (lux < 0 || lux > 120000) return;
-    const rounded = Math.round(lux * 10) / 10;
-    this.telemetry.illuminanceLux = rounded;
-    this.telemetry.lastUpdate = Date.now();
-    if (this.lastLoggedLux === null || Math.abs(rounded - this.lastLoggedLux) >= 0.2) {
-      this.lastLoggedLux = rounded;
-      appendLog('RADAR-DSP', `Światło: ${rounded} lx`);
+    const smoothed = this.illuminanceFilter.push(lux);
+    this.telemetry.illuminanceLux = smoothed;
+    if (this.lastLoggedLux === null || Math.abs(smoothed - this.lastLoggedLux) >= 2.0) {
+      this.lastLoggedLux = smoothed;
+      appendLog('RADAR-DSP', `Światło: ${smoothed} lx`);
     }
     this.scheduleTelemetry();
   }
@@ -801,11 +1151,13 @@ export default class RadarListener extends EventEmitter {
     const petConfirmed = this.petStreak >= 4;
     if (petConfirmed) {
       this.telemetry.detectedPerson = 'pet';
+      this.updateAmbiguity();
       return;
     }
 
     if (!this.config.get('biometricsEnabled')) {
-      this.telemetry.detectedPerson = dist > 0 ? 'me' : 'unknown';
+      this.telemetry.detectedPerson = dist > 0 || this.presence ? 'me' : 'unknown';
+      this.updateAmbiguity();
       return;
     }
 
@@ -826,12 +1178,12 @@ export default class RadarListener extends EventEmitter {
     const distMin =
       autoTuningOn && dynamicGate.isCalibrated
         ? dynamicGate.minGateCm
-        : (this.config.get('userSeatingDistanceMin') ?? 50);
+        : (this.config.get('userSeatingDistanceMin') ?? 45);
 
     const distMax =
       autoTuningOn && dynamicGate.isCalibrated
         ? dynamicGate.maxGateCm
-        : (this.config.get('userSeatingDistanceMax') ?? 95);
+        : (this.config.get('userSeatingDistanceMax') ?? 115);
 
     let matches = true;
 
@@ -843,61 +1195,55 @@ export default class RadarListener extends EventEmitter {
     }
 
     this.telemetry.detectedPerson = matches ? 'me' : 'other';
+    this.updateAmbiguity();
   }
 
   private handleRawPresence(rawPresent: boolean): void {
+    this.lastPresencePacketTime = Date.now();
     this.applySmoothingConfig();
 
-    const curDist = this.telemetry.distanceCm || 0;
-    // Micro-Presence: podtrzymuje obecność przy mikro-zanikach pakietów TYLKO gdy
-    // tętno człowieka jest aktywne ORAZ dystans znajduje się w aktywnej strefie biurka.
-    const hasActiveBiometrics =
-      Boolean(this.telemetry.heartRate && this.telemetry.heartRate >= 35) &&
-      curDist > 0 &&
-      Date.now() - (this.telemetry.lastUpdate || 0) < 2000;
-
-    const effectiveRaw = rawPresent || (this.presence && hasActiveBiometrics);
-
-    this.presenceFilter.process(effectiveRaw, (stablePresence) => {
+    this.presenceFilter.process(rawPresent, (stablePresence) => {
       let effectivePresence = stablePresence;
+      const curDist = this.telemetry.distanceCm || 0;
 
-      if (effectivePresence && this.config.get('petFilterEnabled') !== false) {
-        if (this.telemetry.detectedPerson === 'pet') {
+      if (effectivePresence && this.radarAmbiguous) {
+        // Radar nie potrafi rozstrzygnąć, który cel to użytkownik (kot + człowiek).
+        // Jedynym wiarygodnym sygnałem jest binarne wykrycie CZŁOWIEKA — nie
+        // nadpisujemy obecności bramką odległości ani filtrem zwierzaka.
+        appendLog(
+          'RADAR',
+          'Cel niejednoznaczny (kot?) — utrzymuję obecność z sygnału obecności człowieka'
+        );
+      } else if (effectivePresence) {
+        if (this.config.get('petFilterEnabled') !== false && this.telemetry.detectedPerson === 'pet') {
           effectivePresence = false;
         }
-      }
 
-      if (effectivePresence && this.config.get('radarDistanceGateEnabled')) {
-        const autoTuningOn = this.config.get('radarAutoTuningEnabled') !== false;
-        const dynamicGate = this.autoTuner.getDynamicGate();
+        if (this.config.get('radarDistanceGateEnabled')) {
+          const autoTuningOn = this.config.get('radarAutoTuningEnabled') !== false;
+          const dynamicGate = this.autoTuner.getDynamicGate();
 
-        const minGate =
-          autoTuningOn && dynamicGate.isCalibrated
-            ? dynamicGate.minGateCm
-            : Number(this.config.get('radarMinDistanceCm') ?? 40);
+          const minGate =
+            autoTuningOn && dynamicGate.isCalibrated
+              ? dynamicGate.minGateCm
+              : Number(this.config.get('radarMinDistanceCm') ?? 40);
 
-        const maxGate =
-          autoTuningOn && dynamicGate.isCalibrated
-            ? dynamicGate.maxGateCm
-            : Number(this.config.get('radarMaxDistanceCm') ?? 110);
+          const maxGate =
+            autoTuningOn && dynamicGate.isCalibrated
+              ? dynamicGate.maxGateCm
+              : Number(this.config.get('radarMaxDistanceCm') ?? 115);
 
-        // Histereza korytarza: margines tolerancji 6 cm i wymóg min. 3 kolejnych odczytów poza strefą
-        if (curDist > 0 && (curDist < minGate - 6 || curDist > maxGate + 6)) {
-          this.outOfGateStreak++;
-          if (this.outOfGateStreak >= 3) {
-            effectivePresence = false;
+          // Histereza korytarza: margines tolerancji 8 cm i wymóg min. 6 kolejnych odczytów poza strefą
+          if (curDist > 0 && (curDist < minGate - 8 || curDist > maxGate + 8)) {
+            this.outOfGateStreak++;
+            if (this.outOfGateStreak >= 6) {
+              effectivePresence = false;
+            }
+          } else {
+            this.outOfGateStreak = 0;
           }
         } else {
           this.outOfGateStreak = 0;
-        }
-      } else {
-        this.outOfGateStreak = 0;
-      }
-
-      if (effectivePresence && this.config.get('biometricsEnabled')) {
-        const action = this.config.get('personMismatchAction') || 'ignore';
-        if (this.telemetry.detectedPerson === 'other' && action === 'ignore') {
-          effectivePresence = false;
         }
       }
 
@@ -905,7 +1251,14 @@ export default class RadarListener extends EventEmitter {
         this.telemetry.heartRate = 0;
         this.telemetry.breathRate = 0;
         this.telemetry.distanceCm = 0;
+        this.telemetry.distanceTrusted = true;
+        this.telemetry.targetCount = undefined;
         this.telemetry.detectedPerson = 'unknown';
+        this.petStreak = 0;
+        this.outOfGateStreak = 0;
+        this.radarAmbiguous = false;
+        this.ambigStreak = 0;
+        this.lastHumanHrAt = 0;
         this.heartMedian.reset();
         this.heartEMA.reset();
         this.breathMedian.reset();
@@ -938,14 +1291,28 @@ export default class RadarListener extends EventEmitter {
     breathRate?: number;
     source?: string;
   }): void {
-    if (typeof data.distanceCm === 'number' && Number.isFinite(data.distanceCm) && data.distanceCm > 0) {
-      this.updateDistance(data.distanceCm);
+    this.lastAnyPacketTime = Date.now();
+    if (typeof data.distanceCm === 'number' && Number.isFinite(data.distanceCm)) {
+      if (data.distanceCm > 0) {
+        this.updateDistance(data.distanceCm);
+      } else {
+        this.updateDistance(0);
+        this.handleRawPresence(false);
+      }
     }
-    if (typeof data.heartRate === 'number' && Number.isFinite(data.heartRate) && data.heartRate > 0) {
-      this.updateHeartRate(data.heartRate);
+    if (typeof data.heartRate === 'number' && Number.isFinite(data.heartRate)) {
+      if (data.heartRate > 0) {
+        this.updateHeartRate(data.heartRate);
+      } else {
+        this.updateHeartRate(0);
+      }
     }
-    if (typeof data.breathRate === 'number' && Number.isFinite(data.breathRate) && data.breathRate > 0) {
-      this.updateBreathRate(data.breathRate);
+    if (typeof data.breathRate === 'number' && Number.isFinite(data.breathRate)) {
+      if (data.breathRate > 0) {
+        this.updateBreathRate(data.breathRate);
+      } else {
+        this.updateBreathRate(0);
+      }
     }
     if (typeof data.presence === 'boolean') {
       this.handleRawPresence(data.presence);

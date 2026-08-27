@@ -394,6 +394,8 @@ class LiveAudioEngine {
 
 type TabType = 'home' | 'settings' | 'logs' | 'about';
 
+type SettingsTab = 'port' | 'timeouts' | 'biometrics' | 'discord' | 'signalrgb' | 'chime' | 'haos';
+
 class AppUI {
   private root: HTMLElement;
   private snap: Snapshot | null = null;
@@ -419,8 +421,10 @@ class AppUI {
   // Navigation tab
   private currentTab: TabType = 'home';
 
-  // QoL: Ergonomics Session Timer & Auto-Switch Snooze
-  private sessionSeconds = 0;
+  // Podsekcja ustawień (lewy panel nawigacji ustawień)
+  private settingsTab: SettingsTab = 'port';
+
+  // QoL: Auto-Switch Snooze
   private snoozeUntil: number | null = null;
   private selectedChimeStyle: ChimeStyle = 'harmonic';
 
@@ -451,6 +455,8 @@ class AppUI {
   // Telemetria biometryczna na żywo
   private telemetry: RadarTelemetry = {
     distanceCm: 0,
+    distanceTrusted: true,
+    targetCount: undefined,
     heartRate: 0,
     breathRate: 0,
     illuminanceLux: undefined,
@@ -551,19 +557,8 @@ class AppUI {
       this.vuEngine.stop();
     });
 
-    // Session health ticker (every 1s)
+    // Snooze timer tick
     setInterval(() => {
-      if (this.snap?.state === 'desk') {
-        this.sessionSeconds++;
-        this.updateSessionHUD();
-      } else if (this.sessionSeconds > 0) {
-        if (this.sessionSeconds > 120) {
-          this.sessionSeconds = 0;
-          this.updateSessionHUD();
-        }
-      }
-
-      // Snooze timer tick
       if (this.snoozeUntil && Date.now() > this.snoozeUntil) {
         this.snoozeUntil = null;
         this.pushToast('Pauza automatyki zakończona — wznowiono auto-switching ✓');
@@ -751,15 +746,6 @@ class AppUI {
     }
   }
 
-  private updateSessionHUD() {
-    const el = document.getElementById('fc-header-health-timer');
-    if (!el) return;
-    const mins = Math.floor(this.sessionSeconds / 60);
-    const isLong = mins >= 60;
-    el.className = `fc-health-timer ${isLong ? 'warn' : ''}`;
-    el.innerHTML = isLong ? `⚠️ W fotelu: ${mins} min (Zrób przerwę!)` : `🪑 W fotelu: ${mins} min`;
-  }
-
   private updateHeaderAndLiveDOM() {
     if (!this.snap) return;
     const radar = this.snap.radar;
@@ -790,7 +776,6 @@ class AppUI {
     }
 
     this.updateTelemetryDOM();
-    this.updateSessionHUD();
   }
 
   private updateTelemetryDOM() {
@@ -802,7 +787,10 @@ class AppUI {
 
     if (elDist) {
       if (this.telemetry.distanceCm && this.telemetry.distanceCm > 0) {
-        elDist.textContent = `${this.telemetry.distanceCm} cm`;
+        elDist.textContent =
+          this.telemetry.distanceTrusted === false
+            ? `${this.telemetry.distanceCm} cm (niepewny)`
+            : `${this.telemetry.distanceCm} cm`;
       } else if (this.telemetry.presence === false) {
         elDist.textContent = '— (Brak celu)';
       } else {
@@ -859,6 +847,8 @@ class AppUI {
     const userBadge = document.getElementById('scope-user-badge');
     const userLine = document.getElementById('scope-user-line');
     const liveStatusText = document.getElementById('scope-live-status-text');
+    const minHandle = document.getElementById('scope-handle-min');
+    const maxHandle = document.getElementById('scope-handle-max');
 
     if (deadZone) deadZone.style.width = `${deadPct}%`;
     if (activeZone) {
@@ -870,6 +860,8 @@ class AppUI {
       cutoffZone.style.left = `${cutoffLeftPct}%`;
       cutoffZone.style.width = `${Math.max(0, 100 - cutoffLeftPct)}%`;
     }
+    if (minHandle) minHandle.style.left = `${deadPct}%`;
+    if (maxHandle) maxHandle.style.left = `${cutoffLeftPct}%`;
 
     if (userPin && userBadge && userLine) {
       const curDist = this.telemetry.distanceCm;
@@ -881,14 +873,22 @@ class AppUI {
         userPin.style.left = `${userPct}%`;
 
         userBadge.className = `fc-scope-user-badge ${isInside ? '' : 'outside'}`;
-        userBadge.innerHTML = isInside ? `● Ty: ${curDist} cm ✓` : `⚠️ ${curDist} cm (Poza strefą)`;
+        userBadge.innerHTML =
+          this.telemetry.distanceTrusted === false
+            ? `⚠️ Cel niepewny: ${curDist} cm (kot?)`
+            : isInside
+              ? `● Ty: ${curDist} cm ✓`
+              : `⚠️ ${curDist} cm (Poza strefą)`;
 
         userLine.className = `fc-scope-user-line ${isInside ? '' : 'outside'}`;
 
         if (liveStatusText) {
-          liveStatusText.innerHTML = isInside
-            ? `<strong style="color: var(--fc-accent-green)">● Obecność: ${curDist} cm</strong> <span style="color: var(--fc-text-secondary)">(W aktywnej strefie fotela ✓)</span>`
-            : `<strong style="color: #f59e0b">⚠️ Wykryto poza strefą: ${curDist} cm</strong> <span style="color: var(--fc-text-muted)">(Ignorowane tło)</span>`;
+          liveStatusText.innerHTML =
+            this.telemetry.distanceTrusted === false
+              ? `<strong style="color: #f59e0b">⚠️ Cel niejednoznaczny: ${curDist} cm</strong> <span style="color: var(--fc-text-muted)">(kot? — bramka wstrzymana)</span>`
+              : isInside
+                ? `<strong style="color: var(--fc-accent-green)">● Obecność: ${curDist} cm</strong> <span style="color: var(--fc-text-secondary)">(W aktywnej strefie fotela ✓)</span>`
+                : `<strong style="color: #f59e0b">⚠️ Wykryto poza strefą: ${curDist} cm</strong> <span style="color: var(--fc-text-muted)">(Ignorowane tło)</span>`;
         }
       } else {
         userPin.style.display = 'none';
@@ -1415,11 +1415,6 @@ class AppUI {
           </div>
 
           <div class="top-tools">
-            <!-- QoL: Ergonomics Session Timer -->
-            <span class="fc-health-timer" id="fc-header-health-timer" title="Czas ciągłej obecności w fotelu (Wygoda & Zdrowie)">
-              🪑 W fotelu: ${Math.floor(this.sessionSeconds / 60)} min
-            </span>
-
             <!-- QoL: Snooze Pill -->
             ${isSnoozed ? `
               <button class="fc-snooze-pill" id="btn-cancel-snooze" title="Kliknij, aby wznowić automatyczne przełączanie">
@@ -1468,6 +1463,11 @@ class AppUI {
               <span>Pulpit</span>
             </button>
 
+            <button class="fc-nav-item ${this.currentTab === 'settings' ? 'active' : ''}" data-tab="settings" role="tab" aria-selected="${this.currentTab === 'settings'}" title="Ustawienia: port COM, czasy reakcji, biometria i integracje">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              <span>Ustawienia</span>
+            </button>
+
             <button class="fc-nav-item ${this.currentTab === 'logs' ? 'active' : ''}" data-tab="logs" role="tab" aria-selected="${this.currentTab === 'logs'}" title="Logi & Narzędzia USB">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
               <span>Logi</span>
@@ -1490,6 +1490,7 @@ class AppUI {
               </div>` : ''}
 
             ${this.currentTab === 'home' ? this.renderHomeTab() : ''}
+            ${this.currentTab === 'settings' ? this.renderSettingsTab() : ''}
             ${this.currentTab === 'logs' ? this.renderLogsTab() : ''}
             ${this.currentTab === 'about' ? this.renderAboutTab() : ''}
           </main>
@@ -1534,8 +1535,6 @@ class AppUI {
     const snap = this.snap;
     const deskVol = this.initVolumePercent(form.micDeskName, form.micDeskVolume);
     const headVol = this.initVolumePercent(form.micHeadsetName, form.micHeadsetVolume);
-    const person = this.telemetry.detectedPerson || 'unknown';
-    const chimeVol = Math.round((form.audioChimeVolume ?? 0.2) * 100);
 
     const defaultMic = this.audioDevices.find((d) => d.isDefault)?.name;
     const isDeskActive = snap.state === 'desk' || (!snap.state && defaultMic && form.micDeskName && defaultMic.toLowerCase().includes(form.micDeskName.toLowerCase()));
@@ -1860,7 +1859,7 @@ class AppUI {
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--fc-accent-green)" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 4.24 4.24"/><path d="m14.83 9.17 4.24-4.24"/><path d="M12 2v6"/><path d="M12 18v4"/><path d="M4.93 19.07l4.24-4.24"/></svg>
                 Radar mmWave 60 GHz & Wizualny Korytarz Zasięgu
               </span>
-              <span class="fc-info-badge" title="Pełny radar Seeed MR60BHA2 — regulacja granic fotela, odcinanie tła oraz czasy reakcji">?</span>
+              <span class="fc-info-badge" title="Wizualizacja strefy fotela na żywo — przeciągnij uchwyty, aby zmienić granice; pozostałe ustawienia radaru znajdziesz w zakładce Ustawienia">?</span>
             </div>
             <div class="fc-section-actions">
               <button class="btn btn-ghost btn-sm" id="btn-home-open-wizard" style="font-size: 11px; padding: 4px 9px">✨ Kreator Kalibracji</button>
@@ -1899,6 +1898,8 @@ class AppUI {
                 <div class="fc-scope-cutoff-zone" id="scope-cutoff-zone" style="left: ${(maxGate / 200) * 100}%; width: ${Math.max(0, 100 - (maxGate / 200) * 100)}%">
                   <span>Ignorowane tło</span>
                 </div>
+                <div class="fc-scope-handle min" id="scope-handle-min" style="left: ${(minGate / 200) * 100}%" title="Przeciągnij, aby ustawić początek strefy fotela"></div>
+                <div class="fc-scope-handle max" id="scope-handle-max" style="left: ${(maxGate / 200) * 100}%" title="Przeciągnij, aby ustawić koniec strefy fotela"></div>
               </div>
 
               <div class="fc-scope-user-pin" id="scope-user-pin" style="left: ${curDist ? (curDist / 200) * 100 : 0}%; display: ${curDist && curDist > 0 ? 'flex' : 'none'}">
@@ -1917,436 +1918,442 @@ class AppUI {
               </div>
             </div>
 
-            <!-- Quick Presets -->
-            <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--fc-card-border); padding-top: 8px">
-              <span style="font-size: 11px; color: var(--fc-text-secondary)">Gotowe presety fotela:</span>
-              <div class="fc-scope-presets">
-                <button class="fc-preset-pill" id="preset-gate-close">🪑 Bliski (35–90 cm)</button>
-                <button class="fc-preset-pill" id="preset-gate-std">🛋️ Standard (40–110 cm)</button>
-                <button class="fc-preset-pill" id="preset-gate-deep">🎮 Głęboki (50–140 cm)</button>
-                <button class="fc-preset-pill" id="preset-gate-fit" style="color: var(--fc-accent-green); border-color: rgba(114, 227, 57, 0.4)">🎯 Dopasuj do mnie</button>
-              </div>
-            </div>
-
-            <!-- Dual Range Inputs directly under the Scope -->
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px">
-              <div style="background: var(--fc-bg-darker); padding: 8px 10px; border-radius: var(--fc-radius-sm); border: 1px solid var(--fc-card-border)">
-                <div class="fc-micro-label">
-                  <span>Początek strefy fotela (Min):</span>
-                  <strong style="color: #fff" id="lbl-gate-min">${minGate} cm</strong>
-                </div>
-                <div style="display: flex; gap: 8px; align-items: center; margin-top: 4px">
-                  <input type="range" class="fc-slider" id="rng-scope-gate-min" min="15" max="140" step="5" value="${minGate}" />
-                  <input type="number" class="fc-input" id="inp-gate-min" value="${minGate}" style="width: 62px; height: 26px; font-size: 11px" min="10" max="200" />
-                </div>
-              </div>
-
-              <div style="background: var(--fc-bg-darker); padding: 8px 10px; border-radius: var(--fc-radius-sm); border: 1px solid var(--fc-card-border)">
-                <div class="fc-micro-label">
-                  <span>Koniec strefy fotela (Max / Odcięcie):</span>
-                  <strong style="color: #fff" id="lbl-gate-max">${maxGate} cm</strong>
-                </div>
-                <div style="display: flex; gap: 8px; align-items: center; margin-top: 4px">
-                  <input type="range" class="fc-slider" id="rng-scope-gate-max" min="40" max="200" step="5" value="${maxGate}" />
-                  <input type="number" class="fc-input" id="inp-gate-max" value="${maxGate}" style="width: 62px; height: 26px; font-size: 11px" min="30" max="250" />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Radar Subgrid: Connection, Sensitivity & Timeouts -->
-          <div class="fc-card-grid" style="margin-top: 10px">
-            <!-- Card: Port COM & Czułość Radaru -->
-            <div class="fc-card">
-              <div class="fc-card-header">
-                <div class="fc-card-title-group">
-                  <span class="fc-card-icon green">🔌</span>
-                  <span class="fc-card-title">Port USB COM & Czułość Wiązki</span>
-                </div>
-                <button class="btn btn-ghost btn-sm" id="fc-btn-refresh-ports" style="font-size: 10px; padding: 2px 6px">Odśwież</button>
-              </div>
-
-              <div class="fc-card-body">
-                <select class="fc-select" id="sel-port">
-                  <option value="auto" ${form.port === 'auto' ? 'selected' : ''}>auto (automatyczne wykrycie XIAO ESP32-C6)</option>
-                  ${this.ports.map((p) => `<option value="${esc(p.path)}" ${p.path === form.port ? 'selected' : ''}>${esc(p.path)}${p.manufacturer ? ` · ${esc(p.manufacturer)}` : ''}</option>`).join('')}
-                </select>
-
-                <div class="fc-slider-row" style="margin-top: 4px">
-                  <span style="font-size: 10.5px; color: var(--fc-text-secondary)">Czułość wiązki:</span>
-                  <input type="range" class="fc-slider" id="rng-radar-sens" min="20" max="100" step="5" value="${form.radarSensitivity ?? 80}" />
-                  <span style="font-size: 11px; font-weight: 600; color: #fff; width: 34px; text-align: right" id="val-radar-sens">${form.radarSensitivity ?? 80}%</span>
-                </div>
-              </div>
-
-              <div class="fc-card-footer">
-                <div>
-                  <div class="fc-metric-large" id="card-val-distance">${this.telemetry.distanceCm ? `${this.telemetry.distanceCm} cm` : '—'}</div>
-                  <div class="fc-metric-sub">Dystans klatki piersiowej</div>
-                </div>
-                <span class="fc-badge ${snap.radar.connected ? 'calibrated' : (snap.ha?.connected ? 'calibrated' : 'muted')}">${snap.radar.connected ? 'USB Serial ✓' : (snap.ha?.connected ? 'HAOS Stream ✓' : 'Brak COM')}</span>
-              </div>
-            </div>
-
-            <!-- Card: Czasy Reakcji & Histereza (Timeouts) -->
-            <div class="fc-card">
-              <div class="fc-card-header">
-                <div class="fc-card-title-group">
-                  <span class="fc-card-icon amber">⏱️</span>
-                  <span class="fc-card-title">Czasy Reakcji (Timeouts)</span>
-                </div>
-                <span class="fc-badge success">Aktywny</span>
-              </div>
-
-              <div class="fc-card-body">
-                <div style="display: flex; justify-content: space-between; align-items: center">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Opóźnienie odejścia (Away):</span>
-                  <div style="display: flex; gap: 4px; align-items: center">
-                    <input type="number" class="fc-input" id="inp-timeout-away" value="${form.timeoutAwayMs ?? 3000}" style="width: 80px; height: 26px; font-size: 11px" min="200" max="60000" step="100" />
-                    <span style="font-size: 10.5px; color: var(--fc-text-muted)">ms</span>
-                  </div>
-                </div>
-
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Opóźnienie powrotu (Desk):</span>
-                  <div style="display: flex; gap: 4px; align-items: center">
-                    <input type="number" class="fc-input" id="inp-timeout-desk" value="${form.timeoutDeskMs ?? 800}" style="width: 80px; height: 26px; font-size: 11px" min="100" max="10000" step="100" />
-                    <span style="font-size: 10.5px; color: var(--fc-text-muted)">ms</span>
-                  </div>
-                </div>
-
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Filtr szumów & DSP:</span>
-                  <select class="fc-select fc-select-sm" id="sel-radar-smoothing" style="width: 140px">
-                    <option value="ultra" ${(form.radarSmoothingMode || 'ultra') === 'ultra' ? 'selected' : ''}>Ultra-Stabilny 🛡️</option>
-                    <option value="balanced" ${form.radarSmoothingMode === 'balanced' ? 'selected' : ''}>Zbalansowany</option>
-                    <option value="raw" ${form.radarSmoothingMode === 'raw' ? 'selected' : ''}>Szybki / Surowy</option>
-                  </select>
-                </div>
-              </div>
-
-              <div class="fc-card-footer">
-                <div>
-                  <div class="fc-metric-large">${Math.floor(this.sessionSeconds / 60)} min</div>
-                  <div class="fc-metric-sub">Bieżąca sesja w fotelu</div>
-                </div>
-                <span class="fc-badge calibrated">Histereza OK ✓</span>
-              </div>
+            <!-- Interaktywna regulacja strefy fotela (drag handles) -->
+            <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--fc-card-border); padding-top: 8px; margin-top: 4px">
+              <span style="font-size: 11px; color: var(--fc-text-secondary)">Przeciągnij uchwyty na grafice, aby dopasować strefę fotela (zakres: ${minGate}–${maxGate} cm)</span>
+              <button class="btn btn-ghost btn-sm" id="btn-scope-reset-gate" style="font-size: 10.5px; padding: 3px 8px" title="Przywróć domyślną strefę fotela 40–110 cm">↺ Reset (40–110 cm)</button>
             </div>
           </div>
         </section>
+      </div>
+    `;
+  }
 
+  // ---------- SETTINGS TAB (LEWY PANEL USTAWIEŃ) ----------
+  private renderSettingsTab(): string {
+    const tabs: { id: SettingsTab; icon: string; label: string }[] = [
+      { id: 'port', icon: '🔌', label: 'Port USB COM' },
+      { id: 'timeouts', icon: '⏱️', label: 'Czasy Reakcji' },
+      { id: 'biometrics', icon: '🫀', label: 'Biometria' },
+      { id: 'discord', icon: '🎮', label: 'Discord Voice RPC' },
+      { id: 'signalrgb', icon: '🌈', label: 'SignalRGB' },
+      { id: 'chime', icon: '🔔', label: 'Dźwięki Chime' },
+      { id: 'haos', icon: '🏠', label: 'Home Assistant' }
+    ];
 
-        <!-- ==================== SEKCJA 3: BIOMETRIA, TĘTNO & ADAPTACJA AI ==================== -->
-        <section class="fc-section">
-          <div class="fc-section-header">
-            <div class="fc-section-title-wrap">
-              <span class="fc-section-title">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--fc-accent-red)" stroke-width="2.2"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>
-                Biometria, Tętno & Model Adaptacyjny AI
+    return `
+      <div class="fc-tab-pane">
+        <div class="fc-settings-layout">
+          <nav class="fc-settings-nav" role="tablist" aria-label="Kategorie ustawień">
+            ${tabs.map((t) => `
+              <button class="fc-settings-nav-btn ${this.settingsTab === t.id ? 'active' : ''}" data-settings-tab="${t.id}" role="tab" aria-selected="${this.settingsTab === t.id}" title="${t.label}">
+                <span class="fc-settings-nav-icon">${t.icon}</span> ${t.label}
+              </button>`).join('')}
+          </nav>
+          <div class="fc-settings-content">
+            ${this.renderSettingsPanel()}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderSettingsPanel(): string {
+    switch (this.settingsTab) {
+      case 'port': return this.renderPortPanel();
+      case 'timeouts': return this.renderTimeoutsPanel();
+      case 'biometrics': return this.renderBiometricsPanel();
+      case 'discord': return this.renderDiscordPanel();
+      case 'signalrgb': return this.renderSignalrgbPanel();
+      case 'chime': return this.renderChimePanel();
+      case 'haos': return this.renderHaosPanel();
+      default: return '';
+    }
+  }
+
+  private renderPortPanel(): string {
+    const form = this.form!;
+    const snap = this.snap!;
+    return `
+      <div class="fc-settings-panel">
+        <div class="fc-settings-group">
+          <div class="fc-settings-group-title">🔌 Port USB COM & Czułość Wiązki</div>
+          <div>
+            <label class="fc-micro-label">Port szeregowy radaru (XIAO ESP32-C6):</label>
+            <select class="fc-select" id="sel-port" style="width: 100%; margin-top: 4px">
+              <option value="auto" ${form.port === 'auto' ? 'selected' : ''}>auto (automatyczne wykrycie XIAO ESP32-C6)</option>
+              ${this.ports.map((p) => `<option value="${esc(p.path)}" ${p.path === form.port ? 'selected' : ''}>${esc(p.path)}${p.manufacturer ? ` · ${esc(p.manufacturer)}` : ''}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="fc-micro-label">Czułość wiązki:</label>
+            <div class="fc-slider-row">
+              <input type="range" class="fc-slider" id="rng-radar-sens" min="20" max="100" step="5" value="${form.radarSensitivity ?? 80}" />
+              <span style="font-size: 11px; font-weight: 600; color: #fff; width: 34px; text-align: right" id="val-radar-sens">${form.radarSensitivity ?? 80}%</span>
+            </div>
+          </div>
+          <div class="fc-field-row">
+            <button class="btn btn-ghost btn-sm" id="fc-btn-refresh-ports">🔄 Odśwież porty</button>
+            <span class="fc-badge ${snap.radar.connected ? 'calibrated' : (snap.ha?.connected ? 'calibrated' : 'muted')}">${snap.radar.connected ? 'USB Serial ✓' : (snap.ha?.connected ? 'HAOS Stream ✓' : 'Brak COM')}</span>
+          </div>
+        </div>
+
+        <div class="fc-settings-group">
+          <div class="fc-settings-group-title">📡 Telemetria na żywo</div>
+          <div class="fc-diag-grid">
+            <div class="fc-diag-item">
+              <div class="fc-diag-item-title"><span>📏 Dystans klatki piersiowej</span></div>
+              <div class="fc-diag-item-val" id="card-val-distance">${this.telemetry.distanceCm ? `${this.telemetry.distanceCm} cm` : '—'}</div>
+            </div>
+            <div class="fc-diag-item">
+              <div class="fc-diag-item-title"><span>💡 Światło otoczenia</span></div>
+              <div class="fc-diag-item-val" id="card-val-lux">${typeof this.telemetry.illuminanceLux === 'number' ? `${this.telemetry.illuminanceLux} lx` : '—'}</div>
+            </div>
+            <div class="fc-diag-item">
+              <div class="fc-diag-item-title"><span>📡 Źródło radaru</span></div>
+              <div class="fc-diag-item-val">${snap.ha?.activeSource === 'ha' ? 'Strumień HAOS ●' : (form.haEnabled ? 'Oczekiwanie' : 'USB Serial')}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderTimeoutsPanel(): string {
+    const form = this.form!;
+    return `
+      <div class="fc-settings-panel">
+        <div class="fc-settings-group">
+          <div class="fc-settings-group-title">⏱️ Czasy Reakcji (Timeouts)</div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Opóźnienie odejścia (Away)</div>
+              <div class="fc-field-desc">Jak szybko po wyjściu z fotela przełączyć na mikrofon mobilny</div>
+            </div>
+            <div style="display: flex; gap: 4px; align-items: center">
+              <input type="number" class="fc-input" id="inp-timeout-away" value="${form.timeoutAwayMs ?? 3000}" style="width: 90px" min="200" max="60000" step="100" />
+              <span style="font-size: 11px; color: var(--fc-text-muted)">ms</span>
+            </div>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Opóźnienie powrotu (Desk)</div>
+              <div class="fc-field-desc">Jak szybko po powrocie przełączyć na mikrofon stacjonarny</div>
+            </div>
+            <div style="display: flex; gap: 4px; align-items: center">
+              <input type="number" class="fc-input" id="inp-timeout-desk" value="${form.timeoutDeskMs ?? 800}" style="width: 90px" min="100" max="10000" step="100" />
+              <span style="font-size: 11px; color: var(--fc-text-muted)">ms</span>
+            </div>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Filtr szumów & DSP</div>
+              <div class="fc-field-desc">Stabilizacja odczytów radaru (filtr medianowy + EMA)</div>
+            </div>
+            <select class="fc-select fc-select-sm" id="sel-radar-smoothing" style="width: 180px">
+              <option value="ultra" ${(form.radarSmoothingMode || 'ultra') === 'ultra' ? 'selected' : ''}>Ultra-Stabilny 🛡️</option>
+              <option value="balanced" ${form.radarSmoothingMode === 'balanced' ? 'selected' : ''}>Zbalansowany</option>
+              <option value="raw" ${form.radarSmoothingMode === 'raw' ? 'selected' : ''}>Szybki / Surowy</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderBiometricsPanel(): string {
+    const form = this.form!;
+    const person = this.telemetry.detectedPerson || 'unknown';
+    return `
+      <div class="fc-settings-panel">
+        <div class="fc-settings-group">
+          <div class="fc-settings-group-title">🫀 Biometria & Filtr Zwierząt</div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Włącz rozróżnianie osób (Właściciel vs Goście)</div>
+              <div class="fc-field-desc">Weryfikuje wzorzec tętna i odległość siedzenia</div>
+            </div>
+            <button class="fc-switch ${form.biometricsEnabled ? 'active' : ''}" id="sw-biometrics" aria-checked="${form.biometricsEnabled ?? false}" role="switch"></button>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">🐾 Filtr psa / kota (&gt;22 RPM)</div>
+              <div class="fc-field-desc">Ignoruje zwierzęta na bazie oddechu i tętna</div>
+            </div>
+            <button class="fc-switch ${form.petFilterEnabled ? 'active' : ''}" id="sw-pet-filter" aria-checked="${form.petFilterEnabled ?? true}" role="switch"></button>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Wzorzec tętna (BPM)</div>
+              <div class="fc-field-desc">Zakres tętna właściciela (Min – Max)</div>
+            </div>
+            <div style="display: flex; gap: 4px; align-items: center">
+              <input type="number" class="fc-input" id="inp-hr-min" value="${form.userHeartRateMin ?? 55}" style="width: 64px" min="35" max="120" />
+              <span style="font-size: 11px; color: var(--fc-text-muted)">–</span>
+              <input type="number" class="fc-input" id="inp-hr-max" value="${form.userHeartRateMax ?? 78}" style="width: 64px" min="50" max="150" />
+            </div>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Odległość siedzenia (cm)</div>
+              <div class="fc-field-desc">Zakres dystansu właściciela (Min – Max)</div>
+            </div>
+            <div style="display: flex; gap: 4px; align-items: center">
+              <input type="number" class="fc-input" id="inp-dist-min" value="${form.userSeatingDistanceMin ?? 60}" style="width: 64px" min="20" max="180" />
+              <span style="font-size: 11px; color: var(--fc-text-muted)">–</span>
+              <input type="number" class="fc-input" id="inp-dist-max" value="${form.userSeatingDistanceMax ?? 90}" style="width: 64px" min="30" max="220" />
+            </div>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Gdy usiądzie inna osoba</div>
+            </div>
+            <select class="fc-select fc-select-sm" id="sel-person-action" style="width: 180px">
+              <option value="ignore" ${(form.personMismatchAction || 'ignore') === 'ignore' ? 'selected' : ''}>Pozostań w mobilnym</option>
+              <option value="notify_only" ${form.personMismatchAction === 'notify_only' ? 'selected' : ''}>Powiadom</option>
+              <option value="switch_anyway" ${form.personMismatchAction === 'switch_anyway' ? 'selected' : ''}>Przełącz mimo to</option>
+            </select>
+          </div>
+          <div style="border-top: 1px solid var(--fc-card-border); padding-top: 10px">
+            <div class="fc-diag-grid" style="grid-template-columns: repeat(3, 1fr)">
+              <div class="fc-diag-item">
+                <div class="fc-diag-item-title"><span>🫀 Tętno live</span></div>
+                <div class="fc-diag-item-val" id="card-val-heart">${this.telemetry.heartRate ? `${this.telemetry.heartRate} BPM` : '—'}</div>
+              </div>
+              <div class="fc-diag-item">
+                <div class="fc-diag-item-title"><span>🫁 Oddech live</span></div>
+                <div class="fc-diag-item-val" id="card-val-breath">${this.telemetry.breathRate ? `${this.telemetry.breathRate} RPM` : '—'}</div>
+              </div>
+              <div class="fc-diag-item">
+                <div class="fc-diag-item-title"><span>👤 Wykryta osoba</span></div>
+                <span class="fc-badge blue" id="card-badge-person">${person === 'me' ? '👤 Właściciel ✓' : (person === 'pet' ? '🐾 Zwierzę' : (person === 'other' ? '👥 Gość' : '🔍 Skanowanie…'))}</span>
+              </div>
+            </div>
+            <button class="btn btn-ghost btn-sm" id="btn-home-open-bio" style="margin-top: 10px">🧬 Profil Biometryczny (szczegóły)</button>
+          </div>
+        </div>
+
+        <div class="fc-settings-group">
+          <div class="fc-settings-group-title">🧠 Model Auto-Tuningu AI</div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Automatyczna adaptacja tła</div>
+              <div class="fc-field-desc">Model uczy się szumu otoczenia i Twojej pozycji w fotelu</div>
+            </div>
+            <button class="fc-switch ${form.radarAutoTuningEnabled ? 'active' : ''}" id="sw-auto-tuning" aria-checked="${form.radarAutoTuningEnabled ?? true}" role="switch"></button>
+          </div>
+          <div class="fc-field-row">
+            <span class="fc-field-label">Szum otoczenia</span>
+            <strong style="color: var(--fc-accent-green)">${this.telemetry.autoTuning?.noiseFloor ?? 0}% (Czyste)</strong>
+          </div>
+          <div class="fc-field-row">
+            <span class="fc-field-label">Wyuczony środek fotela</span>
+            <strong style="color: #fff" id="card-val-autotune-dist">${this.telemetry.autoTuning?.adaptedDistanceCenter ? this.telemetry.autoTuning.adaptedDistanceCenter + ' cm' : '75 cm'}</strong>
+          </div>
+          <div class="fc-field-row">
+            <span class="fc-field-label">Stabilność modelu</span>
+            <strong style="color: var(--fc-accent-blue)" id="card-badge-autotune-stability">${this.telemetry.autoTuning?.stabilityScore ?? 92}% ✓</strong>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="btn-reset-autotune" style="color: #ef4444; align-self: flex-start">↺ Reset wyuczonych parametrów</button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderDiscordPanel(): string {
+    const form = this.form!;
+    const snap = this.snap!;
+    const gateVal = snap.state === 'desk'
+      ? Math.max(-100, Math.min(0, form.micDeskGateDb ?? -45))
+      : Math.max(-100, Math.min(0, form.micHeadsetGateDb ?? -45));
+    return `
+      <div class="fc-settings-panel">
+        <div class="fc-settings-group">
+          <div class="fc-settings-group-title">🎮 Discord Voice RPC</div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Włącz integrację Discord</div>
+              <div class="fc-field-desc">RPC + sterowanie profilem głosu (próg VAD, Krisp, AGC, Echo)</div>
+            </div>
+            <button class="fc-switch ${form.discordIntegration ? 'active' : ''}" id="sw-discord" aria-checked="${form.discordIntegration ?? true}" role="switch"></button>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Śledź aktywny mikrofon</div>
+              <div class="fc-field-desc">Automatycznie aplikuje profil głosu przy zmianie mikrofonu</div>
+            </div>
+            <button class="fc-switch ${form.discordGateFollowMic !== false ? 'active' : ''}" id="sw-discord-follow" aria-checked="${form.discordGateFollowMic !== false}" role="switch"></button>
+          </div>
+          <div style="display: flex; gap: 6px">
+            <button class="btn btn-secondary btn-sm" id="btn-discord-auth" style="flex: 1" title="Wywołaj okno autoryzacji OAuth w aplikacji Discord">🔐 Autoryzuj Discord</button>
+            <button class="btn btn-ghost btn-sm" id="btn-discord-sync" style="flex: 1" title="Wyślij bieżący profil głosu i przełącz urządzenie wejściowe w Discordzie">🔄 Synchronizuj profil</button>
+          </div>
+          <div class="fc-field-row" style="border-top: 1px solid var(--fc-card-border); padding-top: 10px">
+            <span class="fc-field-label">Aktywny próg Discord</span>
+            <strong style="color: #fbbf24">${gateVal} dB</strong>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderSignalrgbPanel(): string {
+    const form = this.form!;
+    return `
+      <div class="fc-settings-panel">
+        <div class="fc-settings-group">
+          <div class="fc-settings-group-title">🌈 SignalRGB LED Sync</div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Włącz synchronizację oświetlenia</div>
+              <div class="fc-field-desc">Lokalne REST API SignalRGB (port ${form.signalrgbPort ?? 16038})</div>
+            </div>
+            <button class="fc-switch ${form.signalrgbEnabled ? 'active' : ''}" id="sw-signalrgb" aria-checked="${form.signalrgbEnabled ?? false}" role="switch"></button>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Po odejściu od biurka</div>
+            </div>
+            <select class="fc-select fc-select-sm" id="sel-signalrgb-away-action" style="width: 180px">
+              <option value="turn_off" ${(form.signalrgbAwayAction || 'turn_off') === 'turn_off' ? 'selected' : ''}>Zgaś całkowicie LED</option>
+              <option value="dim" ${form.signalrgbAwayAction === 'dim' ? 'selected' : ''}>Przyciemnij</option>
+              <option value="solid_color" ${form.signalrgbAwayAction === 'solid_color' ? 'selected' : ''}>Kolor ostrzegawczy</option>
+            </select>
+          </div>
+          <div style="display: flex; gap: 6px">
+            <button class="btn btn-ghost btn-sm" id="btn-test-signalrgb-away" style="flex: 1">Test: Odejście</button>
+            <button class="btn btn-ghost btn-sm" id="btn-test-signalrgb-desk" style="flex: 1">Test: Biurko</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderChimePanel(): string {
+    const form = this.form!;
+    const chimeVol = Math.round((form.audioChimeVolume ?? 0.2) * 100);
+    return `
+      <div class="fc-settings-panel">
+        <div class="fc-settings-group">
+          <div class="fc-settings-group-title">🔔 Dźwięki Chime & System</div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Powiadomienia dźwiękowe (Chime)</div>
+              <div class="fc-field-desc">Syntezowany dźwięk przy przełączaniu mikrofonu</div>
+            </div>
+            <button class="fc-switch ${form.audioChime ? 'active' : ''}" id="sw-audio-chime" aria-checked="${form.audioChime ?? true}" role="switch"></button>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Styl dźwięku</div>
+            </div>
+            <div style="display: flex; gap: 6px; align-items: center">
+              <select class="fc-select fc-select-sm" id="sel-chime-style" style="width: 170px">
+                <option value="harmonic" ${this.selectedChimeStyle === 'harmonic' ? 'selected' : ''}>Harmoniczny dwuton</option>
+                <option value="modern" ${this.selectedChimeStyle === 'modern' ? 'selected' : ''}>Modern sci-fi ping</option>
+                <option value="soft_click" ${this.selectedChimeStyle === 'soft_click' ? 'selected' : ''}>Miękki klik studyjny</option>
+                <option value="marimba" ${this.selectedChimeStyle === 'marimba' ? 'selected' : ''}>Ciepła marimba</option>
+              </select>
+              <button class="btn btn-ghost btn-sm" id="btn-test-chime" title="Przetestuj dźwięk">🔔</button>
+            </div>
+          </div>
+          <div class="fc-field-row">
+            <span class="fc-field-label">Głośność</span>
+            <div class="fc-slider-row" style="flex: 1; max-width: 260px">
+              <input type="range" class="fc-slider" id="rng-chime-volume" min="0" max="100" step="5" value="${chimeVol}" />
+              <span style="font-size: 11px; font-weight: 600; color: #fff; width: 40px; text-align: right" id="val-chime-volume">${chimeVol}%</span>
+            </div>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Autostart z Windows</div>
+              <div class="fc-field-desc">Uruchamiaj DeskSense razem z systemem</div>
+            </div>
+            <button class="fc-switch ${form.autoStart ? 'active' : ''}" id="sw-autostart" aria-checked="${form.autoStart ?? false}" role="switch"></button>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Usypiaj monitory po odejściu</div>
+              <div class="fc-field-desc">Automatyczne usypianie wyświetlaczy, gdy nie ma Cię przy biurku</div>
+            </div>
+            <button class="fc-switch ${form.sleepMonitorsOnAway ? 'active' : ''}" id="sw-sleep-monitors" aria-checked="${form.sleepMonitorsOnAway ?? false}" role="switch"></button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderHaosPanel(): string {
+    const form = this.form!;
+    const snap = this.snap!;
+    return `
+      <div class="fc-settings-panel">
+        <div class="fc-settings-group ${form.haEnabled ? 'highlight' : ''}">
+          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--fc-card-border); padding-bottom: 8px">
+            <div class="fc-settings-group-title" style="border: none; padding: 0">🏠 Home Assistant OS (HAOS)</div>
+            <div style="display: flex; gap: 8px; align-items: center">
+              <span class="fc-badge ${snap.ha?.connected ? 'calibrated' : (form.haEnabled ? 'amber' : 'muted')}" id="badge-ha-status">
+                ${snap.ha?.connected ? `● Połączono (HAOS${snap.ha.version ? ` v${snap.ha.version}` : ''}) ✓` : (form.haEnabled ? (snap.ha?.error || 'Łączenie z HAOS…') : 'Wyłączony')}
               </span>
-              <span class="fc-info-badge" title="Rozpoznawanie tętna klatki piersiowej, oddech oraz automatyczna filtracja zwierząt domowych">?</span>
-            </div>
-            <div class="fc-section-actions">
-              <button class="btn btn-ghost btn-sm" id="btn-home-open-bio" style="font-size: 11px; padding: 4px 9px">🧬 Profil Biometryczny</button>
+              <button class="fc-switch ${form.haEnabled ? 'active' : ''}" id="sw-ha-enabled" aria-checked="${form.haEnabled ?? false}" role="switch" title="Włącz pobieranie danych obecności z Home Assistant"></button>
             </div>
           </div>
 
-          <div class="fc-card-grid">
-            <!-- Card: Biometria & Tętno -->
-            <div class="fc-card">
-              <div class="fc-card-header">
-                <div class="fc-card-title-group">
-                  <span class="fc-card-icon red">🫀</span>
-                  <span class="fc-card-title">Biometria & Filtr Zwierząt</span>
-                </div>
-                <button class="fc-switch ${form.biometricsEnabled ? 'active' : ''}" id="sw-biometrics" aria-checked="${form.biometricsEnabled ?? false}" role="switch"></button>
-              </div>
-
-              <div class="fc-card-body">
-                <div style="display: flex; justify-content: space-between; align-items: center">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">🐾 Filtr psa / kota (>22 RPM):</span>
-                  <button class="fc-switch ${form.petFilterEnabled ? 'active' : ''}" id="sw-pet-filter" aria-checked="${form.petFilterEnabled ?? true}" role="switch"></button>
-                </div>
-
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Wzorzec tętna (BPM):</span>
-                  <div style="display: flex; gap: 4px; align-items: center">
-                    <input type="number" class="fc-input" id="inp-hr-min" value="${form.userHeartRateMin ?? 55}" style="width: 52px; height: 24px; font-size: 10.5px" min="35" max="120" />
-                    <span style="font-size: 10px; color: var(--fc-text-muted)">–</span>
-                    <input type="number" class="fc-input" id="inp-hr-max" value="${form.userHeartRateMax ?? 78}" style="width: 52px; height: 24px; font-size: 10.5px" min="50" max="150" />
-                  </div>
-                </div>
-
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Gdy usiądzie inna osoba:</span>
-                  <select class="fc-select fc-select-sm" id="sel-person-action" style="width: 150px">
-                    <option value="ignore" ${(form.personMismatchAction || 'ignore') === 'ignore' ? 'selected' : ''}>Pozostań w mobilnym</option>
-                    <option value="notify_only" ${form.personMismatchAction === 'notify_only' ? 'selected' : ''}>Powiadom</option>
-                    <option value="switch_anyway" ${form.personMismatchAction === 'switch_anyway' ? 'selected' : ''}>Przełącz mimo to</option>
-                  </select>
-                </div>
-              </div>
-
-              <div class="fc-card-footer">
-                <div>
-                  <div class="fc-metric-large" id="card-val-heart">${this.telemetry.heartRate ? `${this.telemetry.heartRate} BPM` : '—'}</div>
-                  <div class="fc-metric-sub">Tętno klatki piersiowej</div>
-                </div>
-                <span id="card-badge-person" class="fc-badge ${person === 'me' ? 'calibrated' : (person === 'pet' ? 'amber' : 'blue')}">
-                  ${person === 'me' ? '👤 Właściciel ✓' : (person === 'pet' ? '🐾 Zwierzę' : (person === 'other' ? '👥 Inna osoba' : '🔍 Skanowanie…'))}
-                </span>
-              </div>
-            </div>
-
-            <!-- Card: Auto-Tuning AI -->
-            <div class="fc-card">
-              <div class="fc-card-header">
-                <div class="fc-card-title-group">
-                  <span class="fc-card-icon blue">🧠</span>
-                  <span class="fc-card-title">Model Auto-Tuningu AI</span>
-                </div>
-                <button class="text-btn" id="btn-reset-autotune" style="color: #ef4444; font-size: 10.5px" title="Zresetuj wyuczone parametry">↺ Reset</button>
-              </div>
-
-              <div class="fc-card-body">
-                <div style="display: flex; justify-content: space-between; align-items: center">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Automatyczna adaptacja tła:</span>
-                  <button class="fc-switch ${form.radarAutoTuningEnabled ? 'active' : ''}" id="sw-auto-tuning" aria-checked="${form.radarAutoTuningEnabled ?? true}" role="switch"></button>
-                </div>
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Szum otoczenia:</span>
-                  <strong style="color: var(--fc-accent-green)">${this.telemetry.autoTuning?.noiseFloor ?? 0}% (Czyste)</strong>
-                </div>
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Oddech na żywo:</span>
-                  <strong style="color: var(--fc-accent-blue)" id="card-val-breath">${this.telemetry.breathRate ? `${this.telemetry.breathRate} RPM` : '—'}</strong>
-                </div>
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Światło otoczenia:</span>
-                  <strong style="color: var(--fc-accent-amber)" id="card-val-lux">${typeof this.telemetry.illuminanceLux === 'number' ? `${this.telemetry.illuminanceLux} lx` : '—'}</strong>
-                </div>
-              </div>
-
-              <div class="fc-card-footer">
-                <div>
-                  <div class="fc-metric-large" id="card-val-autotune-dist">${this.telemetry.autoTuning?.adaptedDistanceCenter ? this.telemetry.autoTuning.adaptedDistanceCenter + ' cm' : '75 cm'}</div>
-                  <div class="fc-metric-sub">Wyuczony środek fotela</div>
-                </div>
-                <span class="fc-badge calibrated" id="card-badge-autotune-stability">Stabilność: ${this.telemetry.autoTuning?.stabilityScore ?? 92}% ✓</span>
-              </div>
-            </div>
+          <div style="font-size: 11px; color: var(--fc-text-secondary)">
+            Pobieraj stan obecności, dystans, tętno i oddech z sensora mmWave / ESPHome podłączonego bezpośrednio do Home Assistanta (przez Wi-Fi/LAN).
           </div>
-        </section>
 
-
-        <!-- ==================== SEKCJA 4: INTEGRACJE ZEWNĘTRZNE, SYSTEM & DŹWIĘKI ==================== -->
-        <section class="fc-section">
-          <div class="fc-section-header">
-            <div class="fc-section-title-wrap">
-              <span class="fc-section-title">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--fc-accent-amber)" stroke-width="2.2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-                Integracje Zewnętrzne, Dźwięki Chime & System
-              </span>
-              <span class="fc-info-badge" title="Sterowanie Discord Voice RPC, oświetleniem SignalRGB oraz syntezą dźwiękową Chime">?</span>
+          <div class="fc-subgrid-2" style="gap: 10px">
+            <div>
+              <label class="fc-micro-label">Adres URL Home Assistant:</label>
+              <input type="text" class="fc-input" id="inp-ha-url" placeholder="http://homeassistant.local:8123" value="${esc(form.haUrl || 'http://homeassistant.local:8123')}" style="height: 30px; font-size: 11.5px" />
+            </div>
+            <div>
+              <div style="display: flex; justify-content: space-between; align-items: center">
+                <label class="fc-micro-label">Długoterminowy Token Dostępu (Bearer):</label>
+                <button class="text-btn" id="btn-toggle-ha-token" style="font-size: 10px; color: var(--fc-accent-blue)">${this.haShowToken ? 'Ukryj 👁️' : 'Pokaż 👁️'}</button>
+              </div>
+              <input type="${this.haShowToken ? 'text' : 'password'}" class="fc-input" id="inp-ha-token" placeholder="Wklej Long-Lived Access Token z profilu HA…" value="${esc(form.haToken || '')}" style="height: 30px; font-size: 11.5px" />
             </div>
           </div>
 
-          <div class="fc-card-grid">
-            <!-- Card: Discord Voice RPC -->
-            <div class="fc-card">
-              <div class="fc-card-header">
-                <div class="fc-card-title-group">
-                  <span class="fc-card-icon blue">🎮</span>
-                  <span class="fc-card-title">Discord Voice RPC</span>
-                </div>
-                <button class="fc-switch ${form.discordIntegration ? 'active' : ''}" id="sw-discord" aria-checked="${form.discordIntegration ?? true}" role="switch"></button>
-              </div>
-
-              <div class="fc-card-body">
-                <div style="display: flex; justify-content: space-between; align-items: center">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Śledź aktywny mikrofon:</span>
-                  <button class="fc-switch ${form.discordGateFollowMic !== false ? 'active' : ''}" id="sw-discord-follow" aria-checked="${form.discordGateFollowMic !== false}" role="switch"></button>
-                </div>
-                <div style="font-size: 10.5px; color: var(--fc-text-muted); margin-top: 2px">
-                  Automatycznie aplikuje próg VAD, Krisp i AGC do Discorda w momencie gdy wstajesz lub siadasz.
-                </div>
-                <div style="display: flex; gap: 6px; margin-top: 8px">
-                  <button class="btn btn-secondary btn-sm" id="btn-discord-auth" style="flex: 1; font-size: 10.5px; padding: 4px 6px" title="Wywołaj okno autoryzacji OAuth w aplikacji Discord">🔐 Autoryzuj Discord</button>
-                  <button class="btn btn-ghost btn-sm" id="btn-discord-sync" style="flex: 1; font-size: 10.5px; padding: 4px 6px" title="Wyślij bieżący profil głosu i przełącz urządzenie wejściowe w Discordzie">🔄 Synchronizuj</button>
-                </div>
-              </div>
-
-              <div class="fc-card-footer">
-                <div>
-                  <div class="fc-metric-large">${snap.state === 'desk' ? `${deskGateVal} dB` : `${headGateVal} dB`}</div>
-                  <div class="fc-metric-sub">Aktywny próg Discord</div>
-                </div>
-                <span class="fc-badge ${form.discordIntegration ? 'blue' : 'muted'}">${form.discordIntegration ? 'RPC Włączony ✓' : 'Wyłączony'}</span>
-              </div>
-            </div>
-
-            <!-- Card: SignalRGB LED Sync -->
-            <div class="fc-card">
-              <div class="fc-card-header">
-                <div class="fc-card-title-group">
-                  <span class="fc-card-icon amber">🌈</span>
-                  <span class="fc-card-title">SignalRGB LED Sync</span>
-                </div>
-                <button class="fc-switch ${form.signalrgbEnabled ? 'active' : ''}" id="sw-signalrgb" aria-checked="${form.signalrgbEnabled ?? false}" role="switch"></button>
-              </div>
-
-              <div class="fc-card-body">
-                <div style="display: flex; justify-content: space-between; align-items: center">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Po odejściu:</span>
-                  <select class="fc-select fc-select-sm" id="sel-signalrgb-away-action" style="width: 150px">
-                    <option value="turn_off" ${(form.signalrgbAwayAction || 'turn_off') === 'turn_off' ? 'selected' : ''}>Zgaś całkowicie LED</option>
-                    <option value="dim" ${form.signalrgbAwayAction === 'dim' ? 'selected' : ''}>Przyciemnij</option>
-                    <option value="solid_color" ${form.signalrgbAwayAction === 'solid_color' ? 'selected' : ''}>Kolor ostrzegawczy</option>
-                  </select>
-                </div>
-                <div style="display: flex; gap: 6px; margin-top: 4px">
-                  <button class="btn btn-ghost btn-sm" id="btn-test-signalrgb-away" style="flex: 1; padding: 3px 4px; font-size: 10px">Test: Odejście</button>
-                  <button class="btn btn-ghost btn-sm" id="btn-test-signalrgb-desk" style="flex: 1; padding: 3px 4px; font-size: 10px">Test: Biurko</button>
-                </div>
-              </div>
-
-              <div class="fc-card-footer">
-                <div>
-                  <div class="fc-metric-large">${form.signalrgbEnabled ? 'RGB Sync' : 'Wyłączony'}</div>
-                  <div class="fc-metric-sub">Oświetlenie PC</div>
-                </div>
-                <span class="fc-badge ${form.signalrgbEnabled ? 'calibrated' : 'muted'}">${form.signalrgbEnabled ? 'Aktywny ✓' : 'Rezerwa'}</span>
-              </div>
-            </div>
-
-            <!-- Card: Home Assistant OS (HAOS) -->
-            <div class="fc-card ${form.haEnabled ? 'highlight' : ''}" style="grid-column: span 2">
-              <div class="fc-card-header">
-                <div class="fc-card-title-group">
-                  <span class="fc-card-icon blue">🏠</span>
-                  <span class="fc-card-title">Home Assistant OS (HAOS) — Zewnętrzny Sensor</span>
-                </div>
-                <div style="display: flex; gap: 8px; align-items: center">
-                  <span class="fc-badge ${snap.ha?.connected ? 'calibrated' : (form.haEnabled ? 'amber' : 'muted')}" id="badge-ha-status">
-                    ${snap.ha?.connected ? `● Połączono (HAOS${snap.ha.version ? ` v${snap.ha.version}` : ''}) ✓` : (form.haEnabled ? (snap.ha?.error || 'Łączenie z HAOS…') : 'Wyłączony')}
-                  </span>
-                  <button class="fc-switch ${form.haEnabled ? 'active' : ''}" id="sw-ha-enabled" aria-checked="${form.haEnabled ?? false}" role="switch" title="Włącz pobieranie danych obecności z Home Assistant"></button>
-                </div>
-              </div>
-
-              <div class="fc-card-body">
-                <div style="font-size: 11px; color: var(--fc-text-secondary); margin-bottom: 8px">
-                  Pobieraj stan obecności, dystans, tętno i oddech z sensora mmWave / ESPHome podłączonego bezpośrednio do Home Assistanta (przez Wi-Fi/LAN).
-                </div>
-
-                <div class="fc-subgrid-2" style="gap: 10px">
-                  <div>
-                    <label class="fc-micro-label">Adres URL Home Assistant:</label>
-                    <input type="text" class="fc-input" id="inp-ha-url" placeholder="http://homeassistant.local:8123" value="${esc(form.haUrl || 'http://homeassistant.local:8123')}" style="height: 30px; font-size: 11.5px" />
-                  </div>
-                  <div>
-                    <div style="display: flex; justify-content: space-between; align-items: center">
-                      <label class="fc-micro-label">Długoterminowy Token Dostępu (Bearer):</label>
-                      <button class="text-btn" id="btn-toggle-ha-token" style="font-size: 10px; color: var(--fc-accent-blue)">${this.haShowToken ? 'Ukryj 👁️' : 'Pokaż 👁️'}</button>
-                    </div>
-                    <input type="${this.haShowToken ? 'text' : 'password'}" class="fc-input" id="inp-ha-token" placeholder="Wklej Long-Lived Access Token z profilu HA…" value="${esc(form.haToken || '')}" style="height: 30px; font-size: 11.5px" />
-                  </div>
-                </div>
-
-                <div style="display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap">
-                  <button class="btn btn-ghost btn-sm" id="btn-ha-test" style="font-size: 11px; padding: 4px 10px" ${this.haTesting ? 'disabled' : ''}>
-                    ${this.haTesting ? '⏳ Testuję połączenie…' : '🧪 Testuj połączenie'}
-                  </button>
-                  <button class="btn btn-primary btn-sm" id="btn-ha-fetch-entities" style="font-size: 11px; padding: 4px 10px" ${this.haFetchingEntities ? 'disabled' : ''}>
-                    ${this.haFetchingEntities ? '⏳ Pobieram encje…' : '🔍 Wykryj & Pobierz encje z HAOS'}
-                  </button>
-                  <div id="ha-test-feedback" style="font-size: 11px; margin-left: 6px; color: ${this.haTestResult ? (this.haTestResult.ok ? 'var(--fc-accent-green)' : '#ef4444') : 'var(--fc-text-muted)'}">
-                    ${this.haTestResult ? esc(this.haTestResult.message || this.haTestResult.error || '') : ''}
-                  </div>
-                </div>
-
-                <!-- Entity mapping selection inputs with datalists / live suggestions -->
-                <div class="fc-subgrid-2" style="gap: 10px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--fc-card-border)">
-                  <div>
-                    <label class="fc-micro-label">Encja Obecności (binary_sensor):</label>
-                    <input type="text" class="fc-input" id="inp-ha-presence" list="ha-presence-list" placeholder="np. binary_sensor.seeed_mr60bha2_presence" value="${esc(form.haPresenceEntity || '')}" style="height: 28px; font-size: 11px" />
-                    <datalist id="ha-presence-list">
-                      ${this.haBinarySensors.map(e => `<option value="${esc(e.entity_id)}">${esc(e.name)} (${esc(e.state)})</option>`).join('')}
-                    </datalist>
-                  </div>
-                  <div>
-                    <label class="fc-micro-label">Encja Dystansu fotela (opcjonalna):</label>
-                    <input type="text" class="fc-input" id="inp-ha-distance" list="ha-sensors-list" placeholder="np. sensor.seeed_mr60bha2_distance" value="${esc(form.haDistanceEntity || '')}" style="height: 28px; font-size: 11px" />
-                  </div>
-                  <div>
-                    <label class="fc-micro-label">Encja Tętna BPM (opcjonalna):</label>
-                    <input type="text" class="fc-input" id="inp-ha-heart" list="ha-sensors-list" placeholder="np. sensor.seeed_mr60bha2_heart_rate" value="${esc(form.haHeartRateEntity || '')}" style="height: 28px; font-size: 11px" />
-                  </div>
-                  <div>
-                    <label class="fc-micro-label">Encja Oddechu RPM (opcjonalna):</label>
-                    <input type="text" class="fc-input" id="inp-ha-breath" list="ha-sensors-list" placeholder="np. sensor.seeed_mr60bha2_breath_rate" value="${esc(form.haBreathRateEntity || '')}" style="height: 28px; font-size: 11px" />
-                    <datalist id="ha-sensors-list">
-                      ${this.haSensors.map(e => `<option value="${esc(e.entity_id)}">${esc(e.name)} (${esc(e.state)}${e.unit ? ` ${esc(e.unit)}` : ''})</option>`).join('')}
-                    </datalist>
-                  </div>
-                </div>
-              </div>
-
-              <div class="fc-card-footer">
-                <div>
-                  <div class="fc-metric-large" id="metric-ha-source">${snap.ha?.activeSource === 'ha' ? 'Strumień HAOS ●' : (form.haEnabled ? 'Oczekiwanie' : 'USB Serial')}</div>
-                  <div class="fc-metric-sub">Aktywne źródło radaru</div>
-                </div>
-                <span class="fc-badge ${form.haEnabled && snap.ha?.connected ? 'calibrated' : 'muted'}">${form.haEnabled && snap.ha?.connected ? 'WebSocket Live ✓' : (form.haEnabled ? 'Brak połączenia' : 'Wyłączony')}</span>
-              </div>
-            </div>
-
-            <!-- Card: Dźwięki Chime & System Windows -->
-            <div class="fc-card">
-              <div class="fc-card-header">
-                <div class="fc-card-title-group">
-                  <span class="fc-card-icon green">🔔</span>
-                  <span class="fc-card-title">Dźwięki Chime & System</span>
-                </div>
-                <button class="fc-switch ${form.audioChime ? 'active' : ''}" id="sw-audio-chime" aria-checked="${form.audioChime ?? true}" role="switch"></button>
-              </div>
-
-              <div class="fc-card-body">
-                <div style="display: flex; justify-content: space-between; align-items: center">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Styl dźwięku:</span>
-                  <div style="display: flex; gap: 4px; align-items: center">
-                    <select class="fc-select fc-select-sm" id="sel-chime-style" style="width: 130px">
-                      <option value="harmonic" ${this.selectedChimeStyle === 'harmonic' ? 'selected' : ''}>Harmoniczny dwuton</option>
-                      <option value="modern" ${this.selectedChimeStyle === 'modern' ? 'selected' : ''}>Modern sci-fi ping</option>
-                      <option value="soft_click" ${this.selectedChimeStyle === 'soft_click' ? 'selected' : ''}>Miękki klik studyjny</option>
-                      <option value="marimba" ${this.selectedChimeStyle === 'marimba' ? 'selected' : ''}>Ciepła marimba</option>
-                    </select>
-                    <button class="btn btn-ghost btn-sm" id="btn-test-chime" title="Przetestuj dźwięk" style="padding: 2px 6px">🔔</button>
-                  </div>
-                </div>
-
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Autostart z Windows:</span>
-                  <button class="fc-switch ${form.autoStart ? 'active' : ''}" id="sw-autostart" aria-checked="${form.autoStart ?? false}" role="switch"></button>
-                </div>
-
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px">
-                  <span style="font-size: 11px; color: var(--fc-text-secondary)">Usypiaj monitory po odejściu:</span>
-                  <button class="fc-switch ${form.sleepMonitorsOnAway ? 'active' : ''}" id="sw-sleep-monitors" aria-checked="${form.sleepMonitorsOnAway ?? false}" role="switch"></button>
-                </div>
-              </div>
-
-              <div class="fc-card-footer">
-                <div>
-                  <div class="fc-metric-large">${chimeVol}%</div>
-                  <div class="fc-metric-sub">Głośność powiadomień</div>
-                </div>
-                <span class="fc-badge ${form.autoStart ? 'calibrated' : 'muted'}">${form.autoStart ? 'Autostart ON' : 'Ręczny start'}</span>
-              </div>
+          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+            <button class="btn btn-ghost btn-sm" id="btn-ha-test" style="font-size: 11px; padding: 4px 10px" ${this.haTesting ? 'disabled' : ''}>
+              ${this.haTesting ? '⏳ Testuję połączenie…' : '🧪 Testuj połączenie'}
+            </button>
+            <button class="btn btn-primary btn-sm" id="btn-ha-fetch-entities" style="font-size: 11px; padding: 4px 10px" ${this.haFetchingEntities ? 'disabled' : ''}>
+              ${this.haFetchingEntities ? '⏳ Pobieram encje…' : '🔍 Wykryj & Pobierz encje z HAOS'}
+            </button>
+            <div id="ha-test-feedback" style="font-size: 11px; margin-left: 6px; color: ${this.haTestResult ? (this.haTestResult.ok ? 'var(--fc-accent-green)' : '#ef4444') : 'var(--fc-text-muted)'}">
+              ${this.haTestResult ? esc(this.haTestResult.message || this.haTestResult.error || '') : ''}
             </div>
           </div>
-        </section>
+
+          <div class="fc-subgrid-2" style="gap: 10px; padding-top: 8px; border-top: 1px solid var(--fc-card-border)">
+            <div>
+              <label class="fc-micro-label">Encja Obecności (binary_sensor):</label>
+              <input type="text" class="fc-input" id="inp-ha-presence" list="ha-presence-list" placeholder="np. binary_sensor.seeed_mr60bha2_presence" value="${esc(form.haPresenceEntity || '')}" style="height: 28px; font-size: 11px" />
+              <datalist id="ha-presence-list">
+                ${this.haBinarySensors.map(e => `<option value="${esc(e.entity_id)}">${esc(e.name)} (${esc(e.state)})</option>`).join('')}
+              </datalist>
+            </div>
+            <div>
+              <label class="fc-micro-label">Encja Dystansu fotela (opcjonalna):</label>
+              <input type="text" class="fc-input" id="inp-ha-distance" list="ha-sensors-list" placeholder="np. sensor.seeed_mr60bha2_distance" value="${esc(form.haDistanceEntity || '')}" style="height: 28px; font-size: 11px" />
+            </div>
+            <div>
+              <label class="fc-micro-label">Encja Tętna BPM (opcjonalna):</label>
+              <input type="text" class="fc-input" id="inp-ha-heart" list="ha-sensors-list" placeholder="np. sensor.seeed_mr60bha2_heart_rate" value="${esc(form.haHeartRateEntity || '')}" style="height: 28px; font-size: 11px" />
+            </div>
+            <div>
+              <label class="fc-micro-label">Encja Oddechu RPM (opcjonalna):</label>
+              <input type="text" class="fc-input" id="inp-ha-breath" list="ha-sensors-list" placeholder="np. sensor.seeed_mr60bha2_breath_rate" value="${esc(form.haBreathRateEntity || '')}" style="height: 28px; font-size: 11px" />
+              <datalist id="ha-sensors-list">
+                ${this.haSensors.map(e => `<option value="${esc(e.entity_id)}">${esc(e.name)} (${esc(e.state)}${e.unit ? ` ${esc(e.unit)}` : ''})</option>`).join('')}
+              </datalist>
+            </div>
+          </div>
+        </div>
       </div>
     `;
   }
@@ -2390,15 +2397,15 @@ class AppUI {
           <div class="fc-settings-group">
             <div class="fc-settings-group-title">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="var(--fc-accent-blue)" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-              Oficjalny Stock Firmware Seeed MR60BHA2 (XIAO ESP32-C6)
+              Oficjalny Firmware & Flasher MR60BHA2 (XIAO ESP32-C6)
             </div>
             <p style="font-size: 12px; color: var(--fc-text-secondary); line-height: 1.5">
-              Sensor działa natywnie na fabrycznym firmware Seeed Studio. W razie potrzeby przywrócenia lub ponownego wgrania oprogramowania, skorzystaj z oficjalnych zasobów producenta:
+              Sensor działa natywnie na fabrycznym firmware Seeed Studio lub alternatywnym ESPHome. Do przywrócenia lub ponownego wgrania oprogramowania użyj poniższych zasobów:
             </p>
             <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px">
-              <button class="btn btn-primary btn-sm" id="btn-open-stock-bin">💾 Pobierz Stock Firmware (.factory.bin)</button>
-              <button class="btn btn-ghost btn-sm" id="btn-open-seeed-wiki">📖 Poradnik & Web Flasher (Wiki Seeed)</button>
-              <button class="btn btn-ghost btn-sm" id="btn-open-seeed-gh">🐙 Repozytorium GitHub Seeed</button>
+              <button class="btn btn-primary btn-sm" id="btn-open-stock-bin">💾 Pobierz Binarki Firmware (Releases)</button>
+              <button class="btn btn-ghost btn-sm" id="btn-open-seeed-wiki">🧰 Web Flasher (ESPHOME)</button>
+              <button class="btn btn-ghost btn-sm" id="btn-open-seeed-gh">🐙 Repozytorium GitHub (ESPHome)</button>
             </div>
           </div>
         </div>
@@ -2842,7 +2849,7 @@ class AppUI {
             </div>
 
             <div style="margin-top: 12px; padding: 10px; background: var(--fc-bg-darker); border-radius: var(--fc-radius-sm); font-size: 11.5px; color: var(--fc-text-secondary)">
-              <strong>💡 Status sesji:</strong> Siedzisz przy biurku od <strong>${Math.floor(this.sessionSeconds / 60)} minut</strong>. Wszystkie wątki IPC i demony działają w trybie optymalnym.
+              <strong>💡 Status:</strong> Wszystkie wątki IPC i demony działają w trybie optymalnym.
             </div>
           </div>
 
@@ -2875,6 +2882,17 @@ class AppUI {
     byId('fc-win-max')?.addEventListener('click', async () => {
       await window.api.maximizeWindow();
       this.isMaximized = !this.isMaximized;
+    });
+
+    // Settings Sub-Navigation (lewy panel ustawień)
+    document.querySelectorAll<HTMLElement>('[data-settings-tab]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        const tab = (e.currentTarget as HTMLElement).getAttribute('data-settings-tab') as SettingsTab;
+        if (tab && tab !== this.settingsTab) {
+          this.settingsTab = tab;
+          this.render();
+        }
+      });
     });
 
     // Double-click on Titlebar to Maximize/Restore
@@ -3488,59 +3506,47 @@ class AppUI {
       this.patchForm({ haBreathRateEntity: (e.target as HTMLInputElement).value });
     });
 
-    // Radar Gate Min/Max Sync
-    const syncGateMin = (v: number) => {
-      if (isNaN(v)) return;
-      this.patchForm({ radarMinDistanceCm: v });
-      const inp = byId('inp-gate-min') as HTMLInputElement | null;
-      const rng = byId('rng-scope-gate-min') as HTMLInputElement | null;
-      const lbl = byId('lbl-gate-min');
-      if (inp && Number(inp.value) !== v) inp.value = String(v);
-      if (rng && Number(rng.value) !== v) rng.value = String(v);
-      if (lbl) lbl.textContent = `${v} cm`;
-      this.updateRadarScopeDOM();
+    // Radar Gate Drag Handles (interaktywna regulacja strefy fotela na grafice)
+    const bindScopeHandleDrag = (handleId: string, which: 'min' | 'max') => {
+      const handle = byId(handleId);
+      const track = document.querySelector('.fc-scope-track') as HTMLElement | null;
+      if (!handle || !track) return;
+      handle.addEventListener('pointerdown', (e: PointerEvent) => {
+        e.preventDefault();
+        handle.setPointerCapture(e.pointerId);
+        track.classList.add('dragging');
+        const move = (ev: PointerEvent) => {
+          const rect = track.getBoundingClientRect();
+          const pct = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+          const cm = Math.max(10, Math.min(200, Math.round((pct * 200) / 5) * 5));
+          if (which === 'min') {
+            const max = (this.form?.radarMaxDistanceCm ?? 110) - 10;
+            const v = Math.max(10, Math.min(cm, max));
+            this.patchForm({ radarMinDistanceCm: v });
+          } else {
+            const min = (this.form?.radarMinDistanceCm ?? 40) + 10;
+            const v = Math.max(min, Math.min(cm, 200));
+            this.patchForm({ radarMaxDistanceCm: v });
+          }
+        };
+        const up = (ev: PointerEvent) => {
+          const el = ev.currentTarget as HTMLElement;
+          track.classList.remove('dragging');
+          el.removeEventListener('pointermove', move);
+          el.removeEventListener('pointerup', up);
+          el.removeEventListener('pointercancel', up);
+        };
+        handle.addEventListener('pointermove', move);
+        handle.addEventListener('pointerup', up);
+        handle.addEventListener('pointercancel', up);
+      });
     };
+    bindScopeHandleDrag('scope-handle-min', 'min');
+    bindScopeHandleDrag('scope-handle-max', 'max');
 
-    const syncGateMax = (v: number) => {
-      if (isNaN(v)) return;
-      this.patchForm({ radarMaxDistanceCm: v });
-      const inp = byId('inp-gate-max') as HTMLInputElement | null;
-      const rng = byId('rng-scope-gate-max') as HTMLInputElement | null;
-      const lbl = byId('lbl-gate-max');
-      if (inp && Number(inp.value) !== v) inp.value = String(v);
-      if (rng && Number(rng.value) !== v) rng.value = String(v);
-      if (lbl) lbl.textContent = `${v} cm`;
-      this.updateRadarScopeDOM();
-    };
-
-    byId('inp-gate-min')?.addEventListener('input', (e) => syncGateMin(Number((e.target as HTMLInputElement).value)));
-    byId('rng-scope-gate-min')?.addEventListener('input', (e) => syncGateMin(Number((e.target as HTMLInputElement).value)));
-    byId('inp-gate-max')?.addEventListener('input', (e) => syncGateMax(Number((e.target as HTMLInputElement).value)));
-    byId('rng-scope-gate-max')?.addEventListener('input', (e) => syncGateMax(Number((e.target as HTMLInputElement).value)));
-
-    // Radar Presets
-    byId('preset-gate-close')?.addEventListener('click', () => {
-      syncGateMin(35);
-      syncGateMax(90);
-      this.pushToast('Ustawiono preset: Bliski fotel (35–90 cm)');
-    });
-    byId('preset-gate-std')?.addEventListener('click', () => {
-      syncGateMin(40);
-      syncGateMax(110);
-      this.pushToast('Ustawiono preset: Standardowe biurko (40–110 cm)');
-    });
-    byId('preset-gate-deep')?.addEventListener('click', () => {
-      syncGateMin(50);
-      syncGateMax(140);
-      this.pushToast('Ustawiono preset: Głębokie biurko (50–140 cm)');
-    });
-    byId('preset-gate-fit')?.addEventListener('click', () => {
-      const cur = this.telemetry.distanceCm || 75;
-      const minVal = Math.max(25, cur - 25);
-      const maxVal = Math.min(200, cur + 30);
-      syncGateMin(minVal);
-      syncGateMax(maxVal);
-      this.pushToast(`Dopasowano bramkę do Twojej pozycji (${cur} cm): ${minVal}–${maxVal} cm ✓`);
+    byId('btn-scope-reset-gate')?.addEventListener('click', () => {
+      this.patchForm({ radarMinDistanceCm: 40, radarMaxDistanceCm: 110 });
+      this.pushToast('Przywrócono domyślną strefę fotela (40–110 cm)');
     });
 
     // Radar port & timeouts
@@ -3575,6 +3581,14 @@ class AppUI {
     byId('inp-hr-max')?.addEventListener('input', (e) => {
       const v = Number((e.target as HTMLInputElement).value);
       if (!isNaN(v)) this.patchForm({ userHeartRateMax: v });
+    });
+    byId('inp-dist-min')?.addEventListener('input', (e) => {
+      const v = Number((e.target as HTMLInputElement).value);
+      if (!isNaN(v)) this.patchForm({ userSeatingDistanceMin: v });
+    });
+    byId('inp-dist-max')?.addEventListener('input', (e) => {
+      const v = Number((e.target as HTMLInputElement).value);
+      if (!isNaN(v)) this.patchForm({ userSeatingDistanceMax: v });
     });
     byId('sel-person-action')?.addEventListener('change', (e) => {
       this.patchForm({ personMismatchAction: (e.target as HTMLSelectElement).value as any });
@@ -3645,6 +3659,13 @@ class AppUI {
     byId('btn-test-chime')?.addEventListener('click', () => {
       playChime('desk', this.form?.audioChimeVolume ?? 0.2, this.selectedChimeStyle);
     });
+    byId('rng-chime-volume')?.addEventListener('input', (e) => {
+      const v = Math.max(0, Math.min(100, Number((e.target as HTMLInputElement).value)));
+      this.patchForm({ audioChimeVolume: v / 100 });
+      const elVal = byId('val-chime-volume');
+      if (elVal) elVal.textContent = `${v}%`;
+      playChime('desk', v / 100, this.selectedChimeStyle);
+    });
 
     // Logs Filtering & Search
     document.querySelectorAll<HTMLElement>('[data-log-filter]').forEach((chip) => {
@@ -3675,8 +3696,44 @@ class AppUI {
         /\[(AUDIO-|SWITCH-|APP-|RADAR-EVENT|WARN|ERROR)/i.test(l)
       );
 
-      // Ostatnie próbki telemetryczne dla podglądu działania radaru
-      const recentTelemetry = logsToInclude.filter((l) => /\[RADAR-/i.test(l)).slice(-60);
+      // Ostatnie próbki telemetryczne dla podglądu działania radaru —
+      // 200 ramek z odfiltrowanym szumem (duplikaty lux, powtórki bez zmiany wartości).
+      const stripTs = (l: string) => l.replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '').replace(/\x1B\[[0-9;]*m/g, '').trim();
+      const isNoiseRaw = (l: string) => /bh1750\.sensor|Illuminance|illuminance/i.test(l);
+      const dspVal = (l: string) => {
+        const m = l.match(/\[RADAR-DSP\]\s*(Tętno|Oddech|Dystans|Światło):\s*([\d.]+)/);
+        return m ? `${m[1]}:${m[2]}` : null;
+      };
+      const filteredTelemetry: string[] = [];
+      let lastRawNorm = '';
+      let lastDspSig: string | null = null;
+      for (const l of logsToInclude) {
+        // Zdarzenia kluczowe zawsze wchodzą (rzadkie, nośne)
+        if (/\[(RADAR-EVENT|RADAR-AMBIG|SWITCH-|AUDIO-|WARN|ERROR|APP-)/i.test(l)) {
+          filteredTelemetry.push(l);
+          continue;
+        }
+        // Przetworzony sygnał: trzymamy tylko gdy zmieniła się wartość wyjściowa
+        if (/\[RADAR-DSP/i.test(l)) {
+          const sig = dspVal(l);
+          if (sig && sig !== lastDspSig) {
+            filteredTelemetry.push(l);
+            lastDspSig = sig;
+          }
+          continue;
+        }
+        // Surowe ramki: bez luxa i bez identycznych powtórek
+        if (/\[RADAR-RAW/i.test(l)) {
+          if (isNoiseRaw(l)) continue;
+          const norm = stripTs(l);
+          if (norm && norm !== lastRawNorm) {
+            filteredTelemetry.push(l);
+            lastRawNorm = norm;
+          }
+          continue;
+        }
+      }
+      const recentTelemetry = filteredTelemetry.slice(-200);
 
       const report = [
         `# Raport Diagnostyczny DeskSense (dla Agenta AI / Programisty)`,
@@ -3686,7 +3743,7 @@ class AppUI {
         `## 📡 Radar mmWave & Stan Obecności`,
         `- Aktywne źródło: ${snap?.ha?.activeSource === 'ha' ? 'Home Assistant OS' : 'USB COM Port'}`,
         `- Stan obecności (Presence): ${snap?.radar?.presence ? 'OBECNY PRZY BIURKU (true)' : 'POZA FOTELEM (false)'}`,
-        `- Dystans live: ${this.telemetry.distanceCm ?? '--'} cm (strefa: ${form?.radarMinDistanceCm ?? 40} - ${form?.radarMaxDistanceCm ?? 110} cm, bramka: ${form?.radarDistanceGateEnabled ? 'WŁ' : 'WYŁ'})`,
+        `- Dystans live: ${this.telemetry.distanceCm ?? '--'} cm (strefa: ${form?.radarMinDistanceCm ?? 40} - ${form?.radarMaxDistanceCm ?? 110} cm, bramka: ${form?.radarDistanceGateEnabled ? 'WŁ' : 'WYŁ'})${this.telemetry.distanceTrusted === false ? ' | CEL NIEPEWNY (kot?)' : ''} | Cele: ${this.telemetry.targetCount ?? '—'}`,
         `- Biometria live: Tętno: ${this.telemetry.heartRate ?? '--'} BPM | Oddech: ${this.telemetry.breathRate ?? '--'} RPM`,
         `- Oświetlenie: ${typeof this.telemetry.illuminanceLux === 'number' ? `${this.telemetry.illuminanceLux} lx` : '--'}`,
         `- Port USB: ${snap?.radar?.port || form?.port || 'auto'} (baud: ${form?.baudRate || 115200})`,
@@ -3710,7 +3767,7 @@ class AppUI {
         keyEvents.length > 0 ? keyEvents.join('\n') : 'Brak zarejestrowanych zdarzeń przełączania w buforze.',
         '```',
         ``,
-        `## 🌊 Ostatnia Próbka Strumienia Radaru (Ostatnie 60 ramek)`,
+        `## 🌊 Ostatnia Próbka Strumienia Radaru (Ostatnie 200 ramek, bez szumu)`,
         '```',
         recentTelemetry.length > 0 ? recentTelemetry.join('\n') : 'Brak ramek telemetrycznych.',
         '```'
@@ -3751,18 +3808,18 @@ class AppUI {
       this.pushToast('Wyczyszczono logi');
     });
 
-    // Oficjalny Stock Firmware Seeed
+    // Firmware & Flasher MR60BHA2 (limengdu/MR60BHA2_ESPHome_external_components)
     byId('btn-open-stock-bin')?.addEventListener('click', () => {
-      void window.api.openExternal('https://files.seeedstudio.com/wiki/SeeedStudio-XIAO-ESP32C6/seeedstudio-mr60bha2-kit-esp32c6.factory.bin');
-      this.pushToast('Otwieram pobieranie pliku fabrycznego (.bin)…');
+      void window.api.openExternal('https://github.com/limengdu/MR60BHA2_ESPHome_external_components/releases');
+      this.pushToast('Otwieram Releases z binarkami firmware…');
     });
     byId('btn-open-seeed-wiki')?.addEventListener('click', () => {
-      void window.api.openExternal('https://wiki.seeedstudio.com/xiao_esp32c6_mr60bha2/');
-      this.pushToast('Otwieram dokumentację i Web Flasher Seeed…');
+      void window.api.openExternal('https://limengdu.github.io/MR60BHA2_ESPHome_external_components/');
+      this.pushToast('Otwieram Web Flasher ESPHome…');
     });
     byId('btn-open-seeed-gh')?.addEventListener('click', () => {
-      void window.api.openExternal('https://github.com/Seeed-Studio/Seeed_Arduino_MR60BHA2');
-      this.pushToast('Otwieram repozytorium GitHub Seeed…');
+      void window.api.openExternal('https://github.com/limengdu/MR60BHA2_ESPHome_external_components');
+      this.pushToast('Otwieram repozytorium GitHub ESPHome…');
     });
 
     // Updates & About

@@ -34,6 +34,7 @@ export const DEFAULTS: AppConfig = {
   timeoutAwayMs: 3000,
   timeoutDeskMs: 300,
   radarDistanceGateEnabled: true,
+  radarAmbiguityGuardEnabled: true,
   radarMinDistanceCm: 40,
   radarMaxDistanceCm: 110,
   radarSensitivity: 80,

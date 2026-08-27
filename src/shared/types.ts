@@ -55,6 +55,9 @@ export interface AppConfig {
   timeoutAwayMs: number;
   timeoutDeskMs: number;
   radarDistanceGateEnabled: boolean;
+  /** Wstrzymuje bramkę odległości/filtr zwierzaka, gdy radar nie potrafi rozstrzygnąć,
+   *  którego celu (użytkownik vs kot) dotyczy odczyt dystansu/biometrii. */
+  radarAmbiguityGuardEnabled: boolean;
   radarMinDistanceCm: number;
   radarMaxDistanceCm: number;
   radarSensitivity: number;
@@ -142,6 +145,10 @@ export interface AutoTuningStatus {
 export interface RadarTelemetry {
   presence?: boolean;
   distanceCm?: number;
+  /** false = radar niejednoznaczny (kot + człowiek) — dystans może należeć do kota */
+  distanceTrusted?: boolean;
+  /** Liczba celów śledzonych przez radar (ramka 0x0A04 / sensor ESPHome target_number) */
+  targetCount?: number;
   heartRate?: number;
   breathRate?: number;
   illuminanceLux?: number;

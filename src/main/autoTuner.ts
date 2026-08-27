@@ -38,7 +38,12 @@ export default class AutoTuner {
   constructor(config: Config) {
     this.config = config;
 
-    this.distanceMean = Number(config.get('radarLearnedDistanceCenter') || 0);
+    let distCenter = Number(config.get('radarLearnedDistanceCenter') || 0);
+    // Sanityzacja: jeśli historycznie zapisano dystans spoza realnego biurka (np. 141 cm ze ściany/tła), resetujemy do 0
+    if (distCenter < 35 || distCenter > 120) {
+      distCenter = 0;
+    }
+    this.distanceMean = distCenter;
     this.distanceMad = Number(config.get('radarLearnedDistanceVariance') || 0);
     this.heartRateMean = Number(config.get('radarLearnedHeartRate') || 0);
     this.breathRateMean = Number(config.get('radarLearnedBreathRate') || 0);
@@ -72,7 +77,9 @@ export default class AutoTuner {
 
     const now = Date.now();
 
-    if (isSeated && distanceCm > 25 && distanceCm < 220) {
+    // Uczymy się TYLKO w realnym korytarzu biurkowym (35 - 120 cm).
+    // Odczyty powyżej 120 cm (stanie, tło, ściana) nie mogą zafałszować środka biurka.
+    if (isSeated && distanceCm >= 35 && distanceCm <= 120) {
       // Licznik próbek: feedSample leci osobno dla dystansu/tętna/oddechu
       // (3× na jeden odczyt radaru) — throttling 250 ms liczy burst jako
       // JEDNĄ próbkę, inaczej kalibracja "gotowa" po ~7 prawdziwych odczytach.
@@ -84,7 +91,7 @@ export default class AutoTuner {
 
       if (this.distanceMean === 0) {
         this.distanceMean = distanceCm;
-        this.distanceMad = 15;
+        this.distanceMad = 12;
       } else {
         const diff = Math.abs(distanceCm - this.distanceMean);
         this.distanceMean = this.distanceMean + this.alphaDist * (distanceCm - this.distanceMean);
@@ -129,19 +136,26 @@ export default class AutoTuner {
   }
 
   getDynamicGate(): { minGateCm: number; maxGateCm: number; centerCm: number; isCalibrated: boolean } {
+    const cfgMin = Number(this.config.get('radarMinDistanceCm') ?? 40);
+    const cfgMax = Number(this.config.get('radarMaxDistanceCm') ?? 115);
+
     if (this.distanceMean <= 0) {
       return {
-        minGateCm: Number(this.config.get('radarMinDistanceCm') || 40),
-        maxGateCm: Number(this.config.get('radarMaxDistanceCm') || 110),
+        minGateCm: cfgMin,
+        maxGateCm: cfgMax,
         centerCm: 75,
         isCalibrated: false
       };
     }
 
-    const margin = Math.max(16, Math.min(38, Math.round(this.distanceMad * 2.0 + 8)));
+    const margin = Math.max(18, Math.min(35, Math.round(this.distanceMad * 2.0 + 8)));
+    const calculatedMin = Math.max(25, Math.round(this.distanceMean - margin));
+    const calculatedMax = Math.min(180, Math.round(this.distanceMean + margin + 8));
+
+    // Guardrails: Auto-Tuning może tylko ROZSZERZAĆ strefę fotela, a nie odcinać poprawne siedzenie
     return {
-      minGateCm: Math.max(25, Math.round(this.distanceMean - margin)),
-      maxGateCm: Math.min(180, Math.round(this.distanceMean + margin + 6)),
+      minGateCm: Math.min(cfgMin, calculatedMin),
+      maxGateCm: Math.max(cfgMax, calculatedMax),
       centerCm: Math.round(this.distanceMean),
       isCalibrated: this.samplesCount >= 15
     };
@@ -158,13 +172,16 @@ export default class AutoTuner {
   } {
     const hr = Math.round(this.heartRateMean);
     const br = Math.round(this.breathRateMean);
+    const cfgHrMin = Number(this.config.get('userHeartRateMin') ?? 55);
+    const cfgHrMax = Number(this.config.get('userHeartRateMax') ?? 78);
+
     return {
       heartRateAvg: hr || 0,
-      heartRateMin: hr > 0 ? Math.max(45, hr - 13) : Number(this.config.get('userHeartRateMin') || 55),
-      heartRateMax: hr > 0 ? Math.min(125, hr + 15) : Number(this.config.get('userHeartRateMax') || 78),
+      heartRateMin: hr > 0 ? Math.max(45, Math.min(cfgHrMin, hr - 15)) : cfgHrMin,
+      heartRateMax: hr > 0 ? Math.min(130, Math.max(cfgHrMax, hr + 18)) : cfgHrMax,
       breathRateAvg: br || 0,
-      breathRateMin: br > 0 ? Math.max(8, br - 4) : 10,
-      breathRateMax: br > 0 ? Math.min(24, br + 4) : 20,
+      breathRateMin: br > 0 ? Math.max(7, br - 5) : 10,
+      breathRateMax: br > 0 ? Math.min(26, br + 5) : 20,
       isCalibrated: this.samplesCount >= 20 && hr > 0
     };
   }

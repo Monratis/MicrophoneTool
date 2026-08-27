@@ -1028,7 +1028,7 @@ body {
   flex-direction: column;
   align-items: center;
   z-index: 10;
-  transition: left 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: left 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
   pointer-events: none;
 }
 
@@ -1073,11 +1073,51 @@ body {
   margin-top: 6px;
 }
 
-.fc-scope-presets {
+/* Interaktywne uchwyty do przeciągania granic strefy fotela */
+.fc-scope-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 16px;
+  transform: translateX(-50%);
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 8;
   display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-top: 4px;
+  align-items: center;
+  justify-content: center;
+}
+
+.fc-scope-handle::before {
+  content: '';
+  width: 6px;
+  height: 100%;
+  border-radius: 3px;
+  background: #e2e8f0;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.fc-scope-handle:hover::before {
+  transform: scaleX(1.4);
+}
+
+.fc-scope-handle.min::before {
+  background: var(--fc-accent-blue);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.9);
+}
+
+.fc-scope-handle.max::before {
+  background: var(--fc-accent-green);
+  box-shadow: 0 0 10px rgba(114, 227, 57, 0.9);
+}
+
+/* Podczas przeciągania wyłączamy animacje stref, aby uchwyt nie zostawał w tyle */
+.fc-scope-track.dragging .fc-scope-dead-zone,
+.fc-scope-track.dragging .fc-scope-active-zone,
+.fc-scope-track.dragging .fc-scope-cutoff-zone {
+  transition: none;
 }
 
 .fc-preset-pill {
@@ -1118,25 +1158,6 @@ body {
 .fc-snooze-pill:hover {
   background: rgba(245, 158, 11, 0.25);
   border-color: #fbbf24;
-}
-
-.fc-health-timer {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--fc-card-border);
-  color: var(--fc-text-secondary);
-  padding: 3px 8px;
-  font-size: 11px;
-  border-radius: 12px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-weight: 500;
-}
-
-.fc-health-timer.warn {
-  border-color: rgba(245, 158, 11, 0.5);
-  color: #fbbf24;
-  background: rgba(245, 158, 11, 0.1);
 }
 
 /* QoL: Log Toolbar & Search */
@@ -1455,6 +1476,73 @@ body {
   flex-direction: column;
   gap: 16px;
   max-width: 900px;
+}
+
+/* ---------- Ustawienia: lewy panel nawigacji + treść ---------- */
+
+.fc-settings-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.fc-settings-nav {
+  width: 210px;
+  min-width: 210px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--fc-bg-darker);
+  border: 1px solid var(--fc-card-border);
+  border-radius: var(--fc-radius);
+  padding: 10px;
+  position: sticky;
+  top: 0;
+}
+
+.fc-settings-nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border-radius: var(--fc-radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fc-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.fc-settings-nav-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--fc-text-primary);
+}
+
+.fc-settings-nav-btn.active {
+  background: var(--fc-card);
+  color: var(--fc-accent-green);
+  border-color: var(--fc-card-border);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.fc-settings-nav-icon {
+  width: 22px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.fc-settings-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.fc-settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
 .fc-settings-group {

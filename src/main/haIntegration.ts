@@ -578,25 +578,30 @@ export default class HomeAssistantIntegration extends EventEmitter {
     // 2. Encja dystansu
     if (distanceTarget && entityId === distanceTarget) {
       const val = parseFloat(rawState);
-      if (Number.isFinite(val) && val > 0) {
-        const unit = String(stateObj.attributes?.unit_of_measurement || '').toLowerCase();
-        let cm: number;
-        if (unit === 'm') {
-          cm = Math.round(val * 100);
-        } else if (unit === 'mm') {
-          cm = Math.round(val / 10);
-        } else if (unit === 'cm') {
-          cm = Math.round(val);
-        } else {
-          cm = val < 10 ? Math.round(val * 100) : Math.round(val);
-        }
-
-        if (cm > 0 && cm <= 800) {
-          if (now - this.lastDistanceLogTime > 2500) {
-            this.lastDistanceLogTime = now;
-            appendLog('HAOS', `Encja dystansu [${entityId}] = '${rawState}' (${cm} cm)`);
+      if (Number.isFinite(val)) {
+        if (val > 0) {
+          const unit = String(stateObj.attributes?.unit_of_measurement || '').toLowerCase();
+          let cm: number;
+          if (unit === 'm') {
+            cm = Math.round(val * 100);
+          } else if (unit === 'mm') {
+            cm = Math.round(val / 10);
+          } else if (unit === 'cm') {
+            cm = Math.round(val);
+          } else {
+            cm = val < 10 ? Math.round(val * 100) : Math.round(val);
           }
-          this.radar.feedExternalTelemetry({ distanceCm: cm, source: 'ha' });
+
+          if (cm > 0 && cm <= 800) {
+            if (now - this.lastDistanceLogTime > 2500) {
+              this.lastDistanceLogTime = now;
+              appendLog('HAOS', `Encja dystansu [${entityId}] = '${rawState}' (${cm} cm)`);
+            }
+            this.radar.feedExternalTelemetry({ distanceCm: cm, source: 'ha' });
+            processed = true;
+          }
+        } else if (val === 0) {
+          this.radar.feedExternalTelemetry({ distanceCm: 0, source: 'ha' });
           processed = true;
         }
       }
@@ -605,18 +610,28 @@ export default class HomeAssistantIntegration extends EventEmitter {
     // 3. Encja tętna
     if (heartTarget && entityId === heartTarget) {
       const bpm = Math.round(parseFloat(rawState));
-      if (Number.isFinite(bpm) && bpm >= 30 && bpm <= 240) {
-        this.radar.feedExternalTelemetry({ heartRate: bpm, source: 'ha' });
-        processed = true;
+      if (Number.isFinite(bpm)) {
+        if (bpm >= 30 && bpm <= 240) {
+          this.radar.feedExternalTelemetry({ heartRate: bpm, source: 'ha' });
+          processed = true;
+        } else if (bpm === 0) {
+          this.radar.feedExternalTelemetry({ heartRate: 0, source: 'ha' });
+          processed = true;
+        }
       }
     }
 
     // 4. Encja oddechu
     if (breathTarget && entityId === breathTarget) {
       const rpm = Math.round(parseFloat(rawState));
-      if (Number.isFinite(rpm) && rpm >= 5 && rpm <= 70) {
-        this.radar.feedExternalTelemetry({ breathRate: rpm, source: 'ha' });
-        processed = true;
+      if (Number.isFinite(rpm)) {
+        if (rpm >= 5 && rpm <= 70) {
+          this.radar.feedExternalTelemetry({ breathRate: rpm, source: 'ha' });
+          processed = true;
+        } else if (rpm === 0) {
+          this.radar.feedExternalTelemetry({ breathRate: 0, source: 'ha' });
+          processed = true;
+        }
       }
     }
 

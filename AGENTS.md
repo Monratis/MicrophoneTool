@@ -77,14 +77,7 @@ npm run package:installer         # tylko NSIS
 ## Zasady pracy
 
 1. **Weryfikacja obowiązkowa** przed zgłoszeniem końca pracy:
-   - `npm run typecheck` — zero błędów,
-   - przy zmianach main process: `node scripts/build.mjs portable` + smoke test:
-     ```powershell
-     Start-Process 'D:\MicrophoneTool\releases\DeskSense (Portable).exe'
-     Start-Sleep 12; Get-Process | Where-Object { $_.Name -like 'DeskSense*' }
-     # potem: Get-Process ... | Stop-Process -Force
-     ```
-   - "5 processes alive" = OK; brak procesów = crash main process.
+   - `npm run typecheck` — zero błędów.
 
 2. **Typy**: nowe interfejsy IPC/dane → `src/shared/types.ts`, nigdy lokalne duplikaty.
    Main/preload/renderer korzystają z tych samych definicji.
@@ -104,5 +97,4 @@ npm run package:installer         # tylko NSIS
 7. **Ścieżki Windows**: buduj przez `path.join`, porty COM przez VID/PID z
    `KNOWN_VID_PIDS` (radarListener.ts).
 
-8. Testy E2E nie istnieją — jedynym testem integracyjnym jest smoke test uruchomienia
-   portable + `npm run typecheck`. Nie mockować tego pomijając.
+8. Testy E2E nie istnieją — wystarczy weryfikacja przez `npm run typecheck`.

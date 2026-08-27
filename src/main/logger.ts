@@ -17,7 +17,7 @@ export function appendLog(category: string, message: string): void {
   const entry = `[${ts}] [${category}] ${message}`;
   logBuffer.push(entry);
   if (logBuffer.length > MAX_LOG_LINES) {
-    logBuffer.shift();
+    logBuffer.splice(0, 1000);
   }
   if (sink) sink(entry);
 }
