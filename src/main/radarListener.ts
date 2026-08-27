@@ -151,30 +151,46 @@ private radarAmbiguous = false;
     if (!this.running) return;
     const now = Date.now();
 
-    // 1. Wygaszanie przedawnionej telemetrii biometrycznej (stale decay po 3.5s ciszy na danym sensorze)
     let telemetryChanged = false;
-    if (this.telemetry.heartRate && this.lastHeartRateTime > 0 && now - this.lastHeartRateTime > 3500) {
-      this.telemetry.heartRate = 0;
-      this.heartMedian.reset();
-      this.heartEMA.reset();
-      telemetryChanged = true;
+
+    // Gdy obecność jest aktywna (presence == true), NIE wygaszamy dystansu ani filtrów!
+    // Radar Seeed w spoczynku wysyła dystans co kilka sekund.
+    // Dystans jest zerowany wyłącznie gdy użytkownik naprawdę opuści biurko (handleRawPresence(false)).
+    if (!this.presence) {
+      if (this.telemetry.distanceCm && this.lastDistanceTime > 0 && now - this.lastDistanceTime > 3500) {
+        this.telemetry.distanceCm = 0;
+        this.telemetry.distanceTrusted = true;
+        this.distanceFilter.reset();
+        this.radarAmbiguous = false;
+        this.ambigStreak = 0;
+        telemetryChanged = true;
+      }
+      if (this.telemetry.heartRate && this.lastHeartRateTime > 0 && now - this.lastHeartRateTime > 3500) {
+        this.telemetry.heartRate = 0;
+        this.heartMedian.reset();
+        this.heartEMA.reset();
+        telemetryChanged = true;
+      }
+      if (this.telemetry.breathRate && this.lastBreathRateTime > 0 && now - this.lastBreathRateTime > 3500) {
+        this.telemetry.breathRate = 0;
+        this.breathMedian.reset();
+        this.breathEMA.reset();
+        telemetryChanged = true;
+      }
+    } else {
+      // W trakcie aktywnej obecności wygaszamy biometrię tylko przy bardzo długiej ciszy (>25s)
+      if (this.telemetry.heartRate && this.lastHeartRateTime > 0 && now - this.lastHeartRateTime > 25000) {
+        this.telemetry.heartRate = 0;
+        telemetryChanged = true;
+      }
+      if (this.telemetry.breathRate && this.lastBreathRateTime > 0 && now - this.lastBreathRateTime > 25000) {
+        this.telemetry.breathRate = 0;
+        telemetryChanged = true;
+      }
     }
-    if (this.telemetry.breathRate && this.lastBreathRateTime > 0 && now - this.lastBreathRateTime > 3500) {
-      this.telemetry.breathRate = 0;
-      this.breathMedian.reset();
-      this.breathEMA.reset();
-      telemetryChanged = true;
-    }
-    if (this.telemetry.distanceCm && this.lastDistanceTime > 0 && now - this.lastDistanceTime > 3500) {
-      this.telemetry.distanceCm = 0;
-      this.telemetry.distanceTrusted = true;
-      this.distanceFilter.reset();
-      this.radarAmbiguous = false;
-      this.ambigStreak = 0;
-      telemetryChanged = true;
-    }
+
     // Wygaszanie liczby celów — sensor przestał raportować point cloud
-    if (this.telemetry.targetCount !== undefined && this.lastTargetCountTime > 0 && now - this.lastTargetCountTime > 4000) {
+    if (this.telemetry.targetCount !== undefined && this.lastTargetCountTime > 0 && now - this.lastTargetCountTime > 6000) {
       this.telemetry.targetCount = undefined;
       this.updateAmbiguity();
       telemetryChanged = true;
@@ -186,20 +202,21 @@ private radarAmbiguous = false;
     }
 
     // 2. Watchdog obecności: jeśli aplikacja uważa, że użytkownik jest przy biurku,
-    // ale od >4500 ms nie przyszedł ŻADEN odczyt obecności ani aktywny odczyt biometrii/dystansu
+    // ale od >8000 ms nie przyszedł ŻADEN pakiet z portu szeregowego
     if (this.presence) {
-      const lastBioTime = Math.max(
+      const lastActiveTime = Math.max(
         this.lastPresencePacketTime,
         this.lastDistanceTime,
         this.lastHeartRateTime,
-        this.lastBreathRateTime
+        this.lastBreathRateTime,
+        this.lastAnyPacketTime
       );
-      const silenceDuration = lastBioTime > 0 ? now - lastBioTime : (this.lastAnyPacketTime > 0 ? now - this.lastAnyPacketTime : 5000);
+      const silenceDuration = lastActiveTime > 0 ? now - lastActiveTime : 8000;
 
-      if (silenceDuration > 4500) {
+      if (silenceDuration > 8000) {
         appendLog(
           'RADAR',
-          `Brak sygnału obecności/biometrii przez ${(silenceDuration / 1000).toFixed(1)}s — automatyczne wygaszenie obecności (watchdog)`
+          `Brak jakiegokolwiek sygnału z radaru przez ${(silenceDuration / 1000).toFixed(1)}s — automatyczne wygaszenie obecności (watchdog)`
         );
         this.handleRawPresence(false);
       }
