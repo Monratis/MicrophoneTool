@@ -65,7 +65,6 @@ export interface AppConfig {
   petFilterEnabled: boolean;
   radarAutoTuningEnabled: boolean;
   radarAutoTuningSpeed: 'balanced' | 'fast' | 'conservative';
-  radarAutoTuningNoiseFloor: number;
   radarLearnedDistanceCenter: number;
   radarLearnedDistanceVariance: number;
   radarLearnedHeartRate: number;
@@ -79,8 +78,12 @@ export interface AppConfig {
   signalrgbPort: number;
   signalrgbAwayAction: 'solid_color' | 'turn_off' | 'dim';
   signalrgbAwayColor: string;
+  /** Nazwa efektu aplikowanego przy odejściu przez deep-link (case-sensitive); '' = Solid Color */
+  signalrgbAwayEffect: string;
   signalrgbAwayBrightness: number;
   signalrgbRestoreOnDesk: boolean;
+  /** Efekt aplikowany przy powrocie przez deep-link, gdy REST niedostępny (brak Pro); '' = brak */
+  signalrgbDeskEffect: string;
   /** Włącz czarny wygaszacz ekranu po odejściu od biurka */
   screensaverOnAway: boolean;
   /** Czas w ms nieobecności, po którym włącza się czarny wygaszacz (domyślnie 60000 = 1 min) */
@@ -119,6 +122,17 @@ export interface AppConfig {
   haHeartRateEntity: string;
   /** Opcjonalny identyfikator encji oddechu w HA (np. sensor.seeed_mr60bha2_breath_rate) */
   haBreathRateEntity: string;
+  /**
+   * Encja wołana przy odejściu od biurka (AWAY): automation.* / script.* /
+   * button.* / scene.* — DeskSense sam dobiera usługę wg domeny.
+   */
+  haAutomationOnAway: string;
+  /** Encja wołana przy powrocie do biurka (DESK), jw. */
+  haAutomationOnDesk: string;
+  /** Przycisk HAOS (button.*), którego wciśnięcie przełącza pauzę automatyki (snooze) */
+  haButtonSnoozeEntity: string;
+  /** Przycisk HAOS (button.*), którego wciśnięcie przełącza wyciszenie mikrofonu */
+  haButtonMuteEntity: string;
   /** Tryb cyfrowej stabilizacji i wygładzania odczytów radaru (ultra = mocny filtr medianowy+EMA, balanced = zbalansowany, raw = surowy) */
   radarSmoothingMode: 'ultra' | 'balanced' | 'raw';
   /** Włącz diodę statusową WS2812 na sensorze */
@@ -138,14 +152,11 @@ export interface HomeAssistantStatus {
   connected: boolean;
   version?: string;
   error?: string;
-  lastUpdate?: number;
-  entitiesCount?: number;
   activeSource?: 'ha' | 'usb' | 'none';
 }
 
 export interface AutoTuningStatus {
   enabled: boolean;
-  noiseFloor: number;
   samplesCount: number;
   adaptedDistanceCenter: number;
   adaptedDistanceMin: number;
@@ -155,7 +166,6 @@ export interface AutoTuningStatus {
   stabilityScore: number;
   /** false dopóki kroczące okno stabilności się nie napełni (UI pokazuje "Nauka…") */
   stabilityReady: boolean;
-  lastAdaptedAt: number;
 }
 
 export interface RadarTelemetry {
@@ -175,7 +185,6 @@ export interface RadarTelemetry {
     uptimeSec?: number;
     chipTempC?: number;
   };
-  lastUpdate?: number;
 }
 
 export interface DiagRecordResult {
@@ -281,6 +290,13 @@ export interface DetectResult {
   recommended: { micDeskName: string; micHeadsetName: string };
 }
 
+/** Wynik akcji/testu SignalRGB: via = ścieżka wykonania (rest/deeplink/none). */
+export interface SignalRGBTestResult {
+  ok: boolean;
+  via?: 'rest' | 'deeplink' | 'none';
+  reason?: string;
+}
+
 /** Raport sesji diagnostycznej "Wyjście z pokoju" (diag:stop). */
 export interface DiagSessionReport {
   startedAt: number;
@@ -322,14 +338,25 @@ export interface Api {
     ok: boolean;
     message?: string;
     error?: string;
-    binarySensors: { entity_id: string; name: string; state: string }[];
-    sensors: { entity_id: string; name: string; state: string; unit?: string }[];
+    binarySensors: { entity_id: string; name: string; state: string; deviceName?: string }[];
+    sensors: { entity_id: string; name: string; state: string; unit?: string; deviceName?: string }[];
+    /** Encje akcji (button/automation/script/scene/input_boolean/switch) do pickera automatyzacji i przycisków */
+    actions?: { entity_id: string; name: string; domain: string; deviceName?: string }[];
     recommended?: { presence?: string; distance?: string; heartRate?: string; breathRate?: string };
   }>;
+  /**
+   * Wywołanie usługi na encji HAOS dla domeny (automation/script/button/scene/
+   * input_boolean/switch) — używane przez przyciski "Testuj" w panelu HAOS.
+   */
+  haCallService: (entityId: string) => Promise<{ ok: boolean; message?: string; error?: string }>;
 
   // SignalRGB Integration
-  signalrgbTestAway: () => Promise<boolean>;
-  signalrgbTestDesk: () => Promise<boolean>;
+  signalrgbTestAway: () => Promise<SignalRGBTestResult>;
+  signalrgbTestDesk: () => Promise<SignalRGBTestResult>;
+  /** Wykryty tier Local API: REST dostępny czy 403 (wymagany Pro) + treść odmowy */
+  signalrgbGetStatus: () => Promise<{ restAvailable: boolean; proRequired: boolean; detail?: string }>;
+  /** Zainstalowane efekty z dysku VortxEngine (podpowiedzi do pickerów, bez Pro) */
+  signalrgbListEffects: () => Promise<string[]>;
 
   openExternal: (url: string) => Promise<boolean>;
   copyToClipboard: (text: string) => Promise<boolean>;

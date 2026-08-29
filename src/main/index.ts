@@ -176,8 +176,22 @@ app.whenReady().then(() => {
   const ha = new HomeAssistantIntegration({ config, radar });
   const screen = new ScreenManager(config, audio);
 
-  const controller = new AppController(radar, audio, config, screen, discord, signalrgb);
+  const controller = new AppController(radar, audio, config, screen, discord, signalrgb, ha);
   const updater = new AppUpdater({ onEvent: (ev) => pushEvent(ev.type, ev), config });
+
+  // Przyciski HAOS sterujące apką: snooze = pauza/wznowienie automatyki (15 min),
+  // mute = ten sam pełny feedback co skrót globalny (dioda + toast + powiadomienie).
+  ha.setCommandHandlers({
+    snoozeToggle: () => {
+      if (!ctx) return;
+      ctx.controller.setSnooze(ctx.controller.isSnoozed() ? 0 : 15);
+      refreshSnapshot();
+    },
+    muteToggle: () => {
+      if (!ctx) return;
+      void toggleMuteWithFeedback(ctx);
+    }
+  });
 
   audio.on('toolStatus', (msg: string) => pushEvent('toast', { message: msg }));
   radar.on('telemetry', (tel) => pushEvent('telemetry', tel));

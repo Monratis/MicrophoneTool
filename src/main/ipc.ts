@@ -37,6 +37,10 @@ export function registerIpc(ctx: AppContext): void {
     const prevHaDistance = ctx.config.get('haDistanceEntity');
     const prevHaHeart = ctx.config.get('haHeartRateEntity');
     const prevHaBreath = ctx.config.get('haBreathRateEntity');
+    const prevHaAutoAway = ctx.config.get('haAutomationOnAway');
+    const prevHaAutoDesk = ctx.config.get('haAutomationOnDesk');
+    const prevHaBtnSnooze = ctx.config.get('haButtonSnoozeEntity');
+    const prevHaBtnMute = ctx.config.get('haButtonMuteEntity');
 
     for (const [key, value] of Object.entries(patch || {})) {
       if (key in ctx.config.data) {
@@ -60,7 +64,11 @@ export function registerIpc(ctx: AppContext): void {
       Boolean(patch && 'haPresenceEntity' in patch && patch.haPresenceEntity !== prevHaPresence) ||
       Boolean(patch && 'haDistanceEntity' in patch && patch.haDistanceEntity !== prevHaDistance) ||
       Boolean(patch && 'haHeartRateEntity' in patch && patch.haHeartRateEntity !== prevHaHeart) ||
-      Boolean(patch && 'haBreathRateEntity' in patch && patch.haBreathRateEntity !== prevHaBreath);
+      Boolean(patch && 'haBreathRateEntity' in patch && patch.haBreathRateEntity !== prevHaBreath) ||
+      Boolean(patch && 'haAutomationOnAway' in patch && patch.haAutomationOnAway !== prevHaAutoAway) ||
+      Boolean(patch && 'haAutomationOnDesk' in patch && patch.haAutomationOnDesk !== prevHaAutoDesk) ||
+      Boolean(patch && 'haButtonSnoozeEntity' in patch && patch.haButtonSnoozeEntity !== prevHaBtnSnooze) ||
+      Boolean(patch && 'haButtonMuteEntity' in patch && patch.haButtonMuteEntity !== prevHaBtnMute);
 
     const discordVoiceNeedsUpdate =
       Boolean(patch) &&
@@ -171,16 +179,25 @@ export function registerIpc(ctx: AppContext): void {
   ipcMain.handle('ha:fetchEntities', async (_e, opts?: { url?: string; token?: string }) =>
     ctx.ha.fetchEntities(opts)
   );
+  // Test wywołania usługi HAOS z panelu (automation/script/button/scene/...)
+  ipcMain.handle('ha:callService', async (_e, entityId: string) => ctx.ha.callService(String(entityId || '')));
 
-  // SignalRGB IPC
-  ipcMain.handle('signalrgb:testAway', async () => {
-    if (ctx.signalrgb) await ctx.signalrgb.onAway();
-    return true;
-  });
-  ipcMain.handle('signalrgb:testDesk', async () => {
-    if (ctx.signalrgb) await ctx.signalrgb.onDesk();
-    return true;
-  });
+  // SignalRGB IPC — zwracają realny wynik akcji (rest/deeplink/none + powód)
+  ipcMain.handle('signalrgb:testAway', async () =>
+    ctx.signalrgb ? ctx.signalrgb.onAway() : { ok: false, reason: 'Integracja niezainicjalizowana' }
+  );
+  ipcMain.handle('signalrgb:testDesk', async () =>
+    ctx.signalrgb ? ctx.signalrgb.onDesk() : { ok: false, reason: 'Integracja niezainicjalizowana' }
+  );
+  ipcMain.handle('signalrgb:getStatus', async () =>
+    ctx.signalrgb
+      ? ctx.signalrgb.inspect()
+      : { restAvailable: false, proRequired: false, detail: 'Integracja niezainicjalizowana' }
+  );
+  // Lista zainstalowanych efektów z dysku (bez Pro) — podpowiedzi do pickerów
+  ipcMain.handle('signalrgb:listEffects', () =>
+    ctx.signalrgb ? ctx.signalrgb.listLocalEffects() : []
+  );
 
   // Updater IPC
   ipcMain.handle('updater:check', async () => await ctx.updater.checkForUpdates());

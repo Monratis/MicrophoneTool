@@ -37,10 +37,13 @@ const api = {
     ipcRenderer.invoke('ha:testConnection', opts),
   haFetchEntities: (opts?: { url?: string; token?: string }) =>
     ipcRenderer.invoke('ha:fetchEntities', opts),
+  haCallService: (entityId: string) => ipcRenderer.invoke('ha:callService', entityId),
 
   // SignalRGB Integration
   signalrgbTestAway: () => ipcRenderer.invoke('signalrgb:testAway'),
   signalrgbTestDesk: () => ipcRenderer.invoke('signalrgb:testDesk'),
+  signalrgbGetStatus: () => ipcRenderer.invoke('signalrgb:getStatus'),
+  signalrgbListEffects: () => ipcRenderer.invoke('signalrgb:listEffects'),
 
   // GitHub Auto Updater & Token
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),

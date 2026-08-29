@@ -29,9 +29,28 @@ interface HAWSMessage {
   result?: HAEntityState[];
 }
 
+/** Wiersz rejestru encji (config/entity_registry/list) — interesuje nas tylko powiązanie z urządzeniem. */
+interface HAEntityRegistryEntry {
+  entity_id: string;
+  device_id?: string;
+}
+
+/** Wiersz rejestru urządzeń (config/device_registry/list). */
+interface HADeviceRegistryEntry {
+  id: string;
+  name?: string;
+  name_by_user?: string;
+}
+
 export default class HomeAssistantIntegration extends EventEmitter {
   private readonly config: Config;
   private readonly radar: RadarListener;
+  /**
+   * Akcje wywoływane z HAOS (przyciski button.*): pauza automatyki i mute
+   * mikrofonu. Dowiązane z index.ts dopiero po zbudowaniu kontrolera —
+   * dlatego setter zamiast konstruktora.
+   */
+  private commands: { snoozeToggle: () => void; muteToggle: () => void } | null = null;
 
   private ws: WebSocket | null = null;
   private running = false;
@@ -44,8 +63,6 @@ export default class HomeAssistantIntegration extends EventEmitter {
     connected: false,
     version: undefined,
     error: undefined,
-    lastUpdate: 0,
-    entitiesCount: 0,
     activeSource: 'none'
   };
 
@@ -53,6 +70,90 @@ export default class HomeAssistantIntegration extends EventEmitter {
     super();
     this.config = config;
     this.radar = radar;
+  }
+
+  /** Dowiązanie akcji sterujących (pauza automatyki / mute) wołanych z przycisków HAOS. */
+  setCommandHandlers(commands: { snoozeToggle: () => void; muteToggle: () => void }): void {
+    this.commands = commands;
+  }
+
+  /** Usługa HA dobierana po domenie encji — wspólna dla automatyzacji i testów z UI. */
+  private serviceForDomain(domain: string): { service: string } | null {
+    switch (domain) {
+      case 'automation': return { service: 'trigger' };
+      case 'script': return { service: 'turn_on' };
+      case 'button': return { service: 'press' };
+      case 'scene': return { service: 'turn_on' };
+      case 'input_boolean': return { service: 'toggle' };
+      case 'switch': return { service: 'toggle' };
+      default: return null;
+    }
+  }
+
+  /**
+   * Wywołanie usługi na encji HAOS (REST). Używane do odpalania automatyzacji
+   * przy przejściach AWAY/DESK oraz przez przyciski "Testuj" w panelu HAOS.
+   */
+  async callService(entityId: string): Promise<{ ok: boolean; message?: string; error?: string }> {
+    const url = this.normalizeHttpUrl();
+    const token = (this.config.get('haToken') || '').trim();
+    const trimmed = String(entityId || '').trim();
+
+    if (!trimmed) {
+      return { ok: false, error: 'Nie podano encji do wywołania' };
+    }
+    if (!token) {
+      return { ok: false, error: 'Brak tokena dostępu (Long-Lived Access Token)' };
+    }
+
+    const domain = trimmed.split('.')[0];
+    const svc = this.serviceForDomain(domain);
+    if (!svc) {
+      return { ok: false, error: `Nieobsługiwana domena "${domain}" (użyj automation/script/button/scene/input_boolean/switch)` };
+    }
+
+    try {
+      const res = await fetch(`${url}/api/services/${domain}/${svc.service}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ entity_id: trimmed }),
+        signal: AbortSignal.timeout(5000)
+      });
+
+      if (res.status === 401) {
+        return { ok: false, error: 'Niepoprawny token dostępu (Błąd 401 Unauthorized)' };
+      }
+      if (res.status === 404) {
+        return { ok: false, error: `Nie znaleziono encji ${trimmed} (Błąd 404)` };
+      }
+      if (!res.ok) {
+        return { ok: false, error: `Home Assistant zwrócił status HTTP ${res.status}` };
+      }
+
+      appendLog('HAOS', `Wywołano usługę ${domain}/${svc.service} na [${trimmed}]`);
+      return { ok: true, message: `Wywołano: ${trimmed} (${domain}/${svc.service})` };
+    } catch (err) {
+      const msg = (err as Error).message || 'Błąd sieci';
+      return { ok: false, error: `Błąd wywołania usługi na ${url}: ${msg}` };
+    }
+  }
+
+  /**
+   * Przejście stanu obecności (desk/headset) — woła skonfigurowaną encję
+   * automatyzacji, jeśli użytkownik ją ustawił. Ciche: błąd trafia tylko do
+   * logów, nie blokuje przełączenia mikrofonu.
+   */
+  async onPresenceTransition(state: 'desk' | 'headset'): Promise<void> {
+    if (!this.config.get('haEnabled')) return;
+    const entityId = this.config.get(state === 'desk' ? 'haAutomationOnDesk' : 'haAutomationOnAway') || '';
+    if (!entityId) return;
+    const res = await this.callService(entityId);
+    if (!res.ok) {
+      appendLog('HAOS', `Automatyzacja przy ${state === 'desk' ? 'powrocie (DESK)' : 'odejściu (AWAY)'} nieudana: ${res.error}`);
+    }
   }
 
   private normalizeHttpUrl(rawUrl?: string): string {
@@ -121,14 +222,100 @@ export default class HomeAssistantIntegration extends EventEmitter {
   }
 
   /**
+   * Jednorazowe pobranie rejestrów encji/urządzeń przez WebSocket (REST ich
+   * nie wystawia). Zwraca mapę entity_id -> nazwa urządzenia; null = rejestry
+   * niedostępne (brak uprawnień / błąd) — UI wtedy pokazuje encje bez grupowania.
+   */
+  private fetchDeviceNameMap(httpUrl: string, token: string): Promise<Map<string, string> | null> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let ws: WebSocket | null = null;
+      const finish = (value: Map<string, string> | null): void => {
+        if (settled) return;
+        settled = true;
+        try { ws?.close(); } catch { /* ignore */ }
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(null), 8000);
+
+      try {
+        const WebSocketClass = typeof WebSocket !== 'undefined' ? WebSocket : (globalThis as any).WebSocket;
+        if (!WebSocketClass) throw new Error('Brak WebSocket');
+        ws = new WebSocketClass(this.getWsUrl(httpUrl)) as WebSocket;
+      } catch {
+        clearTimeout(timer);
+        finish(null);
+        return;
+      }
+
+      const entityToDevice = new Map<string, string>();
+      const deviceNames = new Map<string, string>();
+      let pending = 0;
+      const send = (payload: Record<string, unknown>): void => {
+        try { (ws as WebSocket).send(JSON.stringify(payload)); } catch { /* ignore */ }
+      };
+
+      (ws as WebSocket).onmessage = (event: MessageEvent): void => {
+        try {
+          const msg = JSON.parse(event.data as string) as HAWSMessage & { id?: number; result?: unknown[] };
+          if (msg.type === 'auth_required') {
+            send({ type: 'auth', access_token: token });
+            return;
+          }
+          if (msg.type === 'auth_invalid') {
+            clearTimeout(timer);
+            finish(null);
+            return;
+          }
+          if (msg.type === 'auth_ok') {
+            send({ id: 1, type: 'config/entity_registry/list' });
+            send({ id: 2, type: 'config/device_registry/list' });
+            pending = 2;
+            return;
+          }
+          if (msg.type === 'result' && Array.isArray(msg.result)) {
+            if (msg.id === 1) {
+              for (const e of msg.result as HAEntityRegistryEntry[]) {
+                if (e.entity_id && e.device_id) entityToDevice.set(e.entity_id, e.device_id);
+              }
+            } else if (msg.id === 2) {
+              for (const d of msg.result as HADeviceRegistryEntry[]) {
+                if (d.id) deviceNames.set(d.id, d.name_by_user || d.name || d.id);
+              }
+            }
+            pending--;
+            if (pending <= 0) {
+              clearTimeout(timer);
+              const map = new Map<string, string>();
+              for (const [entityId, deviceId] of entityToDevice) {
+                const deviceName = deviceNames.get(deviceId);
+                if (deviceName) map.set(entityId, deviceName);
+              }
+              finish(map);
+            }
+          }
+        } catch {
+          /* zignoruj uszkodzoną ramkę — timer domknie wynik */
+        }
+      };
+
+      (ws as WebSocket).onerror = () => {
+        clearTimeout(timer);
+        finish(null);
+      };
+    });
+  }
+
+  /**
    * Pobiera wszystkie encje z Home Assistanta i przygotowuje sugerowane mapowania.
    */
   async fetchEntities(opts?: { url?: string; token?: string }): Promise<{
     ok: boolean;
     message?: string;
     error?: string;
-    binarySensors: { entity_id: string; name: string; state: string }[];
-    sensors: { entity_id: string; name: string; state: string; unit?: string }[];
+    binarySensors: { entity_id: string; name: string; state: string; deviceName?: string }[];
+    sensors: { entity_id: string; name: string; state: string; unit?: string; deviceName?: string }[];
+    actions: { entity_id: string; name: string; domain: string; deviceName?: string }[];
     recommended?: {
       presence?: string;
       distance?: string;
@@ -144,7 +331,8 @@ export default class HomeAssistantIntegration extends EventEmitter {
         ok: false,
         error: 'Brak tokena dostępu (Long-Lived Access Token)',
         binarySensors: [],
-        sensors: []
+        sensors: [],
+        actions: []
       };
     }
 
@@ -162,13 +350,22 @@ export default class HomeAssistantIntegration extends EventEmitter {
           ok: false,
           error: `Błąd pobierania encji: HTTP ${res.status}`,
           binarySensors: [],
-          sensors: []
+          sensors: [],
+          actions: []
         };
       }
 
       const states = (await res.json()) as HAEntityState[];
-      const binarySensors: { entity_id: string; name: string; state: string }[] = [];
-      const sensors: { entity_id: string; name: string; state: string; unit?: string }[] = [];
+
+      // Rejestry (device/entity) pobierane osobno przez WebSocket — gdy się nie
+      // uda (uprawnienia/timeout), encje wracają bez nazw urządzeń.
+      const deviceNames = await this.fetchDeviceNameMap(url, token).catch(() => null);
+      const deviceOf = (entityId: string): string | undefined => deviceNames?.get(entityId);
+
+      const binarySensors: { entity_id: string; name: string; state: string; deviceName?: string }[] = [];
+      const sensors: { entity_id: string; name: string; state: string; unit?: string; deviceName?: string }[] = [];
+      const actions: { entity_id: string; name: string; domain: string; deviceName?: string }[] = [];
+      const ACTION_DOMAINS = new Set(['button', 'automation', 'script', 'scene', 'input_boolean', 'switch']);
 
       for (const s of states) {
         const friendlyName = (s.attributes?.friendly_name as string) || s.entity_id;
@@ -176,14 +373,23 @@ export default class HomeAssistantIntegration extends EventEmitter {
           binarySensors.push({
             entity_id: s.entity_id,
             name: friendlyName,
-            state: s.state
+            state: s.state,
+            deviceName: deviceOf(s.entity_id)
           });
         } else if (s.entity_id.startsWith('sensor.')) {
           sensors.push({
             entity_id: s.entity_id,
             name: friendlyName,
             state: s.state,
-            unit: s.attributes?.unit_of_measurement as string | undefined
+            unit: s.attributes?.unit_of_measurement as string | undefined,
+            deviceName: deviceOf(s.entity_id)
+          });
+        } else if (ACTION_DOMAINS.has(s.entity_id.split('.')[0])) {
+          actions.push({
+            entity_id: s.entity_id,
+            name: friendlyName,
+            domain: s.entity_id.split('.')[0],
+            deviceName: deviceOf(s.entity_id)
           });
         }
       }
@@ -191,6 +397,7 @@ export default class HomeAssistantIntegration extends EventEmitter {
       // Sortowanie alfabetyczne po nazwie
       binarySensors.sort((a, b) => a.name.localeCompare(b.name, 'pl'));
       sensors.sort((a, b) => a.name.localeCompare(b.name, 'pl'));
+      actions.sort((a, b) => a.name.localeCompare(b.name, 'pl'));
 
       // Heurystyka doboru rekomendowanych encji
       const recommended = this.detectRecommendedEntities(states);
@@ -199,8 +406,9 @@ export default class HomeAssistantIntegration extends EventEmitter {
         ok: true,
         binarySensors,
         sensors,
+        actions,
         recommended,
-        message: `Pobrano ${binarySensors.length} binarnych i ${sensors.length} numerycznych encji`
+        message: `Pobrano ${binarySensors.length} binarnych, ${sensors.length} numerycznych i ${actions.length} akcji`
       };
     } catch (err) {
       const msg = (err as Error).message || 'Błąd sieci';
@@ -208,7 +416,8 @@ export default class HomeAssistantIntegration extends EventEmitter {
         ok: false,
         error: `Błąd odpytywania encji: ${msg}`,
         binarySensors: [],
-        sensors: []
+        sensors: [],
+        actions: []
       };
     }
   }
@@ -498,10 +707,11 @@ export default class HomeAssistantIntegration extends EventEmitter {
 
     // Odpowiedź na get_states
     if (msg.type === 'result' && Array.isArray(msg.result)) {
-      this.status.entitiesCount = msg.result.length;
       appendLog('HAOS', `Zsynchronizowano stan ${msg.result.length} encji z Home Assistant`);
       for (const s of msg.result) {
-        this.processEntityState(s.entity_id, s);
+        // Wstępna synchronizacja: live=false, żeby stary timestamp przycisku
+        // nie odpalił akcji (snooze/mute) przy każdym starcie aplikacji.
+        this.processEntityState(s.entity_id, s, false);
       }
       return;
     }
@@ -510,7 +720,7 @@ export default class HomeAssistantIntegration extends EventEmitter {
     if (msg.type === 'event' && msg.event?.event_type === 'state_changed') {
       const data = msg.event.data;
       if (data && data.new_state) {
-        this.processEntityState(data.entity_id, data.new_state);
+        this.processEntityState(data.entity_id, data.new_state, true);
       }
     }
   }
@@ -518,13 +728,7 @@ export default class HomeAssistantIntegration extends EventEmitter {
   private lastDistanceLogTime = 0;
   private lastPresenceLogged: boolean | null = null;
 
-  private processEntityState(entityId: string, stateObj: HAEntityState): void {
-    const presenceTarget = this.config.get('haPresenceEntity');
-    const distanceTarget = this.config.get('haDistanceEntity');
-    const heartTarget = this.config.get('haHeartRateEntity');
-    const breathTarget = this.config.get('haBreathRateEntity');
-
-    let processed = false;
+  private processEntityState(entityId: string, stateObj: HAEntityState, live: boolean): void {
     const now = Date.now();
     const rawState = String(stateObj.state || '').trim().toLowerCase();
 
@@ -532,6 +736,30 @@ export default class HomeAssistantIntegration extends EventEmitter {
     if (rawState === 'unavailable' || rawState === 'unknown' || rawState === '') {
       return;
     }
+
+    // 0. Przyciski HAOS sterujące apką — reakcja wyłącznie na żywe zdarzenia
+    // (wciśnięcie button.* = zmiana stanu na timestamp); initial sync pomijany.
+    if (live) {
+      const snoozeButton = this.config.get('haButtonSnoozeEntity');
+      const muteButton = this.config.get('haButtonMuteEntity');
+      if (snoozeButton && entityId === snoozeButton && this.commands) {
+        appendLog('HAOS', `Wciśnięto przycisk HAOS [${entityId}] -> przełączenie pauzy automatyki (snooze)`);
+        this.commands.snoozeToggle();
+        return;
+      }
+      if (muteButton && entityId === muteButton && this.commands) {
+        appendLog('HAOS', `Wciśnięto przycisk HAOS [${entityId}] -> przełączenie wyciszenia mikrofonu`);
+        this.commands.muteToggle();
+        return;
+      }
+    }
+
+    const presenceTarget = this.config.get('haPresenceEntity');
+    const distanceTarget = this.config.get('haDistanceEntity');
+    const heartTarget = this.config.get('haHeartRateEntity');
+    const breathTarget = this.config.get('haBreathRateEntity');
+
+    let processed = false;
 
     // 1. Encja obecności
     if (presenceTarget && entityId === presenceTarget) {
@@ -636,7 +864,6 @@ export default class HomeAssistantIntegration extends EventEmitter {
     }
 
     if (processed) {
-      this.status.lastUpdate = now;
       this.status.activeSource = 'ha';
     }
   }

@@ -4,6 +4,7 @@ import type RadarListener from './radarListener';
 import type AudioController from './audioController';
 import type DiscordIntegration from './discordIntegration';
 import type SignalRGBIntegration from './signalrgbIntegration';
+import type HomeAssistantIntegration from './haIntegration';
 import type ScreenManager from './screenManager';
 import type Config from './config';
 import type { AppMode, DeviceState, DeskState } from '../shared/types';
@@ -19,6 +20,7 @@ export default class AppController extends EventEmitter {
   screen: ScreenManager;
   discord: DiscordIntegration | null;
   signalrgb: SignalRGBIntegration | null;
+  ha: HomeAssistantIntegration | null;
 
   mode: AppMode = 'auto';
   currentDevice: DeviceState | null = null;
@@ -49,7 +51,8 @@ export default class AppController extends EventEmitter {
     config: Config,
     screen: ScreenManager,
     discord: DiscordIntegration | null = null,
-    signalrgb: SignalRGBIntegration | null = null
+    signalrgb: SignalRGBIntegration | null = null,
+    ha: HomeAssistantIntegration | null = null
   ) {
     super();
     this.radar = radar;
@@ -58,6 +61,7 @@ export default class AppController extends EventEmitter {
     this.screen = screen;
     this.discord = discord;
     this.signalrgb = signalrgb;
+    this.ha = ha;
 
     radar.on('desk', () => void this.onRadarState('desk'));
     radar.on('away', () => void this.onRadarState('away'));
@@ -655,7 +659,7 @@ export default class AppController extends EventEmitter {
       }
     }
 
-    // 2. Obsługa przełączania i wyciszania mikrofonów
+    // 3. Obsługa przełączania i wyciszania mikrofonów
     if (this.currentDevice === state) {
       appendLog('SWITCH-ENG', `Profil "${state.toUpperCase()}" jest już aktywny — pomijam przełączanie.`);
       return;
@@ -666,6 +670,12 @@ export default class AppController extends EventEmitter {
       return;
     }
     this.switching = true;
+
+    // Automatyzacje HAOS na realnym przejściu AWAY/DESK — dopiero gdy stan
+    // faktycznie zmienia cel przełączenia (bez duplikatów przy retry/pending).
+    if (this.ha) {
+      void this.ha.onPresenceTransition(state);
+    }
     this.currentDevice = state;
 
     const targetMic = state === 'desk' ? stationaryMic : mobileMic;
