@@ -25,9 +25,9 @@
     "serialport": "^13.0.0"
   },
   "devDependencies": {
-    "@types/node": "^26.3.0",
-    "electron": "^43.4.1",
-    "electron-builder": "^26.15.3",
+    "@types/node": "^26.4.0",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.7",
     "electron-vite": "^5.0.0",
     "rcedit": "^5.0.2",
     "typescript": "^7.0.2",
@@ -73,7 +73,9 @@
       ]
     },
     "portable": {
-      "artifactName": "${productName} (Portable).exe"
+      "artifactName": "${productName} (Portable).exe",
+      "unpackDirName": false,
+      "useZip": true
     },
     "nsis": {
       "artifactName": "${productName} Setup ${version}.exe",

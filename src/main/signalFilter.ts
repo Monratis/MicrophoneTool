@@ -33,53 +33,128 @@ export class MedianFilter {
   }
 }
 
-export class MovingAverageFilter {
-  private buffer: number[] = [];
-  private size: number;
-
-  constructor(size = 5) {
-    this.size = Math.max(1, size);
-  }
-
-  push(val: number): number {
-    if (val <= 0) return 0;
-    this.buffer.push(val);
-    if (this.buffer.length > this.size) {
-      this.buffer.shift();
-    }
-    const sum = this.buffer.reduce((acc, v) => acc + v, 0);
-    return Math.round(sum / this.buffer.length);
-  }
-
-  reset(): void {
-    this.buffer = [];
-  }
-}
-
+/**
+ * Filtr dystansu: mediana (odrzucanie pików) + EMA + martwa strefa + limit tempa zmian.
+ * Dwa realne problemy MR60BHA2 przy bliskim montażu:
+ * 1. kwantyzacja ~5,5 cm i migotanie ±1 krok przy nieruchomym użytkowniku (martwa strefa),
+ * 2. tracker przeskakuje między odbiciami (klatka piersiowa / biurko / monitor) —
+ *    skoki rzędu 20↔60 cm w 2-3 klatkach. Mediana z 5 próbek je wygasa, a limit
+ *    tempa zmian sprawia, że wyświetlana wartość płynie zamiast skakać.
+ * Realne przemieszczenie użytkownika jest podtrzymane ciągłością odczytów,
+ * więc wyjście dogoni je w ~1-2 s.
+ */
 export class DistanceFilter {
   private median: MedianFilter;
+  private alpha: number;
+  private deadband: number;
+  private maxStep: number;
+  private ema = 0;
+  private output = 0;
 
   constructor(size = 5) {
     this.median = new MedianFilter(size);
+    this.alpha = 0.2;
+    this.deadband = 5;
+    this.maxStep = 8;
   }
 
   setMode(mode: 'ultra' | 'balanced' | 'raw'): void {
     if (mode === 'raw') {
       this.median.setSize(1);
+      this.alpha = 1;
+      this.deadband = 0;
+      this.maxStep = 999;
     } else if (mode === 'balanced') {
-      this.median.setSize(3);
+      this.median.setSize(5);
+      this.alpha = 0.2;
+      this.deadband = 5;
+      this.maxStep = 8;
     } else {
       this.median.setSize(5);
+      this.alpha = 0.1;
+      this.deadband = 6;
+      this.maxStep = 4;
     }
   }
 
   push(valCm: number): number {
     if (valCm <= 0 || valCm > 800) return 0;
-    return this.median.push(valCm);
+    const m = this.median.push(valCm);
+    if (m <= 0) return Math.round(this.output);
+    this.ema = this.ema === 0 ? m : this.ema + this.alpha * (m - this.ema);
+    const candidate = Math.round(this.ema);
+    if (this.output === 0) {
+      this.output = candidate;
+    } else if (Math.abs(candidate - this.output) >= this.deadband) {
+      const diff = candidate - this.output;
+      this.output += Math.sign(diff) * Math.min(Math.abs(diff), this.maxStep);
+    }
+    return this.output;
   }
 
   reset(): void {
     this.median.reset();
+    this.ema = 0;
+    this.output = 0;
+  }
+}
+
+/**
+ * Filtr biometryczny (tętno/oddech): mediana + EMA + limit tempa zmian.
+ * Estymator radaru potrafi monotonicznie "uciec" (rampa tętna +40 BPM w kilkanaście
+ * sekund przy siedzącym użytkowniku); limit szybkiej zmiany sprawia, że wyświetlana
+ * wartość płynie zamiast skakać, a po przerwie pomiarów startuje od nowego odczytu.
+ */
+export class BiometricFilter {
+  private median: MedianFilter;
+  private alpha: number;
+  private maxStep: number;
+  private ema = 0;
+  private output = 0;
+
+  constructor(size = 3, alpha = 0.35, maxStep = 3) {
+    this.median = new MedianFilter(size);
+    this.alpha = alpha;
+    this.maxStep = maxStep;
+  }
+
+  setMode(mode: 'ultra' | 'balanced' | 'raw'): void {
+    if (mode === 'raw') {
+      this.median.setSize(1);
+      this.alpha = 1;
+      this.maxStep = 999;
+    } else if (mode === 'balanced') {
+      this.median.setSize(3);
+      this.alpha = 0.35;
+      this.maxStep = 3;
+    } else {
+      this.median.setSize(5);
+      this.alpha = 0.2;
+      this.maxStep = 2;
+    }
+  }
+
+  push(val: number): number {
+    if (val <= 0) return 0;
+    const m = this.median.push(val);
+    if (m <= 0) return this.output;
+    this.ema = this.ema === 0 ? m : this.ema + this.alpha * (m - this.ema);
+    const candidate = Math.round(this.ema);
+    if (this.output === 0) {
+      this.output = candidate;
+    } else {
+      const diff = candidate - this.output;
+      if (Math.abs(diff) > this.maxStep) {
+        this.output += Math.sign(diff) * this.maxStep;
+      }
+    }
+    return this.output;
+  }
+
+  reset(): void {
+    this.median.reset();
+    this.ema = 0;
+    this.output = 0;
   }
 }
 

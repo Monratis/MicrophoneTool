@@ -106,9 +106,8 @@ export default class AppUpdater {
       if (isNewer) {
         // Dopasuj odpowiedni asset (installer / portable / zip)
         const assets = release.assets || [];
-        // Portable EXE sam wypakowuje payload — jego execPath wskazuje plik "(Portable).exe",
-        // nie katalog win-unpacked; bez tego portable brał asset Setup i odpalał instalator NSIS.
-        const execLower = process.execPath.toLowerCase();
+        // Portable EXE w Windows (NSIS) ustawia zmienną PORTABLE_EXECUTABLE_FILE
+        const execLower = (process.env.PORTABLE_EXECUTABLE_FILE || process.execPath).toLowerCase();
         const isInstaller =
           app.isPackaged && !execLower.includes('portable') && !execLower.includes('win-unpacked');
 
@@ -166,7 +165,7 @@ export default class AppUpdater {
     const url = `https://api.github.com/repos/${repo}/releases/latest`;
 
     const headers: Record<string, string> = {
-      'User-Agent': `AutoAudioSwitch/${this.currentVersion}`,
+      'User-Agent': `DeskSense/${this.currentVersion}`,
       Accept: 'application/vnd.github.v3+json'
     };
     if (token && token.trim()) {
@@ -244,7 +243,7 @@ export default class AppUpdater {
         }
 
         const headers: Record<string, string> = {
-          'User-Agent': `AutoAudioSwitch/${this.currentVersion}`
+          'User-Agent': `DeskSense/${this.currentVersion}`
         };
 
         // Autoryzacja tylko do api.github.com (nigdy do S3 po redirectzie)
@@ -345,7 +344,7 @@ export default class AppUpdater {
     }
 
     const installerPath = this.downloadedFilePath;
-    const currentExe = process.execPath;
+    const currentExe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
 
     if (installerPath.toLowerCase().endsWith('.exe')) {
       if (installerPath.toLowerCase().includes('setup')) {

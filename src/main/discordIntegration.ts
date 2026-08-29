@@ -15,6 +15,12 @@ const OPCODES = {
   PONG: 4
 } as const;
 
+/** Wynik synchronizacji wejścia audio Discorda (notifyDeviceChanged). */
+export interface DiscordSyncResult {
+  ok: boolean;
+  reason?: 'disabled' | 'not_connected' | 'not_ready' | 'rejected';
+}
+
 export default class DiscordIntegration extends EventEmitter {
   private readonly config: Config;
   private socket: net.Socket | null = null;
@@ -26,6 +32,8 @@ export default class DiscordIntegration extends EventEmitter {
   private lastAuthAttemptAt = 0;
   private username = '';
   private reconnectTimer: NodeJS.Timeout | null = null;
+  /** Cykliczny proaktywny refresh tokenu OAuth (przed wygaśnięciem). */
+  private refreshTimer: NodeJS.Timeout | null = null;
   private running = false;
   private handshakeFailures = 0;
   /** Akumulator ramek — TCP dowolnie dzieli pakiety, trzeba składać. */
@@ -42,6 +50,10 @@ export default class DiscordIntegration extends EventEmitter {
     this.running = true;
     if (this.config.get('discordIntegration') !== false) {
       this.tryConnect();
+      // Access token Discorda żyje 7 dni — kontrola co 6 h wymienia go
+      // z 24 h zapasem, więc sesja auth nigdy nie przerywa działania.
+      this.refreshTimer = setInterval(() => void this.proactiveTokenRefresh(), 6 * 3600 * 1000);
+      if (typeof this.refreshTimer.unref === 'function') this.refreshTimer.unref();
     }
   }
 
@@ -50,6 +62,10 @@ export default class DiscordIntegration extends EventEmitter {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = null;
     }
     if (this.socket) {
       try {
@@ -220,10 +236,13 @@ export default class DiscordIntegration extends EventEmitter {
   }
 
   /** Zapisuje tokeny OAuth2 do pliku konfiguracyjnego */
-  private saveTokens(accessToken: string, refreshToken?: string): void {
+  private saveTokens(accessToken: string, refreshToken?: string, expiresIn?: number): void {
     this.config.set('discordAccessToken', accessToken);
     if (refreshToken) {
       this.config.set('discordRefreshToken', refreshToken);
+    }
+    if (typeof expiresIn === 'number' && expiresIn > 0) {
+      this.config.set('discordTokenExpiresAt', Date.now() + expiresIn * 1000);
     }
     this.config.save();
   }
@@ -237,7 +256,11 @@ export default class DiscordIntegration extends EventEmitter {
 
   /**
    * Cicha próba automatycznego uwierzytelnienia sesji RPC zapisanym tokenem.
-   * Jeśli token wygasł, próbuje odświeżyć go za pomocą refresh_token.
+   * Access token Discorda żyje 7 dni — gdy wygasa w ciągu 24 h, jest najpierw
+   * proaktywnie wymieniany. Refresh token nie ma TTL (docs: znika tylko przy
+   * deautoryzacji), więc autoryzacja jest de facto permanentna — pod warunkiem,
+   * że błąd sieci NIE kasuje tokenów (dawniej kasował i stąd "wywalająca się"
+   * autoryzacja po każdym wybudzeniu bez internetu).
    */
   private async tryAutoAuthenticate(): Promise<void> {
     if (!this.ready || this.authenticated || this.authFlowRunning || !this.socket || this.socket.destroyed) {
@@ -253,7 +276,10 @@ export default class DiscordIntegration extends EventEmitter {
 
     this.authFlowRunning = true;
     try {
-      if (accessToken) {
+      const expiresAt = Number(this.config.get('discordTokenExpiresAt')) || 0;
+      const expiresSoon = expiresAt > 0 && Date.now() > expiresAt - 24 * 3600 * 1000;
+
+      if (accessToken && !expiresSoon) {
         const auth = await this.rpcCommand('AUTHENTICATE', { access_token: accessToken });
         if (auth.ok) {
           this.authenticated = true;
@@ -268,9 +294,9 @@ export default class DiscordIntegration extends EventEmitter {
 
       if (refreshTokenStr) {
         const refreshed = await this.refreshToken(refreshTokenStr);
-        if (refreshed?.access_token) {
-          this.saveTokens(refreshed.access_token, refreshed.refresh_token);
-          const auth = await this.rpcCommand('AUTHENTICATE', { access_token: refreshed.access_token });
+        if (refreshed.ok && refreshed.accessToken) {
+          this.saveTokens(refreshed.accessToken, refreshed.refreshToken, refreshed.expiresIn);
+          const auth = await this.rpcCommand('AUTHENTICATE', { access_token: refreshed.accessToken });
           if (auth.ok) {
             this.authenticated = true;
             const username = (auth.data as { user?: { username?: string } } | undefined)?.user?.username;
@@ -279,12 +305,59 @@ export default class DiscordIntegration extends EventEmitter {
             this.emit('authenticated');
             return;
           }
+          appendLog('DISCORD', 'Świeży token nieprzyjęty przez sesję RPC — token zachowany, ponowię przy kolejnym połączeniu.');
+          return;
         }
-        this.clearTokens();
-        appendLog('DISCORD', 'Tokeny wygasły — wymagana ponowna jednorazowa autoryzacja (kliknij "Autoryzuj Discord").');
+        if (refreshed.rejected) {
+          // Tylko jednoznaczna odmowa Discorda (invalid_grant — deautoryzacja
+          // przez użytkownika / unieważnienie) unieważnia tokeny.
+          this.clearTokens();
+          appendLog('DISCORD', 'Refresh token odrzucony przez Discord — wymagana ponowna jednorazowa autoryzacja (kliknij "Autoryzuj Discord").');
+        } else {
+          // Sieć/serwer niedostępny — tokeny zostają, próba przy kolejnym READY.
+          appendLog('DISCORD', 'Odświeżanie tokenu nieudane (sieć/serwer Discord) — tokeny zachowane, ponowię przy kolejnym połączeniu.');
+        }
       }
     } catch (e) {
       console.warn('[discord] Błąd auto-uwierzytelniania:', (e as Error).message);
+    } finally {
+      this.authFlowRunning = false;
+    }
+  }
+
+  /**
+   * Proaktywna wymiana access tokenu przed wygaśnięciem (licznik co 6 h,
+   * próba gdy zostało < 24 h). Dzięki temu sesja auth nigdy nie przerywa
+   * działania w trakcie pracy.
+   */
+  private async proactiveTokenRefresh(): Promise<void> {
+    if (!this.running || this.authFlowRunning) return;
+    const refreshTokenStr = (this.config.get('discordRefreshToken') || '').trim();
+    if (!refreshTokenStr) return;
+
+    const expiresAt = Number(this.config.get('discordTokenExpiresAt')) || 0;
+    if (expiresAt > 0 && Date.now() < expiresAt - 24 * 3600 * 1000) return;
+
+    this.authFlowRunning = true;
+    try {
+      const refreshed = await this.refreshToken(refreshTokenStr);
+      if (refreshed.ok && refreshed.accessToken) {
+        this.saveTokens(refreshed.accessToken, refreshed.refreshToken, refreshed.expiresIn);
+        appendLog('DISCORD', 'Access token OAuth odświeżony proaktywnie (przed wygaśnięciem) ✓');
+        if (!this.authenticated && this.ready) {
+          const auth = await this.rpcCommand('AUTHENTICATE', { access_token: refreshed.accessToken });
+          if (auth.ok) {
+            this.authenticated = true;
+            const username = (auth.data as { user?: { username?: string } } | undefined)?.user?.username;
+            this.username = username || '';
+            this.emit('authenticated');
+          }
+        }
+      } else if (refreshed.rejected) {
+        this.clearTokens();
+        appendLog('DISCORD', 'Refresh token odrzucony przez Discord — wymagana ponowna jednorazowa autoryzacja.');
+      }
+      // Błąd sieci: cisza — kolejny cykl timera spróbuje ponownie.
     } finally {
       this.authFlowRunning = false;
     }
@@ -364,11 +437,19 @@ export default class DiscordIntegration extends EventEmitter {
       }
       this.authFailures = 0;
       const tokenData = await this.exchangeToken(code);
-      if (!tokenData?.access_token) return;
+      if (!tokenData.ok || !tokenData.accessToken) {
+        appendLog(
+          'DISCORD',
+          tokenData.rejected
+            ? 'Wymiana kodu na token odrzucona przez Discord (sprawdź discordClientSecret i discordRedirectUri).'
+            : 'Wymiana kodu na token nieudana (sieć) — spróbuj ponownie.'
+        );
+        return;
+      }
 
-      this.saveTokens(tokenData.access_token, tokenData.refresh_token);
+      this.saveTokens(tokenData.accessToken, tokenData.refreshToken, tokenData.expiresIn);
 
-      const auth = await this.rpcCommand('AUTHENTICATE', { access_token: tokenData.access_token });
+      const auth = await this.rpcCommand('AUTHENTICATE', { access_token: tokenData.accessToken });
       if (auth.ok) {
         this.authenticated = true;
         const username = (auth.data as { user?: { username?: string } } | undefined)?.user?.username;
@@ -387,16 +468,14 @@ export default class DiscordIntegration extends EventEmitter {
     }
   }
 
-  /** Wymiana kodu autoryzacji na access token i refresh token (POST /api/oauth2/token). */
-  private exchangeToken(code: string): Promise<{ access_token: string; refresh_token?: string } | null> {
+  /** Wynik wymiany/odświeżania tokenu: `rejected` = Discord jednoznacznie odmówił
+   *  (invalid_grant), inna porażka = sieć/serwer — tokeny należy zachować. */
+  private tokenRequest(
+    body: URLSearchParams,
+    successLog?: (json: { access_token?: string; refresh_token?: string; expires_in?: number }) => void
+  ): Promise<{ ok: boolean; rejected: boolean; accessToken?: string; refreshToken?: string; expiresIn?: number }> {
     return new Promise((resolve) => {
-      const body = new URLSearchParams({
-        client_id: this.config.get('discordClientId'),
-        client_secret: (this.config.get('discordClientSecret') || '').trim(),
-        grant_type: 'authorization_code',
-        code,
-        redirect_uri: this.config.get('discordRedirectUri') || 'https://discord.com'
-      }).toString();
+      const finish = (r: { ok: boolean; rejected: boolean; accessToken?: string; refreshToken?: string; expiresIn?: number }) => resolve(r);
       const req = https.request(
         {
           hostname: 'discord.com',
@@ -404,7 +483,7 @@ export default class DiscordIntegration extends EventEmitter {
           method: 'POST',
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
-            'Content-Length': Buffer.byteLength(body)
+            'Content-Length': Buffer.byteLength(body.toString())
           }
         },
         (res) => {
@@ -412,76 +491,51 @@ export default class DiscordIntegration extends EventEmitter {
           res.on('data', (c) => (data += c));
           res.on('end', () => {
             try {
-              const json = JSON.parse(data) as { access_token?: string; refresh_token?: string; error?: string };
+              const json = JSON.parse(data) as { access_token?: string; refresh_token?: string; expires_in?: number; error?: string };
               if (json.access_token) {
-                resolve({ access_token: json.access_token, refresh_token: json.refresh_token });
+                if (successLog) successLog(json);
+                finish({ ok: true, rejected: false, accessToken: json.access_token, refreshToken: json.refresh_token, expiresIn: json.expires_in });
               } else {
-                appendLog('DISCORD', `Token exchange odrzucony przez Discord: ${JSON.stringify(json)}`);
-                console.warn('[discord] Token exchange błąd:', JSON.stringify(json).slice(0, 300));
-                resolve(null);
+                // Discord odpowiedział błędem (np. invalid_grant) — token jednoznacznie martwy.
+                appendLog('DISCORD', `Token endpoint odrzucił żądanie (HTTP ${res.statusCode}): ${JSON.stringify(json).slice(0, 200)}`);
+                finish({ ok: false, rejected: true });
               }
             } catch {
-              resolve(null);
+              // Odpowiedź nie-JSON (HTML bramki, timeout proxy) — traktuj jak sieć.
+              finish({ ok: false, rejected: false });
             }
           });
         }
       );
+      req.setTimeout(15000, () => req.destroy(new Error('timeout')));
       req.on('error', (e) => {
         appendLog('DISCORD', `Błąd połączenia z serwerem OAuth Discord: ${e.message}`);
-        console.warn('[discord] Token exchange error:', e.message);
-        resolve(null);
+        finish({ ok: false, rejected: false });
       });
-      req.write(body);
+      req.write(body.toString());
       req.end();
     });
   }
 
+  /** Wymiana kodu autoryzacji na access token i refresh token (POST /api/oauth2/token). */
+  private exchangeToken(code: string) {
+    return this.tokenRequest(new URLSearchParams({
+      client_id: this.config.get('discordClientId'),
+      client_secret: (this.config.get('discordClientSecret') || '').trim(),
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: this.config.get('discordRedirectUri') || 'https://discord.com'
+    }));
+  }
+
   /** Odświeżanie tokenu za pomocą refresh_token (POST /api/oauth2/token). */
-  private refreshToken(refreshToken: string): Promise<{ access_token: string; refresh_token?: string } | null> {
-    return new Promise((resolve) => {
-      const body = new URLSearchParams({
-        client_id: this.config.get('discordClientId'),
-        client_secret: (this.config.get('discordClientSecret') || '').trim(),
-        grant_type: 'refresh_token',
-        refresh_token: refreshToken
-      }).toString();
-      const req = https.request(
-        {
-          hostname: 'discord.com',
-          path: '/api/oauth2/token',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Content-Length': Buffer.byteLength(body)
-          }
-        },
-        (res) => {
-          let data = '';
-          res.on('data', (c) => (data += c));
-          res.on('end', () => {
-            try {
-              const json = JSON.parse(data) as { access_token?: string; refresh_token?: string; error?: string };
-              if (json.access_token) {
-                resolve({ access_token: json.access_token, refresh_token: json.refresh_token });
-              } else {
-                appendLog('DISCORD', `Odświeżenie tokenu odrzucone przez Discord: ${JSON.stringify(json)}`);
-                console.warn('[discord] Refresh token błąd:', JSON.stringify(json).slice(0, 300));
-                resolve(null);
-              }
-            } catch {
-              resolve(null);
-            }
-          });
-        }
-      );
-      req.on('error', (e) => {
-        appendLog('DISCORD', `Błąd połączenia podczas odświeżania tokenu: ${e.message}`);
-        console.warn('[discord] Refresh token error:', e.message);
-        resolve(null);
-      });
-      req.write(body);
-      req.end();
-    });
+  private refreshToken(refreshToken: string) {
+    return this.tokenRequest(new URLSearchParams({
+      client_id: this.config.get('discordClientId'),
+      client_secret: (this.config.get('discordClientSecret') || '').trim(),
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken
+    }));
   }
 
   getStatus(): { connected: boolean; ready: boolean; authenticated: boolean; user?: string } {
@@ -523,26 +577,48 @@ export default class DiscordIntegration extends EventEmitter {
     }, delay);
   }
 
-  async notifyDeviceChanged(deviceName: string | null): Promise<void> {
-    if (!this.config.get('discordIntegration')) return;
-
-    if (this.connected && this.socket) {
-      try {
-        const nonce = String(Date.now());
-        const payload = JSON.stringify({
-          cmd: 'SET_VOICE_SETTINGS',
-          args: {
-            input: {
-              device_id: 'default'
-            }
-          },
-          nonce
-        });
-        this.sendPacket(OPCODES.FRAME, payload);
-        appendLog('DISCORD', `Wysłano żądanie przełączenia wejścia audio Discord -> "${deviceName || 'Domyślny systemowy'}"`);
-      } catch (err) {
-        console.warn('[discord] Błąd wysyłania komendy:', (err as Error).message);
+  /**
+   * Przełącza wejście audio Discorda na DOMYŚLNE urządzenie systemowe.
+   * UWAGA: parametr deviceLabel jest wyłącznie informacyjny (logi, komunikaty
+   * błędów) — Discord RPC dostaje zawsze device_id 'default', bo to apka
+   * zmienia domyślny mikrofon w Windows i Discord ma za nim podążać.
+   * W odróżnieniu od dawnego fire-and-forget odpowiedź Discorda jest
+   * weryfikowana po nonce — porażka wraca z powodem, który kontroler
+   * wyświetla użytkownikowi w UI.
+   */
+  async notifyDeviceChanged(deviceLabel: string | null): Promise<DiscordSyncResult> {
+    const deviceName = deviceLabel;
+    if (!this.config.get('discordIntegration')) {
+      return { ok: true, reason: 'disabled' };
+    }
+    if (!this.connected || !this.socket || this.socket.destroyed) {
+      appendLog(
+        'DISCORD',
+        `Nie zsynchronizowano wejścia Discorda ("${deviceName || 'Domyślny systemowy'}") — brak połączenia RPC (Discord nie uruchomiony?)`
+      );
+      return { ok: false, reason: 'not_connected' };
+    }
+    if (!this.ready) {
+      appendLog('DISCORD', `Nie zsynchronizowano wejścia Discorda — sesja RPC bez handshake'u READY`);
+      return { ok: false, reason: 'not_ready' };
+    }
+    try {
+      const reply = await this.rpcCommand('SET_VOICE_SETTINGS', {
+        input: { device_id: 'default' }
+      });
+      if (reply.ok) {
+        appendLog('DISCORD', `Zsynchronizowano wejście audio Discord -> "${deviceName || 'Domyślny systemowy'}" ✓`);
+        return { ok: true };
       }
+      appendLog(
+        'DISCORD',
+        `Discord nie przyjął zmiany wejścia (${deviceName || 'default'}) — brak odpowiedzi lub odrzucenie: ${JSON.stringify(reply.data ?? null).slice(0, 200)}`
+      );
+      return { ok: false, reason: 'rejected' };
+    } catch (err) {
+      console.warn('[discord] Błąd wysyłania komendy:', (err as Error).message);
+      appendLog('DISCORD', `Błąd wysyłania SET_VOICE_SETTINGS: ${(err as Error).message}`);
+      return { ok: false, reason: 'rejected' };
     }
   }
 
@@ -609,13 +685,8 @@ export default class DiscordIntegration extends EventEmitter {
     }
   }
 
-  async setVoiceGate(thresholdDb: number): Promise<boolean> {
-    return this.applyMicSettings({ gateDb: thresholdDb });
-  }
-
   /**
-   * Głośność wejścia przez Discorda (pipeline WebRTC). Działa nawet dla urządzeń
-   * BT, które nie wystawiają IAudioEndpointVolume w OS (E_NOINTERFACE).
+   * Głośność wejścia przez Discorda (pipeline WebRTC). Działa nawet dla urządzeń   * BT, które nie wystawiają IAudioEndpointVolume w OS (E_NOINTERFACE).
    * Zakres Discorda: 0-200 (100 = 100%). Fallback dla daemona audio.
    */
   async applyInputVolume(percent: number): Promise<boolean> {

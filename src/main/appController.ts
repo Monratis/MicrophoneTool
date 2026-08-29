@@ -4,26 +4,28 @@ import type RadarListener from './radarListener';
 import type AudioController from './audioController';
 import type DiscordIntegration from './discordIntegration';
 import type SignalRGBIntegration from './signalrgbIntegration';
+import type ScreenManager from './screenManager';
 import type Config from './config';
 import type { AppMode, DeviceState, DeskState } from '../shared/types';
 
 /**
  * Spina radar z kontrolerem audio, integracją z Discordem, SignalRGB oraz
- * konfigurowalnymi zachowaniami stacjonarnymi/mobilnymi.
+ * konfigurowalnymi zachowaniami stacjonarnymi/mobilnymi i zarządzaniem ekranami.
  */
 export default class AppController extends EventEmitter {
   radar: RadarListener;
   audio: AudioController;
   config: Config;
+  screen: ScreenManager;
   discord: DiscordIntegration | null;
   signalrgb: SignalRGBIntegration | null;
 
   mode: AppMode = 'auto';
   currentDevice: DeviceState | null = null;
   switching = false;
+  /** Unix ms — do kiedy trwa pauza automatyki (snooze z UI); 0 = brak pauzy. */
+  private snoozeUntilMs = 0;
   private pendingState: DeviceState | null = null;
-  private displaySleepTimer: NodeJS.Timeout | null = null;
-  private isDisplaySleeping = false;
   private micRetryTimer: NodeJS.Timeout | null = null;
   private micRetryState: DeviceState | null = null;
   private micRetryAttempts = 0;
@@ -36,15 +38,16 @@ export default class AppController extends EventEmitter {
   private desiredState: DeviceState | null = null;
   /** Stan, którego przełączenie FAKTYCZNIE się powiodło (watchdog działa tylko dla niego) */
   private lastAppliedOkState: DeviceState | null = null;
-  /** Mikrofony wyciszone PRZEZ APLIKACJĘ przy auto-przełączaniu — tylko te odciszamy przy powrocie */
-  private readonly appMuted = new Set<string>();
   /** Mikrofony wyciszone RĘCZNIE przez użytkownika — auto-przełączanie ich nie odcisza (ochrona przed gorącym mikrofonem) */
   private readonly userMuted = new Set<string>();
+  /** Głośność (%) sprzed wyciszenia strategią "głośność 0%" — klucz: nazwa urządzenia */
+  private readonly preMuteVolume = new Map<string, number>();
 
   constructor(
     radar: RadarListener,
     audio: AudioController,
     config: Config,
+    screen: ScreenManager,
     discord: DiscordIntegration | null = null,
     signalrgb: SignalRGBIntegration | null = null
   ) {
@@ -52,6 +55,7 @@ export default class AppController extends EventEmitter {
     this.radar = radar;
     this.audio = audio;
     this.config = config;
+    this.screen = screen;
     this.discord = discord;
     this.signalrgb = signalrgb;
 
@@ -59,6 +63,17 @@ export default class AppController extends EventEmitter {
     radar.on('away', () => void this.onRadarState('away'));
     radar.on('status', (s) => this.emit('radarStatus', s));
     radar.on('error', (err) => this.emit('error', err));
+
+    this.screen.on('displayState', (s) => this.emit('displayState', s));
+    this.screen.on('userActivity', () => {
+      if (this.mode !== 'auto') {
+        // W trybie wymuszonym radar nie odpala applyDevice, więc nikt inny
+        // nie zdejmie wygaszacza — aktywność użytkownika robi to bezpośrednio.
+        this.screen.hideScreensaver();
+        return;
+      }
+      void this.onRadarState('desk');
+    });
 
     if (this.discord) {
       this.discord.on('authenticated', () => {
@@ -68,9 +83,22 @@ export default class AppController extends EventEmitter {
             this.currentDevice === 'desk'
               ? this.config.get('micDeskName')
               : this.config.get('micHeadsetName');
-          void this.discord?.notifyDeviceChanged(targetMic);
+          void this.syncDiscordDevice(targetMic);
         }
       });
+    }
+  }
+
+  /**
+   * Synchronizacja wejścia Discorda z bieżącym mikrofonem. Porażka (brak
+   * połączenia RPC, odrzucenie przez Discord) jest emitowana jako zdarzenie
+   * 'discordSyncError' — index.ts pokazuje ją jako toast w UI.
+   */
+  private async syncDiscordDevice(deviceName: string | null): Promise<void> {
+    if (!this.discord) return;
+    const res = await this.discord.notifyDeviceChanged(deviceName);
+    if (!res.ok) {
+      this.emit('discordSyncError', { reason: res.reason, device: deviceName });
     }
   }
 
@@ -95,29 +123,29 @@ export default class AppController extends EventEmitter {
             void this.setDeviceVolume(def.name, volCfg);
           }
           if (this.config.get('unmuteOnDesk') !== false) {
-            void this.audio.setMute(def.name, false);
+            void this.applyDeviceMute(def.name, false);
           }
           if (mobileMic && mobileMic !== stationaryMic) {
-            void this.audio.setMute(mobileMic, true);
+            void this.applyDeviceMute(mobileMic, true);
           }
           this.applyDiscordGate('desk');
         } else if (headName && (curName.includes(headName) || headName.includes(curName))) {
           this.currentDevice = 'headset';
           this.lastAppliedOkState = 'headset';
           const volCfg = this.config.get('micHeadsetVolume');
-          if (typeof volCfg === 'number' && volCfg >= 0) {
+          if (typeof volCfg === 'number' && volCfg >= 0 && !this.preMuteVolume.has(def.name)) {
             void this.setDeviceVolume(def.name, volCfg);
           }
           const awayMute = this.config.get('muteBehaviorOnAway') || 'mute_inactive';
           if (awayMute === 'none') {
-            void this.audio.setMute(def.name, false);
+            void this.applyDeviceMute(def.name, false);
           } else if (awayMute === 'mute_all') {
-            void this.audio.setMute(def.name, true);
-            if (stationaryMic) void this.audio.setMute(stationaryMic, true);
+            void this.applyDeviceMute(def.name, true);
+            if (stationaryMic) void this.applyDeviceMute(stationaryMic, true);
           } else {
-            void this.audio.setMute(def.name, false);
+            void this.applyDeviceMute(def.name, false);
             if (stationaryMic && stationaryMic !== mobileMic) {
-              void this.audio.setMute(stationaryMic, true);
+              void this.applyDeviceMute(stationaryMic, true);
             }
           }
           this.applyDiscordGate('headset');
@@ -130,7 +158,7 @@ export default class AppController extends EventEmitter {
   }
 
   async stop(): Promise<void> {
-    this.clearDisplaySleepTimer();
+    this.screen.stop();
     this.clearMicRetry();
     this.stopDriftWatch();
     if (this.discord) {
@@ -164,6 +192,30 @@ export default class AppController extends EventEmitter {
     this.desiredTarget = null;
     this.desiredName = null;
     this.desiredState = null;
+    this.manualSyncedDeviceId = null;
+  }
+
+  /** Urządzenie, dla którego ostatnio wysłano sync po ręcznej zmianie — blokada duplikatów co 10 s. */
+  private manualSyncedDeviceId: string | null = null;
+
+  /**
+   * Wykrywa ręczną zmianę domyślnego mikrofonu w Windows (default różni się
+   * od aplikowanego przez apkę, lista urządzeń bez zmian) i synchronizuje
+   * Discord z wyborem użytkownika.
+   */
+  private async syncManualMicChange(): Promise<void> {
+    if (this.switching) return;
+    try {
+      const current = await this.audio.getCurrentDefault();
+      if (!current || !current.id) return;
+      if (current.id === this.desiredTarget || current.name === this.desiredName) return;
+      if (this.manualSyncedDeviceId === current.id) return;
+      this.manualSyncedDeviceId = current.id;
+      appendLog('AUDIO', `Ręczna zmiana domyślnego mikrofonu w Windows -> "${current.name}" — synchronizuję Discord`);
+      void this.syncDiscordDevice(current.name ?? null);
+    } catch {
+      /* pomijanie cyklu — kolejny tick spróbuje ponownie */
+    }
   }
 
   private async checkDrift(): Promise<void> {
@@ -179,11 +231,13 @@ export default class AppController extends EventEmitter {
     try {
       const list = await this.audio.listRecordingDevices(true);
       const ids = new Set(list.map((d) => d.id || d.name));
+      // Zbiór sprzed tej iteracji — dopiero względem NIEGO da się wykryć przybysza
+      const prevIds = this.prevDeviceIds;
       // Nowe urządzenie = kandydat na "auto-podkradnięcie" defaultu przez Windows
       let hasArrival = false;
-      if (this.prevDeviceIds) {
+      if (prevIds) {
         for (const id of ids) {
-          if (!this.prevDeviceIds.has(id)) {
+          if (!prevIds.has(id)) {
             hasArrival = true;
             break;
           }
@@ -193,7 +247,14 @@ export default class AppController extends EventEmitter {
       const changed = this.lastDeviceSig !== null && sig !== this.lastDeviceSig;
       this.lastDeviceSig = sig;
       this.prevDeviceIds = ids;
-      if (!changed || !hasArrival) return;
+      if (!changed) {
+        // Lista urządzeń bez zmian — jedyna możliwa rozbieżność defaultu
+        // to RĘCZNA zmiana użytkownika w Windows. Wyboru nie cofamy,
+        // ale Discord ma dostać info o nowym aktywnym mikrofonie.
+        await this.syncManualMicChange();
+        return;
+      }
+      if (!hasArrival) return;
 
       const present = list.some((d) => d.id === this.desiredTarget || d.name === this.desiredName);
       if (!present) return;
@@ -201,10 +262,14 @@ export default class AppController extends EventEmitter {
       const current = await this.audio.getCurrentDefault();
       if (!current || !current.id) return;
 
-      // Cofamy TYLKO gdy nowy przybysz podkradł default (automat Windowsa).
+      // Cofamy TYLKO gdy nowy przybysz podkradł default (automat Windowsa),
+      // czyli default NIE jest żadnym znanym wcześniej urządzeniem.
       // Świadoma zmiana użytkownika na istniejące urządzenie — nienaruszalna.
       const stolenByArrival =
-        current.id !== this.desiredTarget && current.id !== this.desiredName && !this.prevDeviceIds.has(current.id);
+        current.id !== this.desiredTarget &&
+        current.id !== this.desiredName &&
+        prevIds !== null &&
+        !prevIds.has(current.id);
       const lostCommRole = current.id === this.desiredTarget && current.isDefaultComm === false;
       if (!stolenByArrival && !lostCommRole) return;
 
@@ -298,20 +363,42 @@ export default class AppController extends EventEmitter {
     }
   }
 
+  /**
+   * Pauza automatyki (snooze z UI): do upływu terminu radarowe zmiany stanu
+   * są ignorowane — żadne przełączenie mikrofonu, ekranów czy diody nie
+   * nastąpi z automatu. Ręczne akcje (tryb, test urządzenia, mute) działają.
+   */
+  setSnooze(minutes: number): void {
+    const m = Math.max(0, Math.min(720, Math.round(minutes || 0)));
+    this.snoozeUntilMs = m > 0 ? Date.now() + m * 60000 : 0;
+    appendLog(
+      'APP',
+      m > 0
+        ? `Pauza automatyki na ${m} min — radar nie będzie przełączał profili`
+        : 'Pauza automatyki wyłączona — wznawiam reakcję na radar'
+    );
+  }
+
+  isSnoozed(): boolean {
+    return this.snoozeUntilMs > Date.now();
+  }
+
+  /** Aktualny koniec pauzy automatyki (unix ms); 0 = pauza nieaktywna. */
+  getSnoozeUntil(): number {
+    return this.isSnoozed() ? this.snoozeUntilMs : 0;
+  }
+
   private async onRadarState(state: DeskState): Promise<void> {
     appendLog('RADAR-EVENT', `Radar zgłasza zmianę stanu -> ${state === 'desk' ? 'OBECNY (DESK)' : 'POZA FOTELEM (AWAY)'}`);
+    if (this.isSnoozed()) {
+      appendLog('RADAR-EVENT', `Pauza automatyki aktywna — pomijam przełączenie na "${state.toUpperCase()}"`);
+      return;
+    }
     if (this.mode !== 'auto') {
       appendLog('RADAR-EVENT', `Ignoruję zmianę z radaru, ponieważ tryb aplikacji jest wymuszony na "${this.mode.toUpperCase()}"`);
       return;
     }
     await this.applyDevice(state === 'desk' ? 'desk' : 'headset');
-  }
-
-  private clearDisplaySleepTimer(): void {
-    if (this.displaySleepTimer) {
-      clearTimeout(this.displaySleepTimer);
-      this.displaySleepTimer = null;
-    }
   }
 
   /**
@@ -332,7 +419,7 @@ export default class AppController extends EventEmitter {
       void this.setDeviceVolume(deviceName, volCfg);
     }
     if (this.discord) {
-      void this.discord.notifyDeviceChanged(deviceName);
+      void this.syncDiscordDevice(deviceName);
     }
     this.applyDiscordGate(state);
   }
@@ -343,6 +430,13 @@ export default class AppController extends EventEmitter {
    * w Discordzie (działa przez pipeline WebRTC).
    */
   async setDeviceVolume(target: string, percent: number): Promise<{ ok: boolean; volume?: number }> {
+    // Podniesienie głośności na mikrofonie wyciszonym strategią 0% = jawne odciszenie
+    if (percent > 0 && this.preMuteVolume.has(target)) {
+      this.preMuteVolume.delete(target);
+      this.userMuted.delete(target);
+      if (this.discord) void this.discord.setInputMute(false).catch(() => false);
+      appendLog('AUDIO-VOL', `Zmiana głośności na wyciszonym (0%) mikrofonie "${target}" — traktuję jako odciszenie`);
+    }
     const res = await this.audio.setVolume(target, percent);
     if (!res.ok && this.discord) {
       const ok = await this.discord.applyInputVolume(percent);
@@ -351,13 +445,19 @@ export default class AppController extends EventEmitter {
     return res;
   }
 
-  /** Mute mikrofonu: OS, a dla urządzeń BT bez IAudioEndpointVolume — fallback do Discorda. */
+  /** Mute mikrofonu: OS, potem strategia "głośność 0%" (urządzenia bez węzła
+   * mute w KS), a na końcu fallback do Discorda. */
   async setDeviceMute(target: string, mute: boolean): Promise<{ ok: boolean; isMuted?: boolean }> {
-    const res = await this.audio.setMute(target, mute);
-    if (res.ok) {
+    const via = await this.applyDeviceMute(target, mute);
+    if (via) {
       this.trackManualMute(target, mute);
       await this.linkPairMute(target, mute);
-      return res;
+      if (via === 'volume' && this.discord) {
+        // Warstwa Discord przy mute głośnością: globalny mute wejścia chroni
+        // przed AGC, które potrafi podnieść głośność urządzenia z powrotem.
+        await this.discord.setInputMute(mute).catch(() => false);
+      }
+      return { ok: true, isMuted: mute };
     }
     if (this.discord) {
       const ok = await this.discord.setInputMute(mute);
@@ -367,35 +467,104 @@ export default class AppController extends EventEmitter {
         return { ok: true, isMuted: mute };
       }
     }
-    return res;
+    return { ok: false };
   }
 
-  /** Toggle mute z fallbackiem do Discorda (odczyt stanu + odwrócenie). */
+  /** OS mute; gdy urządzenie nie wspiera mute (E_NOINTERFACE) — strategia głośność-0. */
+  private async applyDeviceMute(target: string, mute: boolean): Promise<'os' | 'volume' | null> {
+    const res = await this.audio.setMute(target, mute);
+    if (res.ok) return 'os';
+    return (await this.muteViaVolume(target, mute)) ? 'volume' : null;
+  }
+
+  /**
+   * Strategia mute dla urządzeń bez węzła mute w topologii KS (HyperX QuadCast,
+   * BlackShark Chat): mute = głośność 0% (dolny stopień attenuatora KS), unmute =
+   * przywrócenie głośności zapamiętanej sprzed wyciszenia (fallback: profil
+   * z configu, ostatecznie 100%).
+   */
+  private async muteViaVolume(target: string, mute: boolean): Promise<boolean> {
+    if (!target) return false;
+    try {
+      if (mute) {
+        const cur = await this.audio.getVolume(target);
+        if (!cur.ok) return false;
+        const setRes = await this.audio.setVolume(target, 0);
+        if (!setRes.ok) return false;
+        this.preMuteVolume.set(target, typeof cur.volume === 'number' ? cur.volume : 100);
+        appendLog(
+          'AUDIO-MUTE',
+          `Wyciszone przez głośność 0% (urządzenie bez węzła mute): "${target}" (do przywrócenia: ${this.preMuteVolume.get(target)}%)`
+        );
+        return true;
+      }
+
+      const wasMutedByUs = this.preMuteVolume.has(target);
+      const cur = await this.audio.getVolume(target).catch(() => ({ ok: true, volume: undefined as number | undefined }));
+      const current = typeof cur.volume === 'number' ? cur.volume : 100;
+      const restore = this.preMuteVolume.get(target) ?? this.restoreVolumeFor(target);
+      this.preMuteVolume.delete(target);
+      const setRes = await this.audio.setVolume(target, restore);
+      if (!setRes.ok) return false;
+      if (wasMutedByUs || current === 0) {
+        appendLog('AUDIO-MUTE', `Odciszone (przywrócono głośność ${restore}%): "${target}"`);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Głośność do przywrócenia po odciszeniu: profil aktywnego urządzenia z configu. */
+  private restoreVolumeFor(target: string): number {
+    const t = target.trim().toLowerCase();
+    const desk = (this.config.get('micDeskName') || '').trim().toLowerCase();
+    const head = (this.config.get('micHeadsetName') || '').trim().toLowerCase();
+    if (desk && t === desk) {
+      const v = this.config.get('micDeskVolume');
+      if (typeof v === 'number' && v >= 0) return v;
+    }
+    if (head && t === head) {
+      const v = this.config.get('micHeadsetVolume');
+      if (typeof v === 'number' && v >= 0) return v;
+    }
+    return 100;
+  }
+
+  /**
+   * Toggle mute z odczytem stanu z TROCH źródeł. Odczyt OS (`isMuted` z
+   * enumeracji) jest martwy na urządzeniach bez węzła mute w topologii KS
+   * (HyperX QuadCast / BlackShark Chat — E_NOINTERFACE, isMuted zawsze false),
+   * co sprawiało, że toggle zawsze liczył "niezmutowany -> zmutuj" i nigdy
+   * nie odciszał. Prawdziwy stan: Discord RPC, potem intencja użytkownika
+   * (userMuted), na końcu odczyt OS.
+   */
   async toggleDeviceMute(target?: string): Promise<{ ok: boolean; isMuted?: boolean }> {
-    const res = await this.audio.toggleMute(target);
-    if (res.ok) {
-      if (typeof res.isMuted === 'boolean') {
-        const resolved = target || this.activeMicName();
-        if (resolved) {
-          this.trackManualMute(resolved, res.isMuted);
-          await this.linkPairMute(resolved, res.isMuted);
-        }
-      }
-      return res;
+    const resolved = target || this.activeMicName();
+    let muted: boolean | null = null;
+
+    const devices = await this.audio.listRecordingDevices(true).catch(() => []);
+    const dev = resolved
+      ? devices.find((d) => d.name === resolved || (d.id && d.id === resolved))
+      : (devices.find((d) => d.isDefault) || devices[0]);
+    const targetName = dev?.name || resolved || '';
+
+    if (dev && typeof dev.isMuted === 'boolean') muted = dev.isMuted;
+
+    if (muted === false && this.discord) {
+      const cur = await this.discord.getInputMute().catch(() => null);
+      if (typeof cur === 'boolean') muted = cur;
     }
-    if (this.discord) {
-      const cur = await this.discord.getInputMute();
-      if (cur !== null) {
-        const next = !cur;
-        const ok = await this.discord.setInputMute(next);
-        if (ok) {
-          const resolved = target || this.activeMicName();
-          if (resolved) await this.linkPairMute(resolved, next);
-          return { ok: true, isMuted: next };
-        }
-      }
+    if (muted === false && targetName) {
+      muted = this.userMuted.has(targetName);
     }
-    return res;
+    // Strategia głośność-0: 0% na urządzeniu bez odczytu mute = wyciszone
+    if (muted === false && dev && typeof dev.volume === 'number' && dev.volume === 0) {
+      muted = true;
+    }
+    if (muted === null) muted = false;
+
+    return await this.setDeviceMute(targetName, !muted);
   }
 
   /** Nazwa aktywnego mikrofonu wg bieżącego stanu (do powiązania pary przy toggle). */
@@ -406,14 +575,13 @@ export default class AppController extends EventEmitter {
   }
 
   /**
-   * Ręczna zmiana mute: zapamiętaj intencję użytkownika (userMuted) i usuń
-   * z appMuted, żeby auto-przełączanie nigdy nie odciszyło ręcznie
-   * wyciszonego mikrofonu (ochrona przed "gorącym mikrofonem").
+   * Ręczna zmiana mute: zapamiętaj intencję użytkownika (userMuted), żeby
+   * auto-przełączanie nigdy nie odciszyło ręcznie wyciszonego mikrofonu
+   * (ochrona przed "gorącym mikrofonem").
    */
   private trackManualMute(target: string, mute: boolean): void {
     if (mute) this.userMuted.add(target);
     else this.userMuted.delete(target);
-    this.appMuted.delete(target);
   }
 
   /**
@@ -425,12 +593,14 @@ export default class AppController extends EventEmitter {
   private async linkPairMute(target: string, mute: boolean): Promise<void> {
     const other = this.pairCounterpart(target);
     if (!other || other.trim().toLowerCase() === target.trim().toLowerCase()) return;
-    const res = await this.audio.setMute(other, mute).catch(() => ({ ok: false }));
-    if (res?.ok) {
+    const via = await this.applyDeviceMute(other, mute).catch(() => null);
+    if (via) {
       if (mute) this.userMuted.add(other);
       else this.userMuted.delete(other);
-      this.appMuted.delete(other);
-      appendLog('AUDIO-MUTE', `Powiązany mute pary: "${other}" -> ${mute ? 'WYCISZONY' : 'ODCISZONY'} (po "${target}")`);
+      appendLog(
+        'AUDIO-MUTE',
+        `Powiązany mute pary: "${other}" -> ${mute ? 'WYCISZONY' : 'ODCISZONY'} (${via === 'os' ? 'OS' : 'głośność 0%'}) (po "${target}")`
+      );
     }
   }
 
@@ -470,36 +640,16 @@ export default class AppController extends EventEmitter {
     const stationaryMic = this.config.get('micDeskName');
     const mobileMic = this.config.get('micHeadsetName');
 
-    // 1. Obsługa usypiania i wybudzania ekranów
+    // 1. Obsługa wygaszania i usypiania ekranów oraz SignalRGB i diody sensora
     if (state === 'desk') {
-      this.clearDisplaySleepTimer();
-      const shouldWake = this.config.get('wakeMonitorsOnDesk') !== false;
-      // Wybudzaj tylko gdy ekrany faktycznie uśpione (wcześniej budzono przy
-      // każdym powrocie na desk, gdy tylko sleepMonitorsOnAway był włączony).
-      if (shouldWake && this.isDisplaySleeping) {
-        this.isDisplaySleeping = false;
-        // Równolegle do przełączenia mikrofonu — wybudzanie monitora
-        // (spawn procesu = setki ms) NIE może blokować switcha.
-        void this.audio
-          .wakeDisplay()
-          .then(() => this.emit('displayState', 'wake'))
-          .catch(() => {});
-      }
-
+      this.screen.onDesk();
+      this.radar.updateLed('desk');
       if (this.signalrgb) {
         void this.signalrgb.onDesk();
       }
     } else {
-      this.clearDisplaySleepTimer();
-      if (this.config.get('sleepMonitorsOnAway')) {
-        const delay = Math.max(1000, Number(this.config.get('sleepMonitorsDelayMs')) || 15000);
-        this.displaySleepTimer = setTimeout(() => {
-          this.displaySleepTimer = null;
-          this.isDisplaySleeping = true;
-          void this.audio.sleepDisplay().then(() => this.emit('displayState', 'sleep'));
-        }, delay);
-      }
-
+      this.screen.onAway();
+      this.radar.updateLed('away');
       if (this.signalrgb) {
         void this.signalrgb.onAway();
       }
@@ -557,16 +707,15 @@ export default class AppController extends EventEmitter {
       }
 
       // Powiadomienie Discorda o aktywnym urządzeniu
-      if (this.discord) {
-        void this.discord.notifyDeviceChanged(targetMic);
-      }
+      void this.syncDiscordDevice(targetMic);
 
       // Aplikuj profil filtrów głosu i bramki do Discorda
       this.applyDiscordGate(state);
 
-      // Głośność wybranego mikrofonu (jeśli skonfigurowana)
+      // Głośność wybranego mikrofonu (jeśli skonfigurowana). Na mikrofonie
+      // wyciszonym strategią 0% NIE ruszamy głośności — nadpisałaby mute.
       const volCfg = state === 'desk' ? this.config.get('micDeskVolume') : this.config.get('micHeadsetVolume');
-      if (targetMic && typeof volCfg === 'number' && volCfg >= 0) {
+      if (targetMic && typeof volCfg === 'number' && volCfg >= 0 && !this.preMuteVolume.has(targetMic)) {
         void this.setDeviceVolume(targetMic, volCfg);
       }
 
@@ -580,31 +729,31 @@ export default class AppController extends EventEmitter {
           this.config.get('unmuteOnDesk') !== false &&
           !this.userMuted.has(stationaryMic)
         ) {
-          muteTasks.push(this.audio.setMute(stationaryMic, false).catch(() => {}));
+          muteTasks.push(this.applyDeviceMute(stationaryMic, false).catch(() => {}));
         }
         if (mobileMic && mobileMic !== stationaryMic) {
-          muteTasks.push(this.audio.setMute(mobileMic, true).catch(() => {}));
+          muteTasks.push(this.applyDeviceMute(mobileMic, true).catch(() => {}));
         }
       } else {
         const awayMute = this.config.get('muteBehaviorOnAway') || 'mute_inactive';
         if (awayMute === 'none') {
           if (mobileMic && !this.userMuted.has(mobileMic)) {
-            muteTasks.push(this.audio.setMute(mobileMic, false).catch(() => {}));
+            muteTasks.push(this.applyDeviceMute(mobileMic, false).catch(() => {}));
           }
         } else if (awayMute === 'mute_all') {
           if (stationaryMic) {
-            muteTasks.push(this.audio.setMute(stationaryMic, true).catch(() => {}));
+            muteTasks.push(this.applyDeviceMute(stationaryMic, true).catch(() => {}));
           }
           if (mobileMic) {
-            muteTasks.push(this.audio.setMute(mobileMic, true).catch(() => {}));
+            muteTasks.push(this.applyDeviceMute(mobileMic, true).catch(() => {}));
           }
         } else {
           // 'mute_stationary' lub 'mute_inactive'
           if (stationaryMic) {
-            muteTasks.push(this.audio.setMute(stationaryMic, true).catch(() => {}));
+            muteTasks.push(this.applyDeviceMute(stationaryMic, true).catch(() => {}));
           }
           if (mobileMic && mobileMic !== stationaryMic && !this.userMuted.has(mobileMic)) {
-            muteTasks.push(this.audio.setMute(mobileMic, false).catch(() => {}));
+            muteTasks.push(this.applyDeviceMute(mobileMic, false).catch(() => {}));
           }
         }
       }

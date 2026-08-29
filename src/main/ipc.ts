@@ -2,13 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { exec } from 'node:child_process';
-import { ipcMain, shell, clipboard } from 'electron';
+import { ipcMain, shell, clipboard, app } from 'electron';
 import RadarListener from './radarListener';
 import type { AppContext } from './appContext';
 import { applyAutoStart } from './appContext';
 import { getSettingsWindow } from './settingsWindow';
 import { DEFAULTS } from './config';
+import { toggleMuteWithFeedback } from './appContext';
 import { getLogs, clearLogs } from './logger';
+import { startDiagSession, stopDiagSession, isDiagSessionActive, diagSessionStartedAt } from './diagSession';
+import { toggleRecording } from './diagRecorder';
 
 export function registerIpc(ctx: AppContext): void {
   ipcMain.handle('state:get', () => ctx.buildSnapshot());
@@ -17,9 +20,11 @@ export function registerIpc(ctx: AppContext): void {
     ctx.controller.setMode(mode);
     return ctx.buildSnapshot();
   });
-  ipcMain.handle('ports:set', async (_e, port: string) => {
-    ctx.config.set('port', port);
-    await ctx.restartRadar();
+  // Pauza automatyki (snooze): 0 = wznowienie. Main jest źródłem prawdy —
+  // renderer dostaje świeży snapshot z snoozeUntil.
+  ipcMain.handle('snooze:set', (_e, minutes: number) => {
+    ctx.controller.setSnooze(Number(minutes) || 0);
+    ctx.refreshSnapshot();
     return ctx.buildSnapshot();
   });
   ipcMain.handle('config:update', (_e, patch: Record<string, unknown>) => {
@@ -70,6 +75,14 @@ export function registerIpc(ctx: AppContext): void {
         'discordGateFollowMic' in patch ||
         'discordIntegration' in patch);
 
+    const ledNeedsUpdate =
+      Boolean(patch) &&
+      ('sensorLedEnabled' in patch ||
+        'sensorLedBrightness' in patch ||
+        'sensorLedDeskColor' in patch ||
+        'sensorLedAwayColor' in patch ||
+        'sensorLedMuteColor' in patch);
+
     if (radarNeedsRestart) {
       void ctx.restartRadar();
     }
@@ -79,13 +92,16 @@ export function registerIpc(ctx: AppContext): void {
     if (discordVoiceNeedsUpdate && ctx.controller.currentDevice) {
       ctx.controller.applyDiscordGate(ctx.controller.currentDevice);
     }
+    if (ledNeedsUpdate && !radarNeedsRestart) {
+      ctx.radar.updateLed();
+    }
     if (!radarNeedsRestart) {
       ctx.refreshSnapshot();
     }
     return ctx.buildSnapshot();
   });
   ipcMain.handle('devices:list', async () => {
-    // Cache 3 s — renderer woła to przy KAŻDYM snapshocie (radar status,
+    // Cache 1 s — renderer woła to przy KAŻDYM snapshocie (radar status,
     // mute, przełączenie); bez cache każde zdarzenie = rund trip do daemona.
     return await ctx.audio.listRecordingDevices(false);
   });
@@ -94,34 +110,10 @@ export function registerIpc(ctx: AppContext): void {
     const recommended = ctx.audio.resolveNames(devices);
     return { devices, recommended };
   });
-  ipcMain.handle('audio:toggleMute', async (_e, target?: string) => {
-    const res = await ctx.controller.toggleDeviceMute(target);
-    ctx.refreshSnapshot();
-    return res;
+  ipcMain.handle('audio:toggleMute', async () => {
+    // Wspólny helper z pełnym feedbackiem (LED + toast + powiadomienie)
+    return await toggleMuteWithFeedback(ctx);
   });
-  ipcMain.handle('audio:setMute', async (_e, args: { target: string; mute: boolean }) => {
-    const res = await ctx.controller.setDeviceMute(args.target, args.mute);
-    ctx.refreshSnapshot();
-    return res;
-  });
-  ipcMain.handle(
-    'audio:setVolume',
-    async (_e, args: { target: string; percent: number }) => {
-      const res = await ctx.controller.setDeviceVolume(args.target, args.percent);
-      const deskName = (ctx.config.get('micDeskName') || '').trim().toLowerCase();
-      const headName = (ctx.config.get('micHeadsetName') || '').trim().toLowerCase();
-      const targetLower = (args.target || '').trim().toLowerCase();
-      if (deskName && (targetLower.includes(deskName) || deskName.includes(targetLower))) {
-        ctx.config.set('micDeskVolume', args.percent);
-        ctx.config.save();
-      } else if (headName && (targetLower.includes(headName) || headName.includes(targetLower))) {
-        ctx.config.set('micHeadsetVolume', args.percent);
-        ctx.config.save();
-      }
-      return res;
-    }
-  );
-  ipcMain.handle('audio:getVolume', async (_e, target?: string) => ctx.audio.getVolume(target ?? ''));
   ipcMain.handle(
     'discord:applyVoice',
     async (_e, args: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }) =>
@@ -162,11 +154,14 @@ export function registerIpc(ctx: AppContext): void {
     ctx.refreshSnapshot();
     return ctx.buildSnapshot();
   });
-  ipcMain.handle('display:sleep', async () => {
-    return await ctx.audio.sleepDisplay();
+  ipcMain.handle('screensaver:start', async () => {
+    ctx.screen.showScreensaver();
+    return true;
   });
-  ipcMain.handle('display:wake', async () => {
-    return await ctx.audio.wakeDisplay();
+  // Ewakuacja z nakładki: dowolne wejście użytkownika na wygaszaczu (preload
+  // screensaver.ts) zdejmuje go natychmiast, z pominięciem polla idle.
+  ipcMain.on('screensaver:dismiss', () => {
+    ctx.screen.notifyUserInput();
   });
 
   // Home Assistant (HAOS) IPC
@@ -178,9 +173,6 @@ export function registerIpc(ctx: AppContext): void {
   );
 
   // SignalRGB IPC
-  ipcMain.handle('signalrgb:probe', async () =>
-    ctx.signalrgb ? ctx.signalrgb.probe() : { connected: false }
-  );
   ipcMain.handle('signalrgb:testAway', async () => {
     if (ctx.signalrgb) await ctx.signalrgb.onAway();
     return true;
@@ -190,13 +182,7 @@ export function registerIpc(ctx: AppContext): void {
     return true;
   });
 
-  // GitHub Token Page & Updater IPC
-  ipcMain.handle('github:openTokenPage', () => {
-    void shell.openExternal(
-      'https://github.com/settings/tokens/new?scopes=repo&description=AutoAudioSwitch-Updater'
-    );
-    return true;
-  });
+  // Updater IPC
   ipcMain.handle('updater:check', async () => await ctx.updater.checkForUpdates());
   ipcMain.handle('updater:download', async () =>
     ctx.updater ? await ctx.updater.downloadUpdate() : null
@@ -213,6 +199,9 @@ export function registerIpc(ctx: AppContext): void {
     ctx.refreshSnapshot();
     return status;
   });
+
+  // Rejestrator surowego strumienia radaru (toggle: start / stop + raport)
+  ipcMain.handle('diag:record', () => toggleRecording(300));
 
   // General External URL Opener IPC
   ipcMain.handle('app:openExternal', (_e, url: string) => {
@@ -247,6 +236,68 @@ export function registerIpc(ctx: AppContext): void {
     } catch {
       return false;
     }
+  });
+
+  // Sesja diagnostyczna "Wyjście z pokoju" — patrz src/main/diagSession.ts
+  ipcMain.handle('diag:start', () => {
+    startDiagSession();
+    return true;
+  });
+  ipcMain.handle('diag:status', () => ({
+    active: isDiagSessionActive(),
+    startedAt: diagSessionStartedAt()
+  }));
+  ipcMain.handle('diag:stop', () => {
+    const res = stopDiagSession();
+    if (!res) return null;
+    const durationMin = ((res.endedAt - res.startedAt) / 60000).toFixed(1);
+    const header = [
+      `# DeskSense — sesja diagnostyczna "Wyjście z pokoju"`,
+      `Start: ${new Date(res.startedAt).toLocaleString('pl-PL')} | Koniec: ${new Date(res.endedAt).toLocaleString('pl-PL')} | Czas trwania: ${durationMin} min`,
+      `Wersja: v${app.getVersion()} | Tryb: ${ctx.controller.mode} | Obecność: ${ctx.radar.presence ? 'OBECNY' : 'BRAK'}`,
+      `Logów w sesji: ${res.logs.length}`,
+      ``
+    ].join('\n');
+    return {
+      startedAt: res.startedAt,
+      endedAt: res.endedAt,
+      count: res.logs.length,
+      text: header + res.logs.join('\n')
+    };
+  });
+
+  // Notatnik z dowolnym tekstem (używane przez modal sesji diagnostycznej)
+  ipcMain.handle('app:openTextInNotepad', (_e, text: string) => {
+    try {
+      const tmpPath = path.join(os.tmpdir(), `DeskSense-Diag-${Date.now()}.txt`);
+      fs.writeFileSync(tmpPath, String(text ?? ''), 'utf8');
+      exec(`notepad.exe "${tmpPath}"`);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  // Systemowy dialog wyboru pliku audio (własny dźwięk przełączenia)
+  ipcMain.handle('app:pickAudioFile', async () => {
+    const { dialog } = await import('electron');
+    const win = getSettingsWindow() ?? undefined;
+    const result = await dialog.showOpenDialog(win as Electron.BaseWindow, {
+      title: 'Wybierz plik audio (mp3, wav, ogg)',
+      filters: [
+        { name: 'Audio (mp3, wav, ogg)', extensions: ['mp3', 'wav', 'ogg', 'm4a', 'flac'] },
+        { name: 'Wszystkie pliki', extensions: ['*'] }
+      ],
+      properties: ['openFile']
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
+
+  // Natychmiastowe odświeżenie koloru diody po zmianie w color pickerze
+  ipcMain.handle('led:refresh', () => {
+    ctx.radar.updateLed();
+    return true;
   });
 
   ipcMain.on('window:close', () => {

@@ -1,17 +1,13 @@
 export type AppMode = 'auto' | 'desk' | 'headset';
 export type DeskState = 'desk' | 'away';
 export type DeviceState = 'desk' | 'headset';
-export type DetectedPerson = 'me' | 'other' | 'pet' | 'unknown';
+export type DetectedPerson = 'me' | 'pet' | 'unknown';
 
 export interface AppConfig {
   port: string;
   baudRate: number;
   micDeskName: string;
-  /** ID endpointu (stabilne mimo zmian nazwy w Windows) — opcjonalne dla starszych configów */
-  micDeskId: string;
   micHeadsetName: string;
-  /** ID endpointu (stabilne mimo zmian nazwy w Windows) — opcjonalne dla starszych configów */
-  micHeadsetId: string;
   /** Głośność mikrofonu stacjonarnego 0-100; -1 = nie steruj głośnością */
   micDeskVolume: number;
   /** Głośność mikrofonu mobilnego 0-100; -1 = nie steruj głośnością */
@@ -20,7 +16,6 @@ export interface AppConfig {
   micDeskGateDb: number;
   /** Bramka VAD Discorda dla mikrofonu mobilnego (-100..0 dB); -1 = nie steruj */
   micHeadsetGateDb: number;
-  /** Wyciszenie szumów (Krisp) dla mikrofonu mobilnego */
   /** Wyciszenie szumów (Krisp) dla mikrofonu stacjonarnego */
   micDeskKrisp: 'default' | 'on' | 'off';
   /** Wyciszenie szumów (Krisp) dla mikrofonu mobilnego */
@@ -52,27 +47,22 @@ export interface AppConfig {
   discordAccessToken?: string;
   /** Zapisany token odświeżania OAuth2 do bezobsługowego odnawiania sesji */
   discordRefreshToken?: string;
+  /** Unix ms wygaśnięcia access tokenu (proaktywny refresh z 24 h zapasem) */
+  discordTokenExpiresAt?: number;
   timeoutAwayMs: number;
   timeoutDeskMs: number;
-  /** Po ilu ms bitu obecności bez potwierdzenia (dystans w bramce/biometria/wejście) wygasić obecność jako fałszywy cel */
-  ghostTimeoutMs: number;
-  /** Jak długo goły bit obecności nie może ponownie włączyć obecności po wykryciu fałszywego celu */
-  ghostLockoutMs: number;
   /** Wykorzystuje aktywność klawiatury i myszy (GetLastInputInfo) jako potwierdzenie obecności */
   userInputPresenceEnabled: boolean;
   radarDistanceGateEnabled: boolean;
-  /** Wstrzymuje bramkę odległości/filtr zwierzaka, gdy radar nie potrafi rozstrzygnąć,
-   *  którego celu (użytkownik vs kot) dotyczy odczyt dystansu/biometrii. */
-  radarAmbiguityGuardEnabled: boolean;
   radarMinDistanceCm: number;
   radarMaxDistanceCm: number;
-  radarSensitivity: number;
+  /** Potwierdzanie powrotu po głębokiej nieobecności: ON musi się ustabilizować, zanim przełączy mikrofon */
+  radarDeepAwayConfirm: boolean;
+  /** Długość ciągłego AWAY, po której powrót wymaga potwierdzenia (ms) */
+  radarDeepAwayMinMs: number;
+  /** Jak długo sygnał obecności musi wytrzymać ON, zanim uznamy powrót (ms) */
+  radarDeepAwayConfirmMs: number;
   petFilterEnabled: boolean;
-  biometricsEnabled: boolean;
-  userHeartRateMin: number;
-  userHeartRateMax: number;
-  userSeatingDistanceMin: number;
-  userSeatingDistanceMax: number;
   radarAutoTuningEnabled: boolean;
   radarAutoTuningSpeed: 'balanced' | 'fast' | 'conservative';
   radarAutoTuningNoiseFloor: number;
@@ -80,7 +70,6 @@ export interface AppConfig {
   radarLearnedDistanceVariance: number;
   radarLearnedHeartRate: number;
   radarLearnedBreathRate: number;
-  personMismatchAction: 'ignore' | 'switch_anyway' | 'notify_only';
   switchMicOnAway: boolean;
   switchMicOnDesk: boolean;
   muteBehaviorOnAway: 'none' | 'mute_stationary' | 'mute_all' | 'mute_inactive';
@@ -92,16 +81,27 @@ export interface AppConfig {
   signalrgbAwayColor: string;
   signalrgbAwayBrightness: number;
   signalrgbRestoreOnDesk: boolean;
+  /** Włącz czarny wygaszacz ekranu po odejściu od biurka */
+  screensaverOnAway: boolean;
+  /** Czas w ms nieobecności, po którym włącza się czarny wygaszacz (domyślnie 60000 = 1 min) */
+  screensaverDelayMs: number;
+  /** Włącz sprzętowe uśpienie zasilania monitorów (DPMS) po odejściu od biurka */
   sleepMonitorsOnAway: boolean;
+  /** Czas w ms nieobecności, po którym następuje sprzętowe uśpienie monitorów (domyślnie 600000 = 10 min) */
   sleepMonitorsDelayMs: number;
   wakeMonitorsOnDesk: boolean;
   audioChime: boolean;
   audioChimeOnDesk: boolean;
   audioChimeOnAway: boolean;
   audioChimeVolume: number;
+  /** Styl syntezowanego chime (własne pliki audio mają priorytet nad stylem) */
+  audioChimeStyle: 'harmonic' | 'modern' | 'soft_click' | 'marimba';
+  /** Własny plik audio (mp3/wav/ogg) zamiast syntezowanego chime dla profilu Stacjonarnego; '' = użyj chime */
+  audioFileDesk: string;
+  /** Własny plik audio zamiast chime dla profilu Słuchawki (mobilnego); '' = użyj chime */
+  audioFileHeadset: string;
   notifications: boolean;
   autoStart: boolean;
-  autoDownloadTools: boolean;
   globalShortcut: string;
   githubRepo: string;
   githubToken: string;
@@ -121,6 +121,16 @@ export interface AppConfig {
   haBreathRateEntity: string;
   /** Tryb cyfrowej stabilizacji i wygładzania odczytów radaru (ultra = mocny filtr medianowy+EMA, balanced = zbalansowany, raw = surowy) */
   radarSmoothingMode: 'ultra' | 'balanced' | 'raw';
+  /** Włącz diodę statusową WS2812 na sensorze */
+  sensorLedEnabled: boolean;
+  /** Jasność diody sensora 0-100% (tryb nocny/stealth) */
+  sensorLedBrightness: number;
+  /** Kolor diody przy biurku (HEX, np. #22c55e) */
+  sensorLedDeskColor: string;
+  /** Kolor diody poza biurkiem (HEX, np. #f59e0b) */
+  sensorLedAwayColor: string;
+  /** Kolor diody przy wyciszonym mikrofonie (HEX, np. #ef4444) */
+  sensorLedMuteColor: string;
 }
 
 export interface HomeAssistantStatus {
@@ -135,8 +145,6 @@ export interface HomeAssistantStatus {
 
 export interface AutoTuningStatus {
   enabled: boolean;
-  mode: 'learning' | 'tracking' | 'idle';
-  speed: 'balanced' | 'fast' | 'conservative';
   noiseFloor: number;
   samplesCount: number;
   adaptedDistanceCenter: number;
@@ -145,6 +153,8 @@ export interface AutoTuningStatus {
   adaptedHeartRateAvg: number;
   adaptedBreathRateAvg: number;
   stabilityScore: number;
+  /** false dopóki kroczące okno stabilności się nie napełni (UI pokazuje "Nauka…") */
+  stabilityReady: boolean;
   lastAdaptedAt: number;
 }
 
@@ -160,7 +170,22 @@ export interface RadarTelemetry {
   illuminanceLux?: number;
   detectedPerson?: DetectedPerson;
   autoTuning?: AutoTuningStatus;
+  deviceInfo?: {
+    fwVersion?: string;
+    uptimeSec?: number;
+    chipTempC?: number;
+  };
   lastUpdate?: number;
+}
+
+export interface DiagRecordResult {
+  active: boolean;
+  durationSec: number;
+  sampleCount: number;
+  /** Gotowy raport tekstowy (PL) z wnioskami dla progów fuzji */
+  summary: string;
+  /** Pełne CSV: t_s,rodzaj,wartosc */
+  csv: string;
 }
 
 export interface SerialPortInfo {
@@ -175,8 +200,12 @@ export interface AudioDeviceItem {
   id?: string;
   name: string;
   isDefault: boolean;
+  /** Rola komunikacyjna (priorytet dla rozmów) — używana przez watchdog defaultu */
+  isDefaultComm?: boolean;
   isMuted?: boolean;
   volume?: number;
+  /** Fizyczny poziom w dB — skala dokumentowana (procenty Windows to nieliniowy taper) */
+  volumeDb?: number | null;
 }
 
 export interface Snapshot {
@@ -193,6 +222,8 @@ export interface Snapshot {
   ha?: HomeAssistantStatus;
   telemetry: RadarTelemetry;
   config: AppConfig;
+  /** Unix ms do kiedy trwa pauza automatyki (snooze); 0 = brak pauzy */
+  snoozeUntil: number;
 }
 
 export interface UpdaterStatus {
@@ -250,28 +281,35 @@ export interface DetectResult {
   recommended: { micDeskName: string; micHeadsetName: string };
 }
 
+/** Raport sesji diagnostycznej "Wyjście z pokoju" (diag:stop). */
+export interface DiagSessionReport {
+  startedAt: number;
+  endedAt: number;
+  count: number;
+  text: string;
+}
+
 export interface Api {
   getState: () => Promise<Snapshot>;
   getPorts: () => Promise<SerialPortInfo[]>;
   setMode: (mode: AppMode) => Promise<Snapshot>;
-  setPort: (port: string) => Promise<Snapshot>;
+  /** Pauza automatyki (snooze) na N minut; 0 = wznowienie. Zwraca świeży snapshot. */
+  setSnooze: (minutes: number) => Promise<Snapshot>;
   updateConfig: (patch: Partial<AppConfig>) => Promise<Snapshot>;
   detectDevices: () => Promise<DetectResult>;
   listDevices: () => Promise<AudioDeviceItem[]>;
-  toggleMute: (target?: string) => Promise<{ ok: boolean; isMuted?: boolean }>;
-  setMute: (target: string, mute: boolean) => Promise<{ ok: boolean; isMuted?: boolean }>;
-  setVolume: (target: string, percent: number) => Promise<{ ok: boolean; volume?: number }>;
-  getVolume: (target?: string) => Promise<{ ok: boolean; volume?: number }>;
+  toggleMute: () => Promise<{ ok: boolean; isMuted?: boolean }>;
   discordApplyVoice: (args: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }) => Promise<boolean>;
   discordGetStatus: () => Promise<{ connected: boolean; ready: boolean; authenticated: boolean; user?: string }>;
   discordGetVoiceSettings: () => Promise<{ thresholdDb?: number; autoThreshold?: boolean; krisp?: boolean; agc?: boolean; echo?: boolean } | null>;
   discordAuthorize: () => Promise<boolean>;
   testDevice: (name: string) => Promise<Snapshot>;
-  sleepDisplay: () => Promise<unknown>;
-  wakeDisplay: () => Promise<unknown>;
+  screensaverStart: () => Promise<boolean>;
+  screensaverDismiss: () => void;
   openConfigDir: () => Promise<boolean>;
   resetConfig: () => Promise<Snapshot>;
   resetAutoTuning: () => Promise<AutoTuningStatus | null>;
+  diagRecord: () => Promise<DiagRecordResult>;
   closeWindow: () => void;
   minimizeWindow: () => void;
   maximizeWindow: () => void;
@@ -290,13 +328,15 @@ export interface Api {
   }>;
 
   // SignalRGB Integration
-  signalrgbProbe: () => Promise<{ connected: boolean; status?: number; data?: unknown }>;
   signalrgbTestAway: () => Promise<boolean>;
   signalrgbTestDesk: () => Promise<boolean>;
 
-  openGitHubTokenPage: () => Promise<boolean>;
   openExternal: (url: string) => Promise<boolean>;
   copyToClipboard: (text: string) => Promise<boolean>;
+  /** Systemowy dialog wyboru pliku audio; zwraca ścieżkę lub null przy anulowaniu */
+  pickAudioFile: () => Promise<string | null>;
+  /** Ponowne wysłanie koloru diody do sensora (po zmianie w color pickerze) */
+  refreshLed: () => Promise<boolean>;
   checkForUpdates: () => Promise<{ available: boolean; updateInfo?: UpdateInfo | null; error?: string; currentVersion: string }>;
   downloadUpdate: () => Promise<{ ok: boolean; file?: string } | null>;
   installUpdate: () => Promise<void | null>;
@@ -305,6 +345,12 @@ export interface Api {
   getLogs: () => Promise<string[]>;
   clearLogs: () => Promise<boolean>;
   openLogsInNotepad: () => Promise<boolean>;
+
+  // Sesja diagnostyczna "Wyjście z pokoju"
+  diagStart: () => Promise<boolean>;
+  diagStatus: () => Promise<{ active: boolean; startedAt: number }>;
+  diagStop: () => Promise<DiagSessionReport | null>;
+  openTextInNotepad: (text: string) => Promise<boolean>;
 
   onEvent: (cb: (e: PushEvent) => void) => () => void;
 }

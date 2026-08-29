@@ -92,6 +92,25 @@ function playChime(state: 'desk' | 'headset' | 'away', volume = 0.2, style: Chim
   } catch (_) {}
 }
 
+/**
+ * Odtwarzanie własnego pliku audio z dysku (mp3/wav/ogg) zamiast syntezowanego
+ * chime. Strona w packaged app ma origin file://, więc file:// media gra bez
+ * webSecurity. Zwraca false, gdy plik nieustawiony lub odtwarzacz zawodzi —
+ * wtedy wywołujący ma spaść na syntezowany chime.
+ */
+function playCustomAudioFile(filePath: string, state: 'desk' | 'headset' | 'away', volume = 0.2): boolean {
+  if (!filePath) return false;
+  try {
+    const normalized = filePath.replace(/\\/g, '/').split('?')[0].split('#')[0];
+    const audio = new Audio(encodeURI(`file:///${normalized.replace(/^\//, '')}`));
+    audio.volume = Math.min(1, Math.max(0.01, volume));
+    void audio.play().catch(() => playChime(state, volume));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 // ---------- Live Audio Meter Engine (Real-Time VU-Meter & VAD Gate Tracker) ----------
 class LiveAudioEngine {
   private audioCtx: AudioContext | null = null;
@@ -463,43 +482,42 @@ class AppUI {
     detectedPerson: 'unknown',
     autoTuning: {
       enabled: true,
-      mode: 'tracking',
-      speed: 'balanced',
       noiseFloor: 0,
       samplesCount: 0,
-      adaptedDistanceCenter: 75,
-      adaptedDistanceMin: 40,
-      adaptedDistanceMax: 110,
+      adaptedDistanceCenter: 0,
+      adaptedDistanceMin: 0,
+      adaptedDistanceMax: 0,
       adaptedHeartRateAvg: 0,
       adaptedBreathRateAvg: 0,
-      stabilityScore: 90,
+      stabilityScore: 0,
+      stabilityReady: false,
       lastAdaptedAt: 0
     }
   };
 
   // Modale aplikacji
   private wizardOpen = false;
-  private wizardStep: 1 | 2 | 3 | 4 = 1;
+  private wizardStep: 1 | 2 | 3 = 1;
   private wizardCountdown = 0;
   private wizardInterval: any = null;
-  private wizardSamples: { distances: number[]; heartRates: number[]; breathRates: number[] } = {
-    distances: [],
-    heartRates: [],
-    breathRates: []
+  private wizardWarning = '';
+  private wizardPresenceSeen = false;
+  private wizardSamples: { distances: number[] } = {
+    distances: []
   };
   private wizardResults = {
     distance: 75,
     gateMin: 45,
-    gateMax: 110,
-    heartRateAvg: 68,
-    heartRateMin: 55,
-    heartRateMax: 78,
-    breathRateAvg: 14
+    gateMax: 110
   };
 
-  private bioModalOpen = false;
   private diagModalOpen = false;
   private logs: string[] = [];
+
+  // Sesja diagnostyczna "Wyjście z pokoju"
+  private diagActive = false;
+  private diagSessionText = '';
+  private diagReportModalOpen = false;
 
   private lastDeviceSig = '';
   private lastPortSig = '';
@@ -517,11 +535,21 @@ class AppUI {
       console.error('[DeskSense] Błąd pobierania stanu początkowego:', err);
     }
 
+    // Sesja diag żyje w main process — odśwież przycisk po restarcie okna
+    try {
+      const st = await window.api.diagStatus();
+      this.diagActive = st.active;
+    } catch (_) {}
+
     if (this.snap) {
       this.form = { ...this.snap.config };
       if (this.snap.telemetry) {
         this.telemetry = { ...this.snap.telemetry };
       }
+      // Styl chime i pauza automatyki żyją w main (config/snapshot) —
+      // odzyskujemy je po restarcie okna zamiast udawać domyślne.
+      this.selectedChimeStyle = this.form.audioChimeStyle || 'harmonic';
+      this.snoozeUntil = this.snap.snoozeUntil > 0 ? this.snap.snoozeUntil : null;
     }
 
     try {
@@ -621,10 +649,10 @@ class AppUI {
         } else if (this.vadModalOpen) {
           ev.preventDefault();
           this.closeVadModal();
-        } else if (this.bioModalOpen || this.diagModalOpen) {
+        } else if (this.diagModalOpen || this.diagReportModalOpen) {
           ev.preventDefault();
-          this.bioModalOpen = false;
           this.diagModalOpen = false;
+          this.diagReportModalOpen = false;
           this.render();
         }
       } else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 's') {
@@ -668,6 +696,17 @@ class AppUI {
       if (isVisible) {
         this.vuEngine.restartWithLastDevices();
         void this.pollHardwareLists();
+        // Snapshot jest pushowany tylko do widocznego okna — po otwarciu z tray
+        // dociągamy aktualny stan (m.in. podświetlenie aktywnej karty mikrofonu).
+        if (window.api && typeof window.api.getState === 'function') {
+          void window.api.getState().then((s) => {
+            if (!s) return;
+            this.snap = s;
+            if (s.telemetry) this.telemetry = { ...s.telemetry };
+            if (!this.dirty) this.form = { ...s.config };
+            this.loadAudioDevices().then(() => this.updateHeaderAndLiveDOM());
+          });
+        }
       } else {
         if (this.dirty) void this.save();
         this.vuEngine.stop();
@@ -680,8 +719,10 @@ class AppUI {
       if (e.snapshot.telemetry) {
         this.telemetry = { ...e.snapshot.telemetry };
       }
+      this.snoozeUntil = e.snapshot.snoozeUntil > 0 ? e.snapshot.snoozeUntil : null;
       if (!this.dirty) {
         this.form = { ...e.snapshot.config };
+        this.selectedChimeStyle = this.form.audioChimeStyle || 'harmonic';
       }
       this.loadAudioDevices().then(() => {
         this.updateHeaderAndLiveDOM();
@@ -718,9 +759,6 @@ class AppUI {
       if (this.wizardOpen && this.wizardCountdown > 0) {
         if (this.wizardStep === 2 && this.telemetry.distanceCm) {
           this.wizardSamples.distances.push(this.telemetry.distanceCm);
-        } else if (this.wizardStep === 3) {
-          if (this.telemetry.heartRate) this.wizardSamples.heartRates.push(this.telemetry.heartRate);
-          if (this.telemetry.breathRate) this.wizardSamples.breathRates.push(this.telemetry.breathRate);
         }
       }
     }
@@ -744,7 +782,15 @@ class AppUI {
       if (this.form && this.form.audioChime) {
         const shouldChime = e.state === 'desk' ? (this.form.audioChimeOnDesk !== false) : (this.form.audioChimeOnAway !== false);
         if (shouldChime) {
-          playChime(e.state, this.form.audioChimeVolume ?? 0.2, this.selectedChimeStyle);
+          const vol = this.form.audioChimeVolume ?? 0.2;
+          const customFile = e.state === 'desk'
+            ? (this.form.audioFileDesk || '')
+            : (this.form.audioFileHeadset || '');
+          if (customFile) {
+            playCustomAudioFile(customFile, e.state, vol);
+          } else {
+            playChime(e.state, vol, this.selectedChimeStyle);
+          }
         }
       }
       this.triggerOsdHud(
@@ -796,6 +842,15 @@ class AppUI {
       radarBadge.innerHTML = `<span class="dot"></span> ${label}`;
     }
 
+    const diagBtn = document.getElementById('fc-header-diag-btn');
+    if (diagBtn) {
+      diagBtn.className = `fc-diag-btn ${this.diagActive ? 'active' : ''}`;
+      diagBtn.innerHTML = this.diagActive ? '⏹ Zakończ test' : '🧪 Wyjście z pokoju';
+      diagBtn.setAttribute('title', this.diagActive
+        ? 'Sesja diagnostyczna trwa — kliknij po powrocie, aby zobaczyć logi'
+        : 'Wychodzisz z pokoju? Kliknij — aplikacja nagra logi do diagnozy wykrywania nieobecności');
+    }
+
     const muteBtn = document.getElementById('fc-header-mute-btn');
     if (muteBtn) {
       muteBtn.className = `fc-mute-btn ${this.isMuted ? 'muted' : ''}`;
@@ -814,7 +869,44 @@ class AppUI {
       cardMuteBadge.textContent = this.isMuted ? 'Wyciszony 🔇' : 'Aktywny 🎙️';
     }
 
+    this.updateActiveMicCards();
     this.updateTelemetryDOM();
+  }
+
+  /**
+   * Żywe odświeżanie podświetlenia kart mikrofonów (zielona ramka "Domyślny ✓").
+   * snapshot przychodzi po każdym przełączeniu, ale pełny render() jest zbyt
+   * drogi — aktualizamy tylko klasy kart, selectów i badge'y.
+   */
+  private updateActiveMicCards() {
+    const isDeskActive = this.isMicActive('desk');
+    const isHeadsetActive = this.isMicActive('headset');
+
+    const apply = (
+      cardId: string,
+      selectId: string,
+      badgeId: string,
+      active: boolean,
+      idleLabel: string
+    ) => {
+      const card = document.getElementById(cardId);
+      if (card) {
+        card.classList.toggle('highlight', active);
+        card.classList.toggle('active-mic', active);
+      }
+      const select = document.getElementById(selectId);
+      if (select) {
+        select.classList.toggle('active-source', active);
+      }
+      const badge = document.getElementById(badgeId);
+      if (badge) {
+        badge.className = `fc-badge ${active ? 'calibrated' : 'muted'}`;
+        badge.textContent = active ? 'Domyślny ✓' : idleLabel;
+      }
+    };
+
+    apply('card-mic-desk', 'sel-mic-desk', 'badge-mic-desk', isDeskActive, 'Gotowy');
+    apply('card-mic-headset', 'sel-mic-headset', 'badge-mic-headset', isHeadsetActive, 'Rezerwa');
   }
 
   private updateTelemetryDOM() {
@@ -846,11 +938,9 @@ class AppUI {
       const p = this.telemetry.detectedPerson || 'unknown';
       elPerson.className = `fc-badge ${p === 'me' ? 'calibrated' : (p === 'pet' ? 'amber' : 'blue')}`;
       if (p === 'me') {
-        elPerson.textContent = '👤 Właściciel ✓';
+        elPerson.textContent = '👤 Człowiek ✓';
       } else if (p === 'pet') {
         elPerson.textContent = '🐾 Zwierzę (Kot/Pies)';
-      } else if (p === 'other') {
-        elPerson.textContent = '👥 Inna osoba';
       } else {
         elPerson.textContent = '🔍 Skanowanie…';
       }
@@ -863,9 +953,47 @@ class AppUI {
     if (tun) {
       const elTunDist = document.getElementById('card-val-autotune-dist');
       const elTunStability = document.getElementById('card-badge-autotune-stability');
-      if (elTunDist) elTunDist.textContent = tun.adaptedDistanceCenter ? `${tun.adaptedDistanceCenter} cm` : '75 cm';
-      if (elTunStability) elTunStability.textContent = `Stabilność: ${tun.stabilityScore ?? 92}% ✓`;
+      const elTunNoise = document.getElementById('card-val-autotune-noise');
+      const elTunZone = document.getElementById('card-val-autotune-zone');
+      const elTunBio = document.getElementById('card-val-autotune-bio');
+      if (elTunDist) elTunDist.textContent = tun.adaptedDistanceCenter ? `${tun.adaptedDistanceCenter} cm` : '—';
+      if (elTunZone) elTunZone.textContent = this.autoTuneZoneLabel();
+      if (elTunBio) elTunBio.textContent = this.autoTuneBioLabel();
+      if (elTunNoise) {
+        elTunNoise.textContent = this.autoTuneNoiseLabel(tun.noiseFloor ?? 0);
+        elTunNoise.style.color = (tun.noiseFloor ?? 0) >= 40 ? 'var(--fc-accent-amber)' : 'var(--fc-accent-green)';
+      }
+      if (elTunStability) elTunStability.textContent = this.autoTuneStabilityLabel(tun);
     }
+  }
+
+  /** Etykieta szumu: % odczytów w nieobecności z echem w strefie fotela. */
+  private autoTuneNoiseLabel(noiseFloor: number): string {
+    const v = Math.round(noiseFloor);
+    if (v < 15) return `${v}% (Czyste)`;
+    if (v < 40) return `${v}% (Sporadyczne odbicia)`;
+    return `${v}% (Silne odbicia)`;
+  }
+
+  /** Wyuczona strefa fotela = adaptacyjna bramka górna (auto-tuning tylko poszerza config). */
+  private autoTuneZoneLabel(): string {
+    const tun = this.telemetry.autoTuning;
+    if (!tun?.adaptedDistanceCenter) return '—';
+    return `${tun.adaptedDistanceMin}–${tun.adaptedDistanceMax} cm`;
+  }
+
+  /** Wyuczone średnie tętno/oddech — dowód, że radar widzi użytkownika biologicznie. */
+  private autoTuneBioLabel(): string {
+    const tun = this.telemetry.autoTuning;
+    if (!tun?.adaptedHeartRateAvg && !tun?.adaptedBreathRateAvg) return '—';
+    const hr = tun?.adaptedHeartRateAvg ? `${tun.adaptedHeartRateAvg} BPM` : '—';
+    const br = tun?.adaptedBreathRateAvg ? `${tun.adaptedBreathRateAvg} RPM` : '—';
+    return `${hr} · ${br}`;
+  }
+
+  private autoTuneStabilityLabel(tun: { stabilityScore?: number; stabilityReady?: boolean } | undefined): string {
+    if (!tun?.stabilityReady) return 'Nauka…';
+    return `Stabilność: ${tun.stabilityScore ?? 0}% ✓`;
   }
 
   private updateRadarScopeDOM() {
@@ -938,13 +1066,15 @@ class AppUI {
     }
   }
 
-  private refreshLogConsoleDOM() {
-    const c = document.getElementById('log-console');
-    if (!c) return;
-
-    let filtered = this.logs;
+  /**
+   * Filtr logów wspólny dla konsoli i przycisków kopiowania — "Kopiuj RAW" /
+   * "Kopiuj dla AI" zwracają dokładnie to, co użytkownik widzi w aktywnej
+   * zakładce (Audio & VU, Discord & RGB itd.) plus wyszukiwarka.
+   */
+  private applyLogFilter(logs: string[]): string[] {
+    let filtered = logs;
     if (this.logFilter === 'radar') filtered = filtered.filter((l) => l.toLowerCase().includes('radar') || l.toLowerCase().includes('serial') || l.toLowerCase().includes('dsp'));
-    if (this.logFilter === 'haos') filtered = filtered.filter((l) => l.toLowerCase().includes('haos') || l.toLowerCase().includes('ha'));
+    if (this.logFilter === 'haos') filtered = filtered.filter((l) => l.includes('[HAOS]'));
     if (this.logFilter === 'audio') filtered = filtered.filter((l) => l.toLowerCase().includes('audio') || l.toLowerCase().includes('mic') || l.toLowerCase().includes('vu'));
     if (this.logFilter === 'discord') filtered = filtered.filter((l) => l.toLowerCase().includes('discord') || l.toLowerCase().includes('vad') || l.toLowerCase().includes('signalrgb'));
     if (this.logFilter === 'error') filtered = filtered.filter((l) => l.toLowerCase().includes('err') || l.toLowerCase().includes('błąd') || l.toLowerCase().includes('warn') || l.toLowerCase().includes('error'));
@@ -953,6 +1083,14 @@ class AppUI {
       const q = this.logSearch.toLowerCase();
       filtered = filtered.filter((l) => l.toLowerCase().includes(q));
     }
+    return filtered;
+  }
+
+  private refreshLogConsoleDOM() {
+    const c = document.getElementById('log-console');
+    if (!c) return;
+
+    const filtered = this.applyLogFilter(this.logs);
 
     c.textContent = filtered.length > 0 ? filtered.join('\n') : 'Brak pasujących logów dla zadanego filtru.';
     c.scrollTop = c.scrollHeight;
@@ -1035,6 +1173,9 @@ class AppUI {
     }
     if (patch.micHeadsetGateDb !== undefined) {
       this.vuEngine.headGateDb = patch.micHeadsetGateDb;
+    }
+    if (patch.audioChimeStyle !== undefined) {
+      this.selectedChimeStyle = patch.audioChimeStyle;
     }
 
     // Debounced Auto-Save (1.5s after last modification)
@@ -1238,6 +1379,7 @@ class AppUI {
     this.wizardOpen = true;
     this.wizardStep = 1;
     this.wizardCountdown = 0;
+    this.wizardWarning = '';
     if (this.wizardInterval) clearInterval(this.wizardInterval);
     this.wizardInterval = null;
     this.render();
@@ -1252,12 +1394,22 @@ class AppUI {
 
   private runWizardStep1() {
     this.wizardCountdown = 5;
+    this.wizardWarning = '';
+    this.wizardPresenceSeen = false;
     this.render();
     this.wizardInterval = setInterval(() => {
       this.wizardCountdown--;
+      if (this.telemetry.presence === true) this.wizardPresenceSeen = true;
       if (this.wizardCountdown <= 0) {
         clearInterval(this.wizardInterval);
         this.wizardInterval = null;
+        if (this.wizardPresenceSeen) {
+          // Uczciwa walidacja: kalibracja pustego fotela nie ma sensu, gdy radar
+          // wciąż widzi człowieka — blokujemy krok zamiast udawać sukces.
+          this.wizardWarning = 'Radar nadal wykrywa obecność przy biurku — odsuń się dalej od sensora (2–3 m) i rozpocznij pomiar ponownie.';
+          this.render();
+          return;
+        }
         playChime('desk', 0.2, this.selectedChimeStyle);
         this.wizardStep = 2;
       }
@@ -1293,53 +1445,12 @@ class AppUI {
     }, 1000);
   }
 
-  private runWizardStep3() {
-    this.wizardCountdown = 8;
-    this.wizardSamples.heartRates = [];
-    this.wizardSamples.breathRates = [];
-    if (this.telemetry.heartRate) this.wizardSamples.heartRates.push(this.telemetry.heartRate);
-    if (this.telemetry.breathRate) this.wizardSamples.breathRates.push(this.telemetry.breathRate);
-    this.render();
-
-    this.wizardInterval = setInterval(() => {
-      this.wizardCountdown--;
-      if (this.wizardCountdown <= 0) {
-        clearInterval(this.wizardInterval);
-        this.wizardInterval = null;
-
-        const validHr = this.wizardSamples.heartRates.filter((h) => h >= 45 && h <= 120);
-        const avgHr = validHr.length > 0
-          ? Math.round(validHr.reduce((a, b) => a + b, 0) / validHr.length)
-          : (this.telemetry.heartRate || 68);
-
-        const validRpm = this.wizardSamples.breathRates.filter((r) => r >= 8 && r <= 24);
-        const avgRpm = validRpm.length > 0
-          ? Math.round(validRpm.reduce((a, b) => a + b, 0) / validRpm.length)
-          : (this.telemetry.breathRate || 14);
-
-        this.wizardResults.heartRateAvg = avgHr;
-        this.wizardResults.heartRateMin = Math.max(45, avgHr - 12);
-        this.wizardResults.heartRateMax = Math.min(115, avgHr + 14);
-        this.wizardResults.breathRateAvg = avgRpm;
-
-        playChime('desk', 0.25, this.selectedChimeStyle);
-        this.wizardStep = 4;
-      }
-      this.render();
-    }, 1000);
-  }
-
   private applyWizardCalibration() {
     this.patchForm({
       radarDistanceGateEnabled: true,
       radarMinDistanceCm: this.wizardResults.gateMin,
       radarMaxDistanceCm: this.wizardResults.gateMax,
-      petFilterEnabled: true,
-      biometricsEnabled: true,
-      userHeartRateMin: this.wizardResults.heartRateMin,
-      userHeartRateMax: this.wizardResults.heartRateMax,
-      userSeatingDistanceMin: Math.max(30, this.wizardResults.distance - 15),
-      userSeatingDistanceMax: this.wizardResults.distance + 20
+      petFilterEnabled: true
     });
 
     this.closeCalibrationWizard();
@@ -1479,6 +1590,11 @@ class AppUI {
               ${radar.connected ? 'Radar: USB ✓' : (this.snap?.ha?.connected ? 'Radar: HAOS ✓' : 'Radar: Brak połączenia')}
             </span>
 
+            <button class="fc-diag-btn ${this.diagActive ? 'active' : ''}" id="fc-header-diag-btn"
+              title="${this.diagActive ? 'Sesja diagnostyczna trwa — kliknij po powrocie, aby zobaczyć logi' : 'Wychodzisz z pokoju? Kliknij — aplikacja nagra logi do diagnozy wykrywania nieobecności'}">
+              ${this.diagActive ? '⏹ Zakończ test' : '🧪 Wyjście z pokoju'}
+            </button>
+
             <button class="fc-mute-btn ${this.isMuted ? 'muted' : ''}" id="fc-header-mute-btn" title="Wycisz/Odcisz mikrofon (Skrót: Ctrl+Shift+M)">
               ${this.isMuted ? '🔇 Wyciszony' : '🎙️ Aktywny'}
             </button>
@@ -1515,7 +1631,7 @@ class AppUI {
               <span>Pulpit</span>
             </button>
 
-            <button class="fc-nav-item ${this.currentTab === 'settings' ? 'active' : ''}" data-tab="settings" role="tab" aria-selected="${this.currentTab === 'settings'}" title="Ustawienia: port COM, czasy reakcji, biometria i integracje">
+            <button class="fc-nav-item ${this.currentTab === 'settings' ? 'active' : ''}" data-tab="settings" role="tab" aria-selected="${this.currentTab === 'settings'}" title="Ustawienia: port COM, czasy reakcji, filtr zwierząt i integracje">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
               <span>Ustawienia</span>
             </button>
@@ -1563,8 +1679,8 @@ class AppUI {
         <!-- MODALS -->
         ${this.wizardOpen ? this.renderWizardModal() : ''}
         ${this.vadModalOpen ? this.renderVadModal() : ''}
-        ${this.bioModalOpen ? this.renderBioModal() : ''}
         ${this.diagModalOpen ? this.renderDiagModal() : ''}
+        ${this.diagReportModalOpen ? this.renderDiagSessionModal() : ''}
 
         <!-- TOASTS CONTAINER (with A11y role) -->
         <div class="toasts" role="status" aria-live="polite"></div>
@@ -1604,8 +1720,6 @@ class AppUI {
     if (!this.snap || !this.form) return '';
     const form = this.form;
     const snap = this.snap;
-    const deskVol = this.initVolumePercent(form.micDeskName, form.micDeskVolume);
-    const headVol = this.initVolumePercent(form.micHeadsetName, form.micHeadsetVolume);
 
     const isDeskActive = this.isMicActive('desk');
     const isHeadsetActive = this.isMicActive('headset');
@@ -1643,7 +1757,7 @@ class AppUI {
 
           <div class="fc-card-grid">
             <!-- Card 1: Mikrofon Biurkowy (Stacjonarny) -->
-            <div class="fc-card ${isDeskActive ? 'highlight active-mic' : ''}">
+            <div class="fc-card ${isDeskActive ? 'highlight active-mic' : ''}" id="card-mic-desk">
               <div class="fc-card-header">
                 <div class="fc-card-title-group">
                   <span class="fc-card-icon green">🎙️</span>
@@ -1680,13 +1794,6 @@ class AppUI {
                     <span>-25</span>
                     <span>0 dB</span>
                   </div>
-                </div>
-
-                <!-- Windows Volume Slider -->
-                <div class="fc-slider-row" style="margin-top: 4px">
-                  <span style="font-size: 10px; color: var(--fc-text-muted)" title="Głośność Windows">🔊 Głośność:</span>
-                  <input type="range" class="fc-slider" id="rng-vol-desk" min="0" max="100" step="5" value="${deskVol}" />
-                  <span style="font-size: 11px; font-weight: 600; color: #fff; width: 34px; text-align: right" id="val-vol-desk">${deskVol}%</span>
                 </div>
 
                 <!-- Per-Microphone Voice Filters & Auto-VAD Helper -->
@@ -1742,15 +1849,15 @@ class AppUI {
 
               <div class="fc-card-footer">
                 <div>
-                  <div class="fc-metric-large" id="metric-vol-desk">${deskVol} %</div>
-                  <div class="fc-metric-sub">Głośność Windows</div>
+                  <div class="fc-metric-large">${form.micDeskVolume ?? 100} %</div>
+                  <div class="fc-metric-sub">Głośność profilu (aplikowana przy przełączeniu)</div>
                 </div>
-                <span class="fc-badge ${isDeskActive ? 'calibrated' : 'muted'}">${isDeskActive ? 'Domyślny ✓' : 'Gotowy'}</span>
+                <span class="fc-badge ${isDeskActive ? 'calibrated' : 'muted'}" id="badge-mic-desk">${isDeskActive ? 'Domyślny ✓' : 'Gotowy'}</span>
               </div>
             </div>
 
             <!-- Card 2: Mikrofon Mobilny (Słuchawki / Headset) -->
-            <div class="fc-card ${isHeadsetActive ? 'highlight active-mic' : ''}">
+            <div class="fc-card ${isHeadsetActive ? 'highlight active-mic' : ''}" id="card-mic-headset">
               <div class="fc-card-header">
                 <div class="fc-card-title-group">
                   <span class="fc-card-icon blue">🎧</span>
@@ -1787,13 +1894,6 @@ class AppUI {
                     <span>-25</span>
                     <span>0 dB</span>
                   </div>
-                </div>
-
-                <!-- Windows Volume Slider -->
-                <div class="fc-slider-row" style="margin-top: 4px">
-                  <span style="font-size: 10px; color: var(--fc-text-muted)" title="Głośność Windows">🔊 Głośność:</span>
-                  <input type="range" class="fc-slider" id="rng-vol-headset" min="0" max="100" step="5" value="${headVol}" />
-                  <span style="font-size: 11px; font-weight: 600; color: #fff; width: 34px; text-align: right" id="val-vol-headset">${headVol}%</span>
                 </div>
 
                 <!-- Per-Microphone Voice Filters & Auto-VAD Helper -->
@@ -1849,10 +1949,10 @@ class AppUI {
 
               <div class="fc-card-footer">
                 <div>
-                  <div class="fc-metric-large" id="metric-vol-headset">${headVol} %</div>
-                  <div class="fc-metric-sub">Głośność Windows</div>
+                  <div class="fc-metric-large">${form.micHeadsetVolume ?? 100} %</div>
+                  <div class="fc-metric-sub">Głośność profilu (aplikowana przy przełączeniu)</div>
                 </div>
-                <span class="fc-badge ${isHeadsetActive ? 'calibrated' : 'muted'}">${isHeadsetActive ? 'Domyślny ✓' : 'Rezerwa'}</span>
+                <span class="fc-badge ${isHeadsetActive ? 'calibrated' : 'muted'}" id="badge-mic-headset">${isHeadsetActive ? 'Domyślny ✓' : 'Rezerwa'}</span>
               </div>
             </div>
 
@@ -2004,10 +2104,10 @@ class AppUI {
     const tabs: { id: SettingsTab; icon: string; label: string }[] = [
       { id: 'port', icon: '🔌', label: 'Port USB COM' },
       { id: 'timeouts', icon: '⏱️', label: 'Czasy Reakcji' },
-      { id: 'biometrics', icon: '🫀', label: 'Biometria' },
+      { id: 'biometrics', icon: '🐾', label: 'Zwierzęta & Tuning' },
       { id: 'discord', icon: '🎮', label: 'Discord Voice RPC' },
       { id: 'signalrgb', icon: '🌈', label: 'SignalRGB' },
-      { id: 'chime', icon: '🔔', label: 'Dźwięki Chime' },
+      { id: 'chime', icon: '🔔', label: 'Dźwięki & Ekrany' },
       { id: 'haos', icon: '🏠', label: 'Home Assistant' }
     ];
 
@@ -2055,21 +2155,52 @@ class AppUI {
               ${this.ports.map((p) => `<option value="${esc(p.path)}" ${p.path === form.port ? 'selected' : ''}>${esc(p.path)}${p.manufacturer ? ` · ${esc(p.manufacturer)}` : ''}</option>`).join('')}
             </select>
           </div>
-          <div>
-            <label class="fc-micro-label">Czułość wiązki:</label>
-            <div class="fc-slider-row">
-              <input type="range" class="fc-slider" id="rng-radar-sens" min="20" max="100" step="5" value="${form.radarSensitivity ?? 80}" />
-              <span style="font-size: 11px; font-weight: 600; color: #fff; width: 34px; text-align: right" id="val-radar-sens">${form.radarSensitivity ?? 80}%</span>
-            </div>
-          </div>
           <div class="fc-field-row">
             <button class="btn btn-ghost btn-sm" id="fc-btn-refresh-ports">🔄 Odśwież porty</button>
             <span class="fc-badge ${snap.radar.connected ? 'calibrated' : (snap.ha?.connected ? 'calibrated' : 'muted')}">${snap.radar.connected ? 'USB Serial ✓' : (snap.ha?.connected ? 'HAOS Stream ✓' : 'Brak COM')}</span>
           </div>
         </div>
+        <div class="fc-settings-group">
+          <div class="fc-settings-group-title">💡 Dioda Statusowa Sensora (WS2812 RGB)</div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Włącz diodę na obudowie sensora</div>
+              <div class="fc-field-desc">Sygnalizuje status: zielony (przy biurku), bursztynowy (poza), czerwony (mute)</div>
+            </div>
+            <button class="fc-switch ${form.sensorLedEnabled !== false ? 'active' : ''}" id="sw-sensor-led" aria-checked="${form.sensorLedEnabled !== false}" role="switch"></button>
+          </div>
+          <div>
+            <label class="fc-micro-label">Jasność diody (tryb nocny / stealth):</label>
+            <div class="fc-slider-row">
+              <input type="range" class="fc-slider" id="rng-sensor-led-bri" min="0" max="100" step="5" value="${form.sensorLedBrightness ?? 25}" />
+              <span style="font-size: 11px; font-weight: 600; color: #fff; width: 34px; text-align: right" id="val-sensor-led-bri">${form.sensorLedBrightness ?? 25}%</span>
+            </div>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Kolor — Stacjonarny (przy biurku)</div>
+              <div class="fc-field-desc">Świeci, gdy jesteś przy biurku</div>
+            </div>
+            <input type="color" class="fc-color-input" id="clr-led-desk" value="${esc(form.sensorLedDeskColor || '#22c55e')}" title="Kolor diody w trybie Stacjonarnym" />
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Kolor — Słuchawki (poza biurkiem)</div>
+              <div class="fc-field-desc">Świeci, gdy mikrofon mobilny jest aktywny</div>
+            </div>
+            <input type="color" class="fc-color-input" id="clr-led-away" value="${esc(form.sensorLedAwayColor || '#f59e0b')}" title="Kolor diody w trybie Słuchawki" />
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Kolor — Mikrofon wyciszony</div>
+              <div class="fc-field-desc">Nakładka koloru przy wyciszeniu (Ctrl+Shift+M)</div>
+            </div>
+            <input type="color" class="fc-color-input" id="clr-led-mute" value="${esc(form.sensorLedMuteColor || '#ef4444')}" title="Kolor diody przy wyciszonym mikrofonie" />
+          </div>
+        </div>
 
         <div class="fc-settings-group">
-          <div class="fc-settings-group-title">📡 Telemetria na żywo</div>
+          <div class="fc-settings-group-title">📡 Telemetria na żywo & Urządzenie</div>
           <div class="fc-diag-grid">
             <div class="fc-diag-item">
               <div class="fc-diag-item-title"><span>📏 Dystans klatki piersiowej</span></div>
@@ -2080,8 +2211,12 @@ class AppUI {
               <div class="fc-diag-item-val" id="card-val-lux">${typeof this.telemetry.illuminanceLux === 'number' ? `${this.telemetry.illuminanceLux} lx` : '—'}</div>
             </div>
             <div class="fc-diag-item">
-              <div class="fc-diag-item-title"><span>📡 Źródło radaru</span></div>
-              <div class="fc-diag-item-val">${snap.ha?.activeSource === 'ha' ? 'Strumień HAOS ●' : (form.haEnabled ? 'Oczekiwanie' : 'USB Serial')}</div>
+              <div class="fc-diag-item-title"><span>🌡️ ESP32 / Firmware</span></div>
+              <div class="fc-diag-item-val">${[this.telemetry.deviceInfo?.chipTempC ? `${this.telemetry.deviceInfo.chipTempC.toFixed(1)}°C` : '', this.telemetry.deviceInfo?.fwVersion ? `v${this.telemetry.deviceInfo.fwVersion}` : ''].filter(Boolean).join(' · ') || (snap.radar.connected ? '— (FW nie raportuje wersji)' : '—')}</div>
+            </div>
+            <div class="fc-diag-item">
+              <div class="fc-diag-item-title"><span>⏱️ Czas pracy sensora (Uptime)</span></div>
+              <div class="fc-diag-item-val">${typeof this.telemetry.deviceInfo?.uptimeSec === 'number' ? `${this.telemetry.deviceInfo.uptimeSec}s` : '—'}</div>
             </div>
           </div>
         </div>
@@ -2135,23 +2270,31 @@ class AppUI {
           </div>
           <div class="fc-field-row">
             <div>
-              <div class="fc-field-label">👻 Filtr fałszywego celu (duch)</div>
-              <div class="fc-field-desc">Po jakim czasie bez dystansu w bramce/biometrii wygasić zablokowany bit obecności (wykrywa odbicia / obiekty statyczne)</div>
+              <div class="fc-field-label">🛡️ Potwierdzanie powrotu (ochrona przed odbiciami)</div>
+              <div class="fc-field-desc">Po długiej nieobecności bit obecności musi się ustabilizować, zanim przełączymy mikrofon — krótkie błyski odbić nie przełączają. Aktywność klawiatury/myszy potwierdza natychmiast.</div>
             </div>
+            <button class="fc-switch ${form.radarDeepAwayConfirm !== false ? 'active' : ''}" id="sw-deep-away" aria-checked="${form.radarDeepAwayConfirm !== false}" role="switch"></button>
+          </div>
+          <div class="fc-field-row">
+            <span class="fc-field-label">Próg "długiej nieobecności"</span>
             <div style="display: flex; gap: 4px; align-items: center">
-              <input type="number" class="fc-input" id="inp-timeout-ghost" value="${form.ghostTimeoutMs ?? 12000}" style="width: 90px" min="3000" max="120000" step="500" />
-              <span style="font-size: 11px; color: var(--fc-text-muted)">ms</span>
+              <input type="number" class="fc-input" id="inp-deep-away-min" value="${Math.round((form.radarDeepAwayMinMs ?? 600000) / 60000)}" style="width: 70px" min="1" max="240" step="1" />
+              <span style="font-size: 11px; color: var(--fc-text-muted)">min</span>
+            </div>
+          </div>
+          <div class="fc-field-row">
+            <span class="fc-field-label">Czas stabilizacji obecności</span>
+            <div style="display: flex; gap: 4px; align-items: center">
+              <input type="number" class="fc-input" id="inp-deep-away-confirm" value="${Math.round((form.radarDeepAwayConfirmMs ?? 3000) / 1000)}" style="width: 70px" min="1" max="30" step="1" />
+              <span style="font-size: 11px; color: var(--fc-text-muted)">s</span>
             </div>
           </div>
           <div class="fc-field-row">
             <div>
-              <div class="fc-field-label">Blokada po wykryciu ducha</div>
-              <div class="fc-field-desc">Jak długo goły bit obecności nie może włączyć mikrofonu po fałszywym celu (realny dowód znosi blokadę)</div>
+              <div class="fc-field-label">🔬 Pomiar sensora (kalibracja progów)</div>
+              <div class="fc-field-desc">Nagrywa 5 minut surowego strumienia (dystans / tętno / oddech / obecność) i liczy statystyki do strojenia progu fuzji. Klik ponownie = wcześniejszy stop.</div>
             </div>
-            <div style="display: flex; gap: 4px; align-items: center">
-              <input type="number" class="fc-input" id="inp-timeout-ghost-lock" value="${form.ghostLockoutMs ?? 60000}" style="width: 90px" min="10000" max="600000" step="5000" />
-              <span style="font-size: 11px; color: var(--fc-text-muted)">ms</span>
-            </div>
+            <button class="btn btn-ghost btn-sm" id="btn-diag-record">Start</button>
           </div>
         </div>
       </div>
@@ -2164,52 +2307,13 @@ class AppUI {
     return `
       <div class="fc-settings-panel">
         <div class="fc-settings-group">
-          <div class="fc-settings-group-title">🫀 Biometria & Filtr Zwierząt</div>
+          <div class="fc-settings-group-title">🐾 Filtr Zwierząt</div>
           <div class="fc-field-row">
             <div>
-              <div class="fc-field-label">Włącz rozróżnianie osób (Właściciel vs Goście)</div>
-              <div class="fc-field-desc">Weryfikuje wzorzec tętna i odległość siedzenia</div>
-            </div>
-            <button class="fc-switch ${form.biometricsEnabled ? 'active' : ''}" id="sw-biometrics" aria-checked="${form.biometricsEnabled ?? false}" role="switch"></button>
-          </div>
-          <div class="fc-field-row">
-            <div>
-              <div class="fc-field-label">🐾 Filtr psa / kota (&gt;22 RPM)</div>
+              <div class="fc-field-label">🐾 Filtr psa / kota (tętno &gt;125 BPM)</div>
               <div class="fc-field-desc">Ignoruje zwierzęta na bazie oddechu i tętna</div>
             </div>
             <button class="fc-switch ${form.petFilterEnabled ? 'active' : ''}" id="sw-pet-filter" aria-checked="${form.petFilterEnabled ?? true}" role="switch"></button>
-          </div>
-          <div class="fc-field-row">
-            <div>
-              <div class="fc-field-label">Wzorzec tętna (BPM)</div>
-              <div class="fc-field-desc">Zakres tętna właściciela (Min – Max)</div>
-            </div>
-            <div style="display: flex; gap: 4px; align-items: center">
-              <input type="number" class="fc-input" id="inp-hr-min" value="${form.userHeartRateMin ?? 55}" style="width: 64px" min="35" max="120" />
-              <span style="font-size: 11px; color: var(--fc-text-muted)">–</span>
-              <input type="number" class="fc-input" id="inp-hr-max" value="${form.userHeartRateMax ?? 78}" style="width: 64px" min="50" max="150" />
-            </div>
-          </div>
-          <div class="fc-field-row">
-            <div>
-              <div class="fc-field-label">Odległość siedzenia (cm)</div>
-              <div class="fc-field-desc">Zakres dystansu właściciela (Min – Max)</div>
-            </div>
-            <div style="display: flex; gap: 4px; align-items: center">
-              <input type="number" class="fc-input" id="inp-dist-min" value="${form.userSeatingDistanceMin ?? 60}" style="width: 64px" min="20" max="180" />
-              <span style="font-size: 11px; color: var(--fc-text-muted)">–</span>
-              <input type="number" class="fc-input" id="inp-dist-max" value="${form.userSeatingDistanceMax ?? 90}" style="width: 64px" min="30" max="220" />
-            </div>
-          </div>
-          <div class="fc-field-row">
-            <div>
-              <div class="fc-field-label">Gdy usiądzie inna osoba</div>
-            </div>
-            <select class="fc-select fc-select-sm" id="sel-person-action" style="width: 180px">
-              <option value="ignore" ${(form.personMismatchAction || 'ignore') === 'ignore' ? 'selected' : ''}>Pozostań w mobilnym</option>
-              <option value="notify_only" ${form.personMismatchAction === 'notify_only' ? 'selected' : ''}>Powiadom</option>
-              <option value="switch_anyway" ${form.personMismatchAction === 'switch_anyway' ? 'selected' : ''}>Przełącz mimo to</option>
-            </select>
           </div>
           <div style="border-top: 1px solid var(--fc-card-border); padding-top: 10px">
             <div class="fc-diag-grid" style="grid-template-columns: repeat(3, 1fr)">
@@ -2223,33 +2327,48 @@ class AppUI {
               </div>
               <div class="fc-diag-item">
                 <div class="fc-diag-item-title"><span>👤 Wykryta osoba</span></div>
-                <span class="fc-badge blue" id="card-badge-person">${person === 'me' ? '👤 Właściciel ✓' : (person === 'pet' ? '🐾 Zwierzę' : (person === 'other' ? '👥 Gość' : '🔍 Skanowanie…'))}</span>
+                <span class="fc-badge blue" id="card-badge-person">${person === 'me' ? '👤 Człowiek ✓' : (person === 'pet' ? '🐾 Zwierzę' : '🔍 Skanowanie…')}</span>
               </div>
             </div>
-            <button class="btn btn-ghost btn-sm" id="btn-home-open-bio" style="margin-top: 10px">🧬 Profil Biometryczny (szczegóły)</button>
           </div>
         </div>
 
         <div class="fc-settings-group">
-          <div class="fc-settings-group-title">🧠 Model Auto-Tuningu AI</div>
+          <div class="fc-settings-group-title">📡 Auto-tuning radaru</div>
           <div class="fc-field-row">
             <div>
-              <div class="fc-field-label">Automatyczna adaptacja tła</div>
-              <div class="fc-field-desc">Model uczy się szumu otoczenia i Twojej pozycji w fotelu</div>
+              <div class="fc-field-label">Automatyczna adaptacja fotela</div>
+              <div class="fc-field-desc">Uczy się pozycji Twojego fotela i poszerza górną bramkę dystansu, gdy siedzisz dalej niż domyślny limit</div>
             </div>
             <button class="fc-switch ${form.radarAutoTuningEnabled ? 'active' : ''}" id="sw-auto-tuning" aria-checked="${form.radarAutoTuningEnabled ?? true}" role="switch"></button>
           </div>
           <div class="fc-field-row">
-            <span class="fc-field-label">Szum otoczenia</span>
-            <strong style="color: var(--fc-accent-green)">${this.telemetry.autoTuning?.noiseFloor ?? 0}% (Czyste)</strong>
+            <span class="fc-field-label">Tempo uczenia modelu</span>
+            <select class="fc-select fc-select-sm" id="sel-autotune-speed" style="width: 180px">
+              <option value="balanced" ${(form.radarAutoTuningSpeed || 'balanced') === 'balanced' ? 'selected' : ''}>Zbalansowany</option>
+              <option value="fast" ${form.radarAutoTuningSpeed === 'fast' ? 'selected' : ''}>Szybki (szybka adaptacja)</option>
+              <option value="conservative" ${form.radarAutoTuningSpeed === 'conservative' ? 'selected' : ''}>Konserwatywny (wolny, stabilny)</option>
+            </select>
+          </div>
+          <div class="fc-field-row">
+            <span class="fc-field-label">Fałszywe echa w nieobecności</span>
+            <strong id="card-val-autotune-noise" style="color: var(--fc-accent-green)">${this.autoTuneNoiseLabel(this.telemetry.autoTuning?.noiseFloor ?? 0)}</strong>
           </div>
           <div class="fc-field-row">
             <span class="fc-field-label">Wyuczony środek fotela</span>
-            <strong style="color: #fff" id="card-val-autotune-dist">${this.telemetry.autoTuning?.adaptedDistanceCenter ? this.telemetry.autoTuning.adaptedDistanceCenter + ' cm' : '75 cm'}</strong>
+            <strong style="color: #fff" id="card-val-autotune-dist">${this.telemetry.autoTuning?.adaptedDistanceCenter ? this.telemetry.autoTuning.adaptedDistanceCenter + ' cm' : '—'}</strong>
+          </div>
+          <div class="fc-field-row">
+            <span class="fc-field-label">Wyuczona biometria (tętno / oddech)</span>
+            <strong style="color: #fff" id="card-val-autotune-bio">${this.autoTuneBioLabel()}</strong>
+          </div>
+          <div class="fc-field-row">
+            <span class="fc-field-label">Wyuczona strefa (bramka górna)</span>
+            <strong style="color: #fff" id="card-val-autotune-zone">${this.autoTuneZoneLabel()}</strong>
           </div>
           <div class="fc-field-row">
             <span class="fc-field-label">Stabilność modelu</span>
-            <strong style="color: var(--fc-accent-blue)" id="card-badge-autotune-stability">${this.telemetry.autoTuning?.stabilityScore ?? 92}% ✓</strong>
+            <strong style="color: var(--fc-accent-blue)" id="card-badge-autotune-stability">${this.autoTuneStabilityLabel(this.telemetry.autoTuning)}</strong>
           </div>
           <button class="btn btn-ghost btn-sm" id="btn-reset-autotune" style="color: #ef4444; align-self: flex-start">↺ Reset wyuczonych parametrów</button>
         </div>
@@ -2285,6 +2404,10 @@ class AppUI {
             <button class="btn btn-secondary btn-sm" id="btn-discord-auth" style="flex: 1" title="Wywołaj okno autoryzacji OAuth w aplikacji Discord">🔐 Autoryzuj Discord</button>
             <button class="btn btn-ghost btn-sm" id="btn-discord-sync" style="flex: 1" title="Wyślij bieżący profil głosu i przełącz urządzenie wejściowe w Discordzie">🔄 Synchronizuj profil</button>
           </div>
+          <div class="fc-field-row">
+            <span class="fc-field-label">Połączenie z Discordem</span>
+            <strong id="discord-rpc-status-val" style="color: var(--fc-text-dim)">…</strong>
+          </div>
           <div class="fc-field-row" style="border-top: 1px solid var(--fc-card-border); padding-top: 10px">
             <span class="fc-field-label">Aktywny próg Discord</span>
             <strong style="color: #fbbf24">${gateVal} dB</strong>
@@ -2292,6 +2415,41 @@ class AppUI {
         </div>
       </div>
     `;
+  }
+
+  /** Throttle odpytywania stanu RPC — render potrafi się zdarzyć kilkanaście razy na minutę. */
+  private lastRpcStatusFetch = 0;
+
+  /** Aktualizuje wiersz "Połączenie z Discordem" w panelu (element istnieje tylko tam). */
+  private async refreshDiscordRpcStatus(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastRpcStatusFetch < 5000) return;
+    this.lastRpcStatusFetch = now;
+    const val = document.getElementById('discord-rpc-status-val');
+    if (!val) return;
+    try {
+      const s = await window.api.discordGetStatus();
+      const target = document.getElementById('discord-rpc-status-val');
+      if (!target) return; // render mógł podmienić DOM w trakcie zapytania
+      if (s.ready) {
+        target.textContent = s.authenticated
+          ? `Połączono${s.user ? ` (@${s.user})` : ''} ✓`
+          : 'Połączono (bez autoryzacji OAuth) ⚠';
+        target.style.color = s.authenticated ? '#22c55e' : '#fbbf24';
+      } else if (s.connected) {
+        target.textContent = 'Handshake w toku…';
+        target.style.color = '#fbbf24';
+      } else {
+        target.textContent = 'Brak połączenia — Discord nie uruchomiony ✗';
+        target.style.color = '#ef4444';
+      }
+    } catch {
+      const target = document.getElementById('discord-rpc-status-val');
+      if (target) {
+        target.textContent = 'Brak połączenia ✗';
+        target.style.color = '#ef4444';
+      }
+    }
   }
 
   private renderSignalrgbPanel(): string {
@@ -2317,6 +2475,31 @@ class AppUI {
               <option value="solid_color" ${form.signalrgbAwayAction === 'solid_color' ? 'selected' : ''}>Kolor ostrzegawczy</option>
             </select>
           </div>
+          ${(form.signalrgbAwayAction || 'solid_color') === 'solid_color' ? `
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Kolor ostrzegawczy</div>
+              <div class="fc-field-desc">Kolor efektu Solid Color po odejściu</div>
+            </div>
+            <input type="color" class="fc-color-input" id="clr-signalrgb-away" value="${esc(form.signalrgbAwayColor || '#f59e0b')}" title="Kolor oświetlenia po odejściu" />
+          </div>` : ''}
+          ${form.signalrgbAwayAction === 'dim' ? `
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Poziom przyciemnienia</div>
+            </div>
+            <div class="fc-slider-row" style="width: 180px">
+              <input type="range" class="fc-slider" id="rng-signalrgb-bri" min="0" max="100" step="5" value="${form.signalrgbAwayBrightness ?? 0}" />
+              <span style="font-size: 11px; font-weight: 600; color: #fff; width: 34px; text-align: right" id="val-signalrgb-bri">${form.signalrgbAwayBrightness ?? 0}%</span>
+            </div>
+          </div>` : ''}
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Przywróć oświetlenie po powrocie</div>
+              <div class="fc-field-desc">Odtwarza efekt i jasność zapamiętane sprzed odejścia</div>
+            </div>
+            <button class="fc-switch ${form.signalrgbRestoreOnDesk !== false ? 'active' : ''}" id="sw-signalrgb-restore" aria-checked="${form.signalrgbRestoreOnDesk !== false}" role="switch"></button>
+          </div>
           <div style="display: flex; gap: 6px">
             <button class="btn btn-ghost btn-sm" id="btn-test-signalrgb-away" style="flex: 1">Test: Odejście</button>
             <button class="btn btn-ghost btn-sm" id="btn-test-signalrgb-desk" style="flex: 1">Test: Biurko</button>
@@ -2326,9 +2509,31 @@ class AppUI {
     `;
   }
 
+  /** Wiersz wyboru własnego pliku audio dla profilu (desk / headset). */
+  private renderCustomAudioRow(variant: 'desk' | 'headset', label: string, desc: string, filePath: string): string {
+    const fileName = filePath ? filePath.split('\\').pop() || filePath : '';
+    return `
+      <div class="fc-field-row">
+        <div style="min-width: 0">
+          <div class="fc-field-label">${label}</div>
+          <div class="fc-field-desc" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap" title="${esc(filePath)}">
+            ${filePath ? `🎵 ${esc(fileName)}` : esc(desc)}
+          </div>
+        </div>
+        <div style="display: flex; gap: 4px; align-items: center">
+          <button class="btn btn-ghost btn-sm" id="btn-pick-audio-${variant}" title="Wskaż plik audio z dysku (mp3/wav/ogg)">📁</button>
+          <button class="btn btn-ghost btn-sm" id="btn-test-audio-${variant}" title="Odtwórz plik" ${filePath ? '' : 'disabled'}>▶️</button>
+          <button class="btn btn-ghost btn-sm" id="btn-clear-audio-${variant}" title="Usuń plik — wróć do syntezowanego chime" ${filePath ? '' : 'disabled'}>✖</button>
+        </div>
+      </div>
+    `;
+  }
+
   private renderChimePanel(): string {
     const form = this.form!;
     const chimeVol = Math.round((form.audioChimeVolume ?? 0.2) * 100);
+    const ssDelay = form.screensaverDelayMs ?? 60000;
+    const sleepDelay = form.sleepMonitorsDelayMs ?? 600000;
     return `
       <div class="fc-settings-panel">
         <div class="fc-settings-group">
@@ -2339,6 +2544,20 @@ class AppUI {
               <div class="fc-field-desc">Syntezowany dźwięk przy przełączaniu mikrofonu</div>
             </div>
             <button class="fc-switch ${form.audioChime ? 'active' : ''}" id="sw-audio-chime" aria-checked="${form.audioChime ?? true}" role="switch"></button>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Dźwięk przy powrocie (Stacjonarny)</div>
+              <div class="fc-field-desc">Chime przy przejściu na mikrofon biurkowy</div>
+            </div>
+            <button class="fc-switch ${form.audioChimeOnDesk !== false ? 'active' : ''}" id="sw-chime-desk" aria-checked="${form.audioChimeOnDesk !== false}" role="switch"></button>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Dźwięk przy odejściu (Mobilny)</div>
+              <div class="fc-field-desc">Chime przy przejściu na mikrofon mobilny</div>
+            </div>
+            <button class="fc-switch ${form.audioChimeOnAway !== false ? 'active' : ''}" id="sw-chime-away" aria-checked="${form.audioChimeOnAway !== false}" role="switch"></button>
           </div>
           <div class="fc-field-row">
             <div>
@@ -2354,6 +2573,8 @@ class AppUI {
               <button class="btn btn-ghost btn-sm" id="btn-test-chime" title="Przetestuj dźwięk">🔔</button>
             </div>
           </div>
+          ${this.renderCustomAudioRow('desk', 'Własny dźwięk — Stacjonarny', 'Zagra przy przejściu na mikrofon biurkowy', form.audioFileDesk || '')}
+          ${this.renderCustomAudioRow('headset', 'Własny dźwięk — Słuchawki', 'Zagra przy przejściu na mikrofon mobilny', form.audioFileHeadset || '')}
           <div class="fc-field-row">
             <span class="fc-field-label">Głośność</span>
             <div class="fc-slider-row" style="flex: 1; max-width: 260px">
@@ -2368,12 +2589,62 @@ class AppUI {
             </div>
             <button class="fc-switch ${form.autoStart ? 'active' : ''}" id="sw-autostart" aria-checked="${form.autoStart ?? false}" role="switch"></button>
           </div>
+        </div>
+
+        <div class="fc-settings-group ${form.sleepMonitorsOnAway ? 'highlight' : ''}">
+          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--fc-card-border); padding-bottom: 8px">
+            <div>
+              <div class="fc-settings-group-title" style="border: none; padding: 0">🖥️ Zarządzanie Ekranami & Wygaszacz</div>
+              <div style="font-size: 11px; color: var(--fc-text-secondary); margin-top: 2px">Czarny wygaszacz działa zawsze niezależnie; przełącznik poniżej włącza dodatkowo sprzętowe uśpienie matryc (DPMS) po zadanym czasie</div>
+            </div>
+            <button class="fc-switch ${form.sleepMonitorsOnAway ? 'active' : ''}" id="sw-sleep-monitors" aria-checked="${form.sleepMonitorsOnAway ?? false}" role="switch" title="Sprzętowe uśpienie i wybudzanie monitorów (DPMS) po odejściu"></button>
+          </div>
+
           <div class="fc-field-row">
             <div>
-              <div class="fc-field-label">Usypiaj monitory po odejściu</div>
-              <div class="fc-field-desc">Automatyczne usypianie wyświetlaczy, gdy nie ma Cię przy biurku</div>
+              <div class="fc-field-label">Czarny wygaszacz ekranu</div>
+              <div class="fc-field-desc">Błyskawiczne zaciemnienie wszystkich monitorów (0 ms wybudzanie, bez wyłączania matryc). Działa niezależnie od DPMS poniżej.</div>
             </div>
-            <button class="fc-switch ${form.sleepMonitorsOnAway ? 'active' : ''}" id="sw-sleep-monitors" aria-checked="${form.sleepMonitorsOnAway ?? false}" role="switch"></button>
+            <div style="display: flex; gap: 8px; align-items: center">
+              <select class="fc-select fc-select-sm" id="sel-screensaver-delay" style="width: 130px" ${form.screensaverOnAway === false ? 'disabled' : ''}>
+                <option value="30000" ${ssDelay === 30000 ? 'selected' : ''}>po 30 sek</option>
+                <option value="60000" ${ssDelay === 60000 ? 'selected' : ''}>po 1 minucie</option>
+                <option value="120000" ${ssDelay === 120000 ? 'selected' : ''}>po 2 minutach</option>
+                <option value="180000" ${ssDelay === 180000 ? 'selected' : ''}>po 3 minutach</option>
+                <option value="300000" ${ssDelay === 300000 ? 'selected' : ''}>po 5 minutach</option>
+              </select>
+              <button class="fc-switch ${form.screensaverOnAway ? 'active' : ''}" id="sw-screensaver" aria-checked="${form.screensaverOnAway ?? true}" role="switch"></button>
+            </div>
+          </div>
+
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Sprzętowe uśpienie zasilania (DPMS)</div>
+              <div class="fc-field-desc">Fizyczne uśpienie zasilania wyświetlaczy (standby) przy długiej nieobecności</div>
+            </div>
+            <select class="fc-select fc-select-sm" id="sel-sleep-monitors-delay" style="width: 130px" ${!form.sleepMonitorsOnAway ? 'disabled' : ''}>
+              <option value="180000" ${sleepDelay === 180000 ? 'selected' : ''}>po 3 minutach</option>
+              <option value="300000" ${sleepDelay === 300000 ? 'selected' : ''}>po 5 minutach</option>
+              <option value="600000" ${sleepDelay === 600000 ? 'selected' : ''}>po 10 minutach</option>
+              <option value="900000" ${sleepDelay === 900000 ? 'selected' : ''}>po 15 minutach</option>
+              <option value="1200000" ${sleepDelay === 1200000 ? 'selected' : ''}>po 20 minutach</option>
+              <option value="1800000" ${sleepDelay === 1800000 ? 'selected' : ''}>po 30 minutach</option>
+              <option value="3600000" ${sleepDelay === 3600000 ? 'selected' : ''}>po 1 godzinie</option>
+            </select>
+          </div>
+
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Wybudzaj monitory po powrocie</div>
+              <div class="fc-field-desc">Automatyczne wybudzenie sprzętowe monitorów po wykryciu obecności przy biurku</div>
+            </div>
+            <button class="fc-switch ${form.wakeMonitorsOnDesk !== false ? 'active' : ''}" id="sw-wake-monitors" aria-checked="${form.wakeMonitorsOnDesk !== false}" role="switch" ${!form.sleepMonitorsOnAway ? 'disabled' : ''}></button>
+          </div>
+
+          <div style="display: flex; gap: 8px; align-items: center; margin-top: 4px">
+            <button class="btn btn-ghost btn-sm" id="btn-test-screensaver" style="font-size: 11px; padding: 4px 10px">
+              🖥️ Przetestuj czarny wygaszacz
+            </button>
           </div>
         </div>
       </div>
@@ -2513,8 +2784,10 @@ class AppUI {
   // ---------- ABOUT TAB WITH HEALTH DIAGNOSTICS ----------
   private renderAboutTab(): string {
     const isRadarConnected = Boolean(this.snap?.radar?.connected);
-    const isDiscordConnected = Boolean(this.form?.discordIntegration);
-    const isSignalrgbConnected = Boolean(this.form?.signalrgbEnabled);
+    // To jest stan PRZEŁĄCZNIKA w opcjach, nie faktyczne połączenie RPC —
+    // nazwa zmiennej miała to ukrywać.
+    const isDiscordEnabled = Boolean(this.form?.discordIntegration);
+    const isSignalrgbEnabled = Boolean(this.form?.signalrgbEnabled);
 
     return `
       <div class="fc-tab-pane">
@@ -2562,14 +2835,14 @@ class AppUI {
               <div class="fc-diag-item">
                 <div class="fc-diag-item-title">
                   <span>🎮 Discord Voice RPC</span>
-                  <span class="fc-badge ${isDiscordConnected ? 'blue' : 'muted'}">${isDiscordConnected ? 'Włączony' : 'Wyłączony'}</span>
+                  <span class="fc-badge ${isDiscordEnabled ? 'blue' : 'muted'}">${isDiscordEnabled ? 'Włączony' : 'Wyłączony'}</span>
                 </div>
-                <div class="fc-diag-item-val">${isDiscordConnected ? 'Port 6463 (Local IPC)' : 'Wyłączony w opcjach'}</div>
+                <div class="fc-diag-item-val">${isDiscordEnabled ? 'Lokalne RPC (named pipe Discorda)' : 'Wyłączony w opcjach'}</div>
               </div>
 
               <div class="fc-diag-item">
-                <div class="fc-diag-item-title"><span>🌈 SignalRGB LED API</span> <span class="fc-badge ${isSignalrgbConnected ? 'amber' : 'muted'}">${isSignalrgbConnected ? 'Włączony' : 'Wyłączony'}</span></div>
-                <div class="fc-diag-item-val">${isSignalrgbConnected ? `Port ${this.form?.signalrgbPort || 80} (Lokalny)` : 'Nieaktywny'}</div>
+                <div class="fc-diag-item-title"><span>🌈 SignalRGB LED API</span> <span class="fc-badge ${isSignalrgbEnabled ? 'amber' : 'muted'}">${isSignalrgbEnabled ? 'Włączony' : 'Wyłączony'}</span></div>
+                <div class="fc-diag-item-val">${isSignalrgbEnabled ? `Port ${this.form?.signalrgbPort ?? 16038} (Lokalny)` : 'Nieaktywny'}</div>
               </div>
             </div>
           </div>
@@ -2742,7 +3015,7 @@ class AppUI {
       <div class="modal-overlay" id="wizard-overlay">
         <div class="modal-dialog">
           <div class="modal-header">
-            <h3>✨ Kreator Kalibracji Sensora (Krok ${step} z 4)</h3>
+            <h3>✨ Kreator Kalibracji Sensora (Krok ${step} z 3)</h3>
             <button class="close" id="btn-wizard-close" title="Zamknij">✕</button>
           </div>
 
@@ -2750,17 +3023,26 @@ class AppUI {
             <div class="wizard-steps">
               <div class="wizard-step-dot ${step >= 1 ? (step === 1 ? 'active' : 'done') : ''}"></div>
               <div class="wizard-step-dot ${step >= 2 ? (step === 2 ? 'active' : 'done') : ''}"></div>
-              <div class="wizard-step-dot ${step >= 3 ? (step === 3 ? 'active' : 'done') : ''}"></div>
-              <div class="wizard-step-dot ${step >= 4 ? 'done' : ''}"></div>
+              <div class="wizard-step-dot ${step >= 3 ? 'done' : ''}"></div>
             </div>
+
+            ${this.wizardWarning ? `
+              <div class="update-banner" style="border-color: rgba(239, 68, 68, 0.6); background: rgba(239, 68, 68, 0.12); margin-bottom: 12px">
+                <div class="update-banner-icon" style="background: #ef4444">⚠️</div>
+                <div class="update-banner-content">
+                  <strong style="color: #fca5a5">Uwaga kalibracji</strong>
+                  <p style="color: #fecaca; margin: 0">${esc(this.wizardWarning)}</p>
+                </div>
+              </div>
+            ` : ''}
 
             ${step === 1 ? `
               <div>
                 <div class="wizard-icon-hero">🪑</div>
-                <h4 style="text-align: center; font-size: 14px; font-weight: 600; margin-bottom: 6px">Krok 1: Kalibracja pustego fotela</h4>
+                <h4 style="text-align: center; font-size: 14px; font-weight: 600; margin-bottom: 6px">Krok 1: Weryfikacja pustego fotela</h4>
                 <p class="wizard-instruction">
                   Odejdź od biurka na 2–3 metry lub wyjdź z zasięgu radaru.<br/>
-                  Upewnij się, że fotel jest pusty, aby radar zapamiętał szum tła otoczenia.
+                  Aplikacja sprawdzi, czy radar widzi już pusty fotel — dopiero wtedy przejdziemy do pomiaru pozycji siedzenia.
                 </p>
                 <div style="margin-top: 16px">
                   ${count > 0 ? `
@@ -2794,115 +3076,58 @@ class AppUI {
 
             ${step === 3 ? `
               <div>
-                <div class="wizard-icon-hero">🫀</div>
-                <h4 style="text-align: center; font-size: 14px; font-weight: 600; margin-bottom: 6px">Krok 3: Profil biometryczny (Tętno & Oddech)</h4>
-                <p class="wizard-instruction">
-                  Siedź spokojnie i oddychaj naturalnie.<br/>
-                  Radar sczytuje mikrofalami Twoje tętno spoczynkowe i rytm oddechowy.
-                </p>
-                <div style="margin-top: 16px">
-                  ${count > 0 ? `
-                    <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px">
-                      <strong>Pobieranie wzorca biometrycznego…</strong>
-                      <span>${count} s (${this.telemetry.heartRate ? this.telemetry.heartRate + ' BPM' : 'odczyt…'})</span>
-                    </div>
-                    <div class="wizard-meter"><div class="wizard-meter-fill" style="width: ${((8 - count) / 8) * 100}%"></div></div>
-                  ` : `<button class="btn btn-primary" id="btn-run-step-3" style="width: 100%">Rozpocznij pomiar biometrii (8s)</button>`}
-                </div>
-              </div>` : ''}
-
-            ${step === 4 ? `
-              <div>
                 <div class="wizard-icon-hero">🎉</div>
                 <h4 style="text-align: center; font-size: 14px; font-weight: 600; margin-bottom: 6px">Kalibracja zakończona sukcesem!</h4>
-                <div style="grid-template-columns: 1fr 1fr; display: grid; gap: 8px; margin-top: 12px">
-                  <div class="fc-card">
+                <div style="margin-top: 12px">
+                  <div class="fc-card" style="text-align: center">
                     <div style="font-size: 11px; color: var(--fc-text-secondary)">📏 Strefa fotela</div>
                     <strong style="font-size: 16px; color: var(--fc-accent-green)">${this.wizardResults.distance} cm</strong>
                     <span style="font-size: 10px; color: var(--fc-text-muted)">Bramka: ${this.wizardResults.gateMin}–${this.wizardResults.gateMax} cm</span>
                   </div>
-                  <div class="fc-card">
-                    <div style="font-size: 11px; color: var(--fc-text-secondary)">🫀 Tętno bazowe</div>
-                    <strong style="font-size: 16px; color: #fff">${this.wizardResults.heartRateAvg} BPM</strong>
-                    <span style="font-size: 10px; color: var(--fc-text-muted)">Zakres: ${this.wizardResults.heartRateMin}–${this.wizardResults.heartRateMax} BPM</span>
-                  </div>
                 </div>
               </div>` : ''}
           </div>
 
           <div class="modal-footer">
-            ${step > 1 && step < 4 ? `<button class="btn btn-ghost btn-sm" id="btn-wizard-back">← Wstecz</button>` : ''}
+            ${step > 1 && step < 3 ? `<button class="btn btn-ghost btn-sm" id="btn-wizard-back">← Wstecz</button>` : ''}
             <button class="btn btn-ghost btn-sm" id="btn-wizard-cancel">Anuluj</button>
-            ${step === 4 ? `<button class="btn btn-primary btn-sm" id="btn-wizard-apply">Zastosuj i zapisz kalibrację ✓</button>` : `<span style="font-size: 11px; color: var(--fc-text-muted)">Krok ${step} z 4</span>`}
+            ${step === 3 ? `<button class="btn btn-primary btn-sm" id="btn-wizard-apply">Zastosuj i zapisz kalibrację ✓</button>` : `<span style="font-size: 11px; color: var(--fc-text-muted)">Krok ${step} z 3</span>`}
           </div>
         </div>
       </div>
     `;
   }
 
-  // ---------- MODAL 2: Bio Modal ----------
-  private renderBioModal(): string {
+  // ---------- MODAL 4: QoL Diagnostics Hub Modal ----------
+  /** Modal z logami zebranej sesji "Wyjście z pokoju" (kopiuj AI / notatnik). */
+  private renderDiagSessionModal(): string {
+    const lines = this.diagSessionText.split('\n').length;
     return `
-      <div class="modal-overlay" id="bio-overlay">
+      <div class="modal-overlay" id="diag-session-overlay">
         <div class="modal-dialog modal-lg">
           <div class="modal-header">
-            <h3>🧬 Profil Biometryczny & Rozróżnianie Osób</h3>
-            <button class="close" id="btn-bio-close" title="Zamknij">✕</button>
+            <h3>🧪 Sesja diagnostyczna — raport "Wyjście z pokoju"</h3>
+            <button class="close" id="btn-diag-session-close" title="Zamknij">✕</button>
           </div>
 
           <div class="modal-body">
-            <div class="fc-field-row">
-              <div>
-                <div class="fc-field-label">Włącz rozróżnianie osób (Właściciel vs Goście)</div>
-                <div class="fc-field-desc">Weryfikuje wzorzec tętna i odległość siedzenia</div>
-              </div>
-              <button class="fc-switch ${this.form?.biometricsEnabled ? 'active' : ''}" id="sw-biometrics-modal" aria-checked="${this.form?.biometricsEnabled ?? false}" role="switch"></button>
+            <div style="font-size: 11.5px; color: var(--fc-text-secondary); margin-bottom: 8px">
+              Zebrano <strong>${lines}</strong> linii logów od momentu kliknięcia „Wyjście z pokoju”.
+              Prześlij raport przy zgłaszaniu problemu z wykrywaniem nieobecności.
             </div>
-
-            <div class="fc-field-row" style="margin-top: 8px">
-              <div>
-                <div class="fc-field-label">🐾 Filtr zwierząt domowych (Kot / Pies)</div>
-                <div class="fc-field-desc">Ignoruje zwierzęta na bazie oddechu (>22 RPM) i tętna (>125 BPM)</div>
-              </div>
-              <button class="fc-switch ${this.form?.petFilterEnabled ? 'active' : ''}" id="sw-pet-filter-modal" aria-checked="${this.form?.petFilterEnabled ?? true}" role="switch"></button>
-            </div>
-
-            <div style="margin-top: 10px; padding: 14px; background: var(--fc-bg-darker); border: 1px solid var(--fc-card-border); border-radius: var(--fc-radius-sm)">
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px">
-                <strong style="font-size: 12px; color: var(--fc-accent-green)">Twój wzorzec biometryczny:</strong>
-                <button class="btn btn-ghost btn-sm" id="btn-quick-calibrate-bio">🎯 Skalibruj z aktualnych odczytów</button>
-              </div>
-
-              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px">
-                <div>
-                  <label class="fc-micro-label">Twoje tętno spoczynkowe (Min - Max BPM):</label>
-                  <div style="display: flex; gap: 6px; margin-top: 4px">
-                    <input class="fc-input" type="number" id="modal-inp-hr-min" value="${this.form?.userHeartRateMin ?? 55}" style="flex: 1" min="35" max="120" />
-                    <input class="fc-input" type="number" id="modal-inp-hr-max" value="${this.form?.userHeartRateMax ?? 78}" style="flex: 1" min="50" max="150" />
-                  </div>
-                </div>
-                <div>
-                  <label class="fc-micro-label">Odległość siedzenia (Min - Max cm):</label>
-                  <div style="display: flex; gap: 6px; margin-top: 4px">
-                    <input class="fc-input" type="number" id="modal-inp-dist-min" value="${this.form?.userSeatingDistanceMin ?? 50}" style="flex: 1" min="20" max="180" />
-                    <input class="fc-input" type="number" id="modal-inp-dist-max" value="${this.form?.userSeatingDistanceMax ?? 95}" style="flex: 1" min="30" max="220" />
-                  </div>
-                </div>
-              </div>
-            </div>
+            <pre class="fc-diag-session-log">${esc(this.diagSessionText)}</pre>
           </div>
 
           <div class="modal-footer">
-            <button class="btn btn-ghost btn-sm" id="btn-bio-cancel">Zamknij</button>
-            <button class="btn btn-primary btn-sm" id="btn-bio-save">Zatwierdź profil ✓</button>
+            <button class="btn btn-ghost btn-sm" id="btn-diag-session-cancel">Zamknij</button>
+            <button class="btn btn-secondary btn-sm" id="btn-diag-session-notepad" title="Otwórz raport w Notatniku Windows">📝 Notatnik</button>
+            <button class="btn btn-primary btn-sm" id="btn-diag-session-copy" title="Skopiuj pełny raport do schowka (dla AI / programisty)">🤖 Kopiuj dla AI</button>
           </div>
         </div>
       </div>
     `;
   }
 
-
-  // ---------- MODAL 4: QoL Diagnostics Hub Modal ----------
   private renderDiagModal(): string {
     return `
       <div class="modal-overlay" id="diag-overlay">
@@ -2916,25 +3141,25 @@ class AppUI {
             <div class="fc-diag-grid">
               <div class="fc-diag-item">
                 <div class="fc-diag-item-title"><span>📡 Sensor mmWave</span> <span class="fc-badge ${this.snap?.radar.connected || this.snap?.ha?.connected ? 'calibrated' : 'amber'}">${this.snap?.radar.connected ? 'USB ✓' : (this.snap?.ha?.connected ? 'HAOS ✓' : 'Brak')}</span></div>
-                <div class="fc-diag-item-val">Port: ${this.form?.port || 'auto'}</div>
-                <span style="font-size: 10.5px; color: var(--fc-text-muted)">VID: 0x303A, PID: 0x1001 (Seeed XIAO ESP32-C6)</span>
+                <div class="fc-diag-item-val">Port: ${esc(this.form?.port || 'auto')}${this.snap?.radar.port && this.form?.port === 'auto' ? ` → ${esc(this.snap.radar.port)}` : ''}</div>
+                <span style="font-size: 10.5px; color: var(--fc-text-muted)">Auto-wykrywanie po VID/PID (Seeed XIAO ESP32-C6, m.in. 0x303A:0x1001)</span>
               </div>
 
               <div class="fc-diag-item">
-                <div class="fc-diag-item-title"><span>🎙️ AudioSwitcher.exe</span> <span class="fc-badge calibrated">CoreAudio Daemon ✓</span></div>
+                <div class="fc-diag-item-title"><span>🎙️ AudioSwitcher.exe</span> <span class="fc-badge ${this.audioDevices.length > 0 ? 'calibrated' : 'amber'}">${this.audioDevices.length > 0 ? 'Odpowiada ✓' : 'Brak urządzeń'}</span></div>
                 <div class="fc-diag-item-val">Liczba urządzeń: ${this.audioDevices.length}</div>
-                <span style="font-size: 10.5px; color: var(--fc-text-muted)">IPolicyConfig Native COM Hook</span>
+                <span style="font-size: 10.5px; color: var(--fc-text-muted)">CoreAudio daemon (stdin/stdout) + IPolicyConfig (COM)</span>
               </div>
 
               <div class="fc-diag-item">
-                <div class="fc-diag-item-title"><span>🎮 Discord RPC</span> <span class="fc-badge ${this.form?.discordIntegration ? 'blue' : 'muted'}">${this.form?.discordIntegration ? 'Gotowy' : 'Wyłączony'}</span></div>
-                <div class="fc-diag-item-val">Local IPC Socket</div>
-                <span style="font-size: 10.5px; color: var(--fc-text-muted)">discord-rpc://127.0.0.1:6463</span>
+                <div class="fc-diag-item-title"><span>🎮 Discord RPC</span> <span class="fc-badge ${this.form?.discordIntegration ? 'blue' : 'muted'}">${this.form?.discordIntegration ? 'Włączony' : 'Wyłączony'}</span></div>
+                <div class="fc-diag-item-val"><strong id="discord-rpc-status-val" style="color: var(--fc-text-dim)">…</strong></div>
+                <span style="font-size: 10.5px; color: var(--fc-text-muted)">Lokalne RPC przez named pipe Discorda</span>
               </div>
 
               <div class="fc-diag-item">
-                <div class="fc-diag-item-title"><span>🌈 SignalRGB API</span> <span class="fc-badge ${this.form?.signalrgbEnabled ? 'amber' : 'muted'}">${this.form?.signalrgbEnabled ? 'Aktywny' : 'Wyłączony'}</span></div>
-                <div class="fc-diag-item-val">Port: ${this.form?.signalrgbPort || 80}</div>
+                <div class="fc-diag-item-title"><span>🌈 SignalRGB API</span> <span class="fc-badge ${this.form?.signalrgbEnabled ? 'amber' : 'muted'}">${this.form?.signalrgbEnabled ? 'Włączony' : 'Wyłączony'}</span></div>
+                <div class="fc-diag-item-val">Port: ${this.form?.signalrgbPort ?? 16038}</div>
                 <span style="font-size: 10.5px; color: var(--fc-text-muted)">Lokalne REST API SignalRGB</span>
               </div>
 
@@ -2946,7 +3171,7 @@ class AppUI {
             </div>
 
             <div style="margin-top: 12px; padding: 10px; background: var(--fc-bg-darker); border-radius: var(--fc-radius-sm); font-size: 11.5px; color: var(--fc-text-secondary)">
-              <strong>💡 Status:</strong> Wszystkie wątki IPC i demony działają w trybie optymalnym.
+              <strong>💡 Wskazówka:</strong> Powyżej konfiguracja i dostępność modułów. Live logi znajdziesz w zakładce „Logi”, a do diagnozy przełączania użyj sesji „Wyjście z pokoju” (przycisk w nagłówku).
             </div>
           </div>
 
@@ -3019,22 +3244,29 @@ class AppUI {
       this.pushToast('Odświeżono urządzenia audio i porty COM');
     });
 
-    // QoL: Cancel Snooze
-    byId('btn-cancel-snooze')?.addEventListener('click', () => {
-      this.snoozeUntil = null;
-      this.pushToast('Wznowiono automatyczne przełączanie mikrofonu ✓');
+    // QoL: Cancel Snooze — pauza żyje w main (AppController), IPC ją ustawia
+    byId('btn-cancel-snooze')?.addEventListener('click', async () => {
+      try {
+        const s = await window.api.setSnooze(0);
+        this.snap = s;
+        this.snoozeUntil = null;
+        this.pushToast('Wznowiono automatyczne przełączanie mikrofonu ✓');
+      } catch {
+        this.pushToast('Nie udało się wznowić automatyki', true);
+      }
       this.render();
     });
 
-    // QoL: Quick Snooze in Master Card
-    byId('sel-quick-snooze')?.addEventListener('change', (e) => {
+    // QoL: Quick Snooze in Master Card — main jest źródłem prawdy pauzy
+    byId('sel-quick-snooze')?.addEventListener('change', async (e) => {
       const mins = Number((e.target as HTMLSelectElement).value);
-      if (mins > 0) {
-        this.snoozeUntil = Date.now() + mins * 60000;
-        this.pushToast(`Wstrzymano automatyczne przełączanie na ${mins} minut ⏸️`);
-      } else {
-        this.snoozeUntil = null;
-        this.pushToast('Wznowiono auto-switching ✓');
+      try {
+        const s = await window.api.setSnooze(mins);
+        this.snap = s;
+        this.snoozeUntil = s.snoozeUntil > 0 ? s.snoozeUntil : null;
+        this.pushToast(mins > 0 ? `Wstrzymano automatyczne przełączanie na ${mins} min ⏸️` : 'Wznowiono automatyczne przełączanie ✓');
+      } catch {
+        this.pushToast('Nie udało się zmienić pauzy automatyki', true);
       }
       this.render();
     });
@@ -3054,7 +3286,6 @@ class AppUI {
       }
     });
     byId('btn-home-open-wizard')?.addEventListener('click', () => this.openCalibrationWizard());
-    byId('btn-home-open-bio')?.addEventListener('click', () => { this.bioModalOpen = true; this.render(); });
     byId('btn-reset-autotune')?.addEventListener('click', async () => {
       if (confirm('Czy na pewno chcesz zresetować wyuczone parametry modelu AI?')) {
         const status = await window.api.resetAutoTuning();
@@ -3206,64 +3437,22 @@ class AppUI {
 
     // Form inputs (Mic desk & headset)
     const onDeskMicSelect = (sel: HTMLSelectElement) => {
-      const opt = sel.selectedOptions[0];
       const name = sel.value;
       const vol = this.initVolumePercent(name, this.form?.micDeskVolume);
-      this.patchForm({ micDeskName: name, micDeskId: opt?.getAttribute('data-id') || '', micDeskVolume: vol });
-      const elRng = byId('rng-vol-desk') as HTMLInputElement | null;
-      const elVal = byId('val-vol-desk');
-      const elMetric = byId('metric-vol-desk');
-      if (elRng) elRng.value = String(vol);
-      if (elVal) elVal.textContent = `${vol}%`;
-      if (elMetric) elMetric.textContent = `${vol} %`;
+      this.patchForm({ micDeskName: name, micDeskVolume: vol });
       void this.vuEngine.start(name, this.form?.micHeadsetName || '');
     };
 
     byId('sel-mic-desk')?.addEventListener('change', (e) => onDeskMicSelect(e.target as HTMLSelectElement));
 
-    byId('rng-vol-desk')?.addEventListener('input', (e) => {
-      const val = Number((e.target as HTMLInputElement).value);
-      this.patchForm({ micDeskVolume: val });
-      const el = byId('val-vol-desk');
-      const metric = byId('metric-vol-desk');
-      if (el) el.textContent = `${val}%`;
-      if (metric) metric.textContent = `${val} %`;
-    });
-    byId('rng-vol-desk')?.addEventListener('change', (e) => {
-      const val = Number((e.target as HTMLInputElement).value);
-      const name = this.form?.micDeskName;
-      if (name) void window.api.setVolume(name, val);
-    });
-
     const onHeadsetMicSelect = (sel: HTMLSelectElement) => {
-      const opt = sel.selectedOptions[0];
       const name = sel.value;
       const vol = this.initVolumePercent(name, this.form?.micHeadsetVolume);
-      this.patchForm({ micHeadsetName: name, micHeadsetId: opt?.getAttribute('data-id') || '', micHeadsetVolume: vol });
-      const elRng = byId('rng-vol-headset') as HTMLInputElement | null;
-      const elVal = byId('val-vol-headset');
-      const elMetric = byId('metric-vol-headset');
-      if (elRng) elRng.value = String(vol);
-      if (elVal) elVal.textContent = `${vol}%`;
-      if (elMetric) elMetric.textContent = `${vol} %`;
+      this.patchForm({ micHeadsetName: name, micHeadsetVolume: vol });
       void this.vuEngine.start(this.form?.micDeskName || '', name);
     };
 
     byId('sel-mic-headset')?.addEventListener('change', (e) => onHeadsetMicSelect(e.target as HTMLSelectElement));
-
-    byId('rng-vol-headset')?.addEventListener('input', (e) => {
-      const val = Number((e.target as HTMLInputElement).value);
-      this.patchForm({ micHeadsetVolume: val });
-      const el = byId('val-vol-headset');
-      const metric = byId('metric-vol-headset');
-      if (el) el.textContent = `${val}%`;
-      if (metric) metric.textContent = `${val} %`;
-    });
-    byId('rng-vol-headset')?.addEventListener('change', (e) => {
-      const val = Number((e.target as HTMLInputElement).value);
-      const name = this.form?.micHeadsetName;
-      if (name) void window.api.setVolume(name, val);
-    });
 
     // Desk Voice Filters
     byId('rng-gate-desk')?.addEventListener('input', (e) => {
@@ -3451,26 +3640,42 @@ class AppUI {
       }
     });
 
-    // Radar sensitivity sync
-    const syncRadarSens = (val: number) => {
-      this.patchForm({ radarSensitivity: val });
-      const elVal = byId('val-radar-sens');
-      const rng1 = byId('rng-radar-sens') as HTMLInputElement | null;
-      if (elVal) elVal.textContent = `${val}%`;
-      if (rng1 && Number(rng1.value) !== val) rng1.value = String(val);
-    };
+    // Status połączenia RPC w panelu Discord — odświeżany przy każdym renderze
+    // panelu (element istnieje tylko w tym panelu), z throttlingiem zapytań.
+    void this.refreshDiscordRpcStatus();
 
-    byId('rng-radar-sens')?.addEventListener('input', (e) => syncRadarSens(Number((e.target as HTMLInputElement).value)));
-
-    byId('sw-biometrics')?.addEventListener('click', () => {
-      const val = !(this.form?.biometricsEnabled ?? false);
-      this.patchForm({ biometricsEnabled: val }, false);
-      const btn = byId('sw-biometrics');
+    // Sensor LED switch & brightness sync
+    byId('sw-sensor-led')?.addEventListener('click', () => {
+      const val = !(this.form?.sensorLedEnabled !== false);
+      this.patchForm({ sensorLedEnabled: val }, false);
+      const btn = byId('sw-sensor-led');
       if (btn) {
         btn.className = `fc-switch ${val ? 'active' : ''}`;
         btn.setAttribute('aria-checked', String(val));
       }
     });
+
+    const syncSensorLedBri = (val: number) => {
+      this.patchForm({ sensorLedBrightness: val });
+      const elVal = byId('val-sensor-led-bri');
+      const rng = byId('rng-sensor-led-bri') as HTMLInputElement | null;
+      if (elVal) elVal.textContent = `${val}%`;
+      if (rng && Number(rng.value) !== val) rng.value = String(val);
+    };
+
+    byId('rng-sensor-led-bri')?.addEventListener('input', (e) => syncSensorLedBri(Number((e.target as HTMLInputElement).value)));
+
+    // Color pickery diody: zapis + natychmiastowe przepięcie koloru na sensorze
+    const bindLedColor = (inputId: string, key: 'sensorLedDeskColor' | 'sensorLedAwayColor' | 'sensorLedMuteColor') => {
+      byId(inputId)?.addEventListener('input', (e) => {
+        const val = (e.target as HTMLInputElement).value;
+        this.patchForm({ [key]: val });
+        void window.api.refreshLed();
+      });
+    };
+    bindLedColor('clr-led-desk', 'sensorLedDeskColor');
+    bindLedColor('clr-led-away', 'sensorLedAwayColor');
+    bindLedColor('clr-led-mute', 'sensorLedMuteColor');
 
     byId('sw-pet-filter')?.addEventListener('click', () => {
       const val = !(this.form?.petFilterEnabled ?? true);
@@ -3501,6 +3706,11 @@ class AppUI {
         btn.setAttribute('aria-checked', String(val));
       }
     });
+    byId('sel-autotune-speed')?.addEventListener('change', (e) => {
+      const val = (e.target as HTMLSelectElement).value as 'balanced' | 'fast' | 'conservative';
+      this.patchForm({ radarAutoTuningSpeed: val }, false);
+      this.pushToast(`Tempo uczenia auto-tuningu: ${val === 'fast' ? 'szybki' : val === 'conservative' ? 'konserwatywny' : 'zbalansowany'}`);
+    });
 
     byId('sw-signalrgb')?.addEventListener('click', () => {
       const val = !(this.form?.signalrgbEnabled ?? false);
@@ -3512,7 +3722,26 @@ class AppUI {
       }
     });
     byId('sel-signalrgb-away-action')?.addEventListener('change', (e) => {
-      this.patchForm({ signalrgbAwayAction: (e.target as HTMLSelectElement).value as any });
+      // Re-render: kolor i przyciemnienie są warunkowe względem wybranej akcji
+      this.patchForm({ signalrgbAwayAction: (e.target as HTMLSelectElement).value as any }, true);
+    });
+    byId('clr-signalrgb-away')?.addEventListener('input', (e) => {
+      this.patchForm({ signalrgbAwayColor: (e.target as HTMLInputElement).value });
+    });
+    byId('rng-signalrgb-bri')?.addEventListener('input', (e) => {
+      const v = Number((e.target as HTMLInputElement).value);
+      this.patchForm({ signalrgbAwayBrightness: v });
+      const el = byId('val-signalrgb-bri');
+      if (el) el.textContent = `${v}%`;
+    });
+    byId('sw-signalrgb-restore')?.addEventListener('click', () => {
+      const val = !(this.form?.signalrgbRestoreOnDesk !== false);
+      this.patchForm({ signalrgbRestoreOnDesk: val }, false);
+      const btn = byId('sw-signalrgb-restore');
+      if (btn) {
+        btn.className = `fc-switch ${val ? 'active' : ''}`;
+        btn.setAttribute('aria-checked', String(val));
+      }
     });
     byId('btn-test-signalrgb-away')?.addEventListener('click', async () => {
       this.pushToast('Testuję oświetlenie SignalRGB: Odejście…');
@@ -3697,40 +3926,47 @@ class AppUI {
       const v = Number((e.target as HTMLInputElement).value);
       if (!isNaN(v)) this.patchForm({ timeoutDeskMs: v });
     });
-    byId('inp-timeout-ghost')?.addEventListener('input', (e) => {
-      const v = Number((e.target as HTMLInputElement).value);
-      if (!isNaN(v)) this.patchForm({ ghostTimeoutMs: v });
-    });
-    byId('inp-timeout-ghost-lock')?.addEventListener('input', (e) => {
-      const v = Number((e.target as HTMLInputElement).value);
-      if (!isNaN(v)) this.patchForm({ ghostLockoutMs: v });
-    });
     byId('sel-radar-smoothing')?.addEventListener('change', (e) => {
       const val = (e.target as HTMLSelectElement).value as 'ultra' | 'balanced' | 'raw';
       this.patchForm({ radarSmoothingMode: val }, false);
       this.pushToast(`Filtr DSP: ${val === 'ultra' ? 'Ultra-Stabilny 🛡️' : val === 'balanced' ? 'Zbalansowany' : 'Szybki'}`);
     });
+    byId('sw-deep-away')?.addEventListener('click', () => {
+      const val = !(this.form?.radarDeepAwayConfirm !== false);
+      this.patchForm({ radarDeepAwayConfirm: val }, false);
+      const btn = byId('sw-deep-away');
+      if (btn) {
+        btn.classList.toggle('active', val);
+        btn.setAttribute('aria-checked', String(val));
+      }
+    });
+    byId('inp-deep-away-min')?.addEventListener('input', (e) => {
+      const v = Number((e.target as HTMLInputElement).value);
+      if (!isNaN(v) && v >= 1) this.patchForm({ radarDeepAwayMinMs: Math.round(v * 60000) });
+    });
+    byId('inp-deep-away-confirm')?.addEventListener('input', (e) => {
+      const v = Number((e.target as HTMLInputElement).value);
+      if (!isNaN(v) && v >= 1) this.patchForm({ radarDeepAwayConfirmMs: Math.round(v * 1000) });
+    });
+    byId('btn-diag-record')?.addEventListener('click', async () => {
+      const btn = byId('btn-diag-record');
+      try {
+        const res = await window.api.diagRecord();
+        if (res.active) {
+          if (btn) btn.textContent = `Stop (${Math.round(res.durationSec / 60)} min)`;
+          this.pushToast(`Nagrywam surowy strumień przez ${Math.round(res.durationSec / 60)} min — pracuj normalnie lub wykonaj testowany scenariusz`);
+          return;
+        }
+        if (btn) btn.textContent = 'Start';
+        await window.api.openTextInNotepad(`${res.summary}\n\n=== CSV ===\n${res.csv}`);
+        this.pushToast(`Pomiar gotowy: ${res.sampleCount} ramek — raport otwarty w Notatniku`);
+      } catch {
+        if (btn) btn.textContent = 'Start';
+        this.pushToast('Pomiar sensora nieudany — sprawdź logi');
+      }
+    });
     byId('sel-mute-behavior')?.addEventListener('change', (e) => {
       this.patchForm({ muteBehaviorOnAway: (e.target as HTMLSelectElement).value as any });
-    });
-    byId('inp-hr-min')?.addEventListener('input', (e) => {
-      const v = Number((e.target as HTMLInputElement).value);
-      if (!isNaN(v)) this.patchForm({ userHeartRateMin: v });
-    });
-    byId('inp-hr-max')?.addEventListener('input', (e) => {
-      const v = Number((e.target as HTMLInputElement).value);
-      if (!isNaN(v)) this.patchForm({ userHeartRateMax: v });
-    });
-    byId('inp-dist-min')?.addEventListener('input', (e) => {
-      const v = Number((e.target as HTMLInputElement).value);
-      if (!isNaN(v)) this.patchForm({ userSeatingDistanceMin: v });
-    });
-    byId('inp-dist-max')?.addEventListener('input', (e) => {
-      const v = Number((e.target as HTMLInputElement).value);
-      if (!isNaN(v)) this.patchForm({ userSeatingDistanceMax: v });
-    });
-    byId('sel-person-action')?.addEventListener('change', (e) => {
-      this.patchForm({ personMismatchAction: (e.target as HTMLSelectElement).value as any });
     });
 
     // Mic Switching rules
@@ -3774,11 +4010,40 @@ class AppUI {
     });
     byId('sw-sleep-monitors')?.addEventListener('click', () => {
       const val = !(this.form?.sleepMonitorsOnAway ?? false);
-      this.patchForm({ sleepMonitorsOnAway: val }, false);
-      const btn = byId('sw-sleep-monitors');
+      this.patchForm({ sleepMonitorsOnAway: val }, true);
+    });
+    byId('sw-screensaver')?.addEventListener('click', () => {
+      const val = !(this.form?.screensaverOnAway ?? true);
+      this.patchForm({ screensaverOnAway: val }, false);
+      const btn = byId('sw-screensaver');
       if (btn) {
         btn.className = `fc-switch ${val ? 'active' : ''}`;
         btn.setAttribute('aria-checked', String(val));
+      }
+    });
+    byId('sel-screensaver-delay')?.addEventListener('change', (e) => {
+      const v = Number((e.target as HTMLSelectElement).value) || 60000;
+      this.patchForm({ screensaverDelayMs: v }, false);
+    });
+    byId('sel-sleep-monitors-delay')?.addEventListener('change', (e) => {
+      const v = Number((e.target as HTMLSelectElement).value) || 600000;
+      this.patchForm({ sleepMonitorsDelayMs: v }, false);
+    });
+    byId('sw-wake-monitors')?.addEventListener('click', () => {
+      const val = !(this.form?.wakeMonitorsOnDesk ?? true);
+      this.patchForm({ wakeMonitorsOnDesk: val }, false);
+      const btn = byId('sw-wake-monitors');
+      if (btn) {
+        btn.className = `fc-switch ${val ? 'active' : ''}`;
+        btn.setAttribute('aria-checked', String(val));
+      }
+    });
+    byId('btn-test-screensaver')?.addEventListener('click', async () => {
+      this.pushToast('Uruchamiam test czarnego wygaszacza (ruch myszy zdejmuje ekran)…');
+      try {
+        await window.api.screensaverStart();
+      } catch (err) {
+        this.pushToast(`Błąd testu wygaszacza: ${(err as Error).message}`, true);
       }
     });
     byId('sw-audio-chime')?.addEventListener('click', () => {
@@ -3790,10 +4055,30 @@ class AppUI {
         btn.setAttribute('aria-checked', String(val));
       }
     });
+    byId('sw-chime-desk')?.addEventListener('click', () => {
+      const val = !(this.form?.audioChimeOnDesk !== false);
+      this.patchForm({ audioChimeOnDesk: val }, false);
+      const btn = byId('sw-chime-desk');
+      if (btn) {
+        btn.className = `fc-switch ${val ? 'active' : ''}`;
+        btn.setAttribute('aria-checked', String(val));
+      }
+    });
+    byId('sw-chime-away')?.addEventListener('click', () => {
+      const val = !(this.form?.audioChimeOnAway !== false);
+      this.patchForm({ audioChimeOnAway: val }, false);
+      const btn = byId('sw-chime-away');
+      if (btn) {
+        btn.className = `fc-switch ${val ? 'active' : ''}`;
+        btn.setAttribute('aria-checked', String(val));
+      }
+    });
     byId('sel-chime-style')?.addEventListener('change', (e) => {
-      this.selectedChimeStyle = (e.target as HTMLSelectElement).value as ChimeStyle;
+      const val = (e.target as HTMLSelectElement).value as ChimeStyle;
+      // Styl trafia do configu — bez zapisu wybór "resetował" się po restarcie
+      this.patchForm({ audioChimeStyle: val });
       playChime('desk', this.form?.audioChimeVolume ?? 0.2, this.selectedChimeStyle);
-      this.pushToast(`Wybrano i przetestowano styl powiadomienia Chime`);
+      this.pushToast('Wybrano i przetestowano styl powiadomienia Chime');
     });
     byId('btn-test-chime')?.addEventListener('click', () => {
       playChime('desk', this.form?.audioChimeVolume ?? 0.2, this.selectedChimeStyle);
@@ -3805,6 +4090,30 @@ class AppUI {
       if (elVal) elVal.textContent = `${v}%`;
       playChime('desk', v / 100, this.selectedChimeStyle);
     });
+
+    // Własne pliki audio (Stacjonarny / Słuchawki) — wybór, test, czyszczenie
+    const bindCustomAudio = (variant: 'desk' | 'headset') => {
+      const configKey = variant === 'desk' ? 'audioFileDesk' : 'audioFileHeadset';
+      byId(`btn-pick-audio-${variant}`)?.addEventListener('click', async () => {
+        const picked = await window.api.pickAudioFile();
+        if (!picked) return;
+        this.patchForm({ [configKey]: picked });
+        this.render();
+        playCustomAudioFile(picked, variant === 'desk' ? 'desk' : 'headset', this.form?.audioChimeVolume ?? 0.2);
+        this.pushToast('Ustawiono własny dźwięk — przetestowany 🎵');
+      });
+      byId(`btn-test-audio-${variant}`)?.addEventListener('click', () => {
+        const file = variant === 'desk' ? this.form?.audioFileDesk : this.form?.audioFileHeadset;
+        if (file) playCustomAudioFile(file, variant === 'desk' ? 'desk' : 'headset', this.form?.audioChimeVolume ?? 0.2);
+      });
+      byId(`btn-clear-audio-${variant}`)?.addEventListener('click', () => {
+        this.patchForm({ [configKey]: '' });
+        this.render();
+        this.pushToast('Przywrócono syntezowany chime 🔔');
+      });
+    };
+    bindCustomAudio('desk');
+    bindCustomAudio('headset');
 
     // Logs Filtering & Search
     document.querySelectorAll<HTMLElement>('[data-log-filter]').forEach((chip) => {
@@ -3829,9 +4138,21 @@ class AppUI {
       const form = this.form;
       const fullLogs = await window.api.getLogs();
       const logsToInclude = fullLogs && fullLogs.length > 0 ? fullLogs : this.logs;
+      // Raport domyślnie zawiera to, co użytkownik widzi w konsoli logów
+      // (aktywna zakładka: Audio & VU, Discord & RGB itd. + wyszukiwarka).
+      const visibleLogs = this.applyLogFilter(logsToInclude);
+      const filterNames: Record<string, string> = {
+        all: 'Wszystkie',
+        radar: 'Radar & DSP',
+        haos: 'HAOS',
+        audio: 'Audio & VU',
+        discord: 'Discord & RGB',
+        error: 'Błędy'
+      };
+      const activeFilterName = filterNames[this.logFilter] || 'Wszystkie';
 
-      // Kluczowe zdarzenia audio, przełączania, błędów i radar-event z całej sesji
-      const keyEvents = logsToInclude.filter((l) =>
+      // Kluczowe zdarzenia audio, przełączania, błędów i radar-event z widocznego zbioru
+      const keyEvents = visibleLogs.filter((l) =>
         /\[(AUDIO-|SWITCH-|APP-|RADAR-EVENT|WARN|ERROR)/i.test(l)
       );
 
@@ -3901,7 +4222,7 @@ class AppUI {
         `- Discord: ${form?.discordIntegration ? 'Włączony' : 'Wyłączony'} (Auto-Próg VAD: ${form?.discordGateFollowMic ? 'TAK' : 'NIE'})`,
         `- SignalRGB: ${form?.signalrgbEnabled ? 'Włączony' : 'Wyłączony'}`,
         ``,
-        `## ⚡ Oś Czasu Kluczowych Zdarzeń (Przełączanie, Audio, Zmiany Stanu) [${keyEvents.length} wpisów]`,
+        `## ⚡ Oś Czasu Kluczowych Zdarzeń (Przełączanie, Audio, Zmiany Stanu) [${keyEvents.length} wpisów, widok logów: ${activeFilterName}]`,
         '```',
         keyEvents.length > 0 ? keyEvents.join('\n') : 'Brak zarejestrowanych zdarzeń przełączania w buforze.',
         '```',
@@ -3929,13 +4250,15 @@ class AppUI {
       try {
         const fullLogs = await window.api.getLogs();
         const logs = fullLogs && fullLogs.length > 0 ? fullLogs : this.logs;
-        if (!logs || logs.length === 0) {
-          this.pushToast('Brak logów do skopiowania');
+        // Kopiujemy to, co widoczne w konsoli (aktywna zakładka + wyszukiwarka)
+        const visible = this.applyLogFilter(logs || []);
+        if (!visible || visible.length === 0) {
+          this.pushToast('Brak logów do skopiowania dla aktywnego filtru');
           return;
         }
-        const textToCopy = logs.join('\r\n');
-        await window.api.copyToClipboard(textToCopy);
-        this.pushToast(`Skopiowano WSZYSTKIE logi RAW (${logs.length} linii) do schowka! 📋`);
+        await window.api.copyToClipboard(visible.join('\r\n'));
+        const scope = this.logFilter === 'all' && !this.logSearch ? 'WSZYSTKIE' : 'widoczne (aktywny filtr)';
+        this.pushToast(`Skopiowano logi RAW — ${scope} (${visible.length} linii) 📋`);
       } catch (err: any) {
         this.pushToast(`Błąd kopiowania: ${err.message}`, true);
       }
@@ -4036,67 +4359,7 @@ class AppUI {
     });
     byId('btn-run-step-1')?.addEventListener('click', () => this.runWizardStep1());
     byId('btn-run-step-2')?.addEventListener('click', () => this.runWizardStep2());
-    byId('btn-run-step-3')?.addEventListener('click', () => this.runWizardStep3());
     byId('btn-wizard-apply')?.addEventListener('click', () => this.applyWizardCalibration());
-
-    // Bio Modal
-    byId('btn-bio-close')?.addEventListener('click', () => { this.bioModalOpen = false; this.render(); });
-    byId('btn-bio-cancel')?.addEventListener('click', () => { this.bioModalOpen = false; this.render(); });
-    byId('bio-overlay')?.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).id === 'bio-overlay') { this.bioModalOpen = false; this.render(); }
-    });
-    byId('sw-biometrics-modal')?.addEventListener('click', () => {
-      const val = !(this.form?.biometricsEnabled ?? false);
-      this.patchForm({ biometricsEnabled: val }, false);
-      const btn = byId('sw-biometrics-modal');
-      if (btn) {
-        btn.className = `fc-switch ${val ? 'active' : ''}`;
-        btn.setAttribute('aria-checked', String(val));
-      }
-    });
-    byId('sw-pet-filter-modal')?.addEventListener('click', () => {
-      const val = !(this.form?.petFilterEnabled ?? true);
-      this.patchForm({ petFilterEnabled: val }, false);
-      const btn = byId('sw-pet-filter-modal');
-      if (btn) {
-        btn.className = `fc-switch ${val ? 'active' : ''}`;
-        btn.setAttribute('aria-checked', String(val));
-      }
-    });
-    byId('btn-quick-calibrate-bio')?.addEventListener('click', () => {
-      const curDist = this.telemetry.distanceCm || 75;
-      const curHr = this.telemetry.heartRate || 68;
-      this.patchForm({
-        userSeatingDistanceMin: Math.max(30, curDist - 15),
-        userSeatingDistanceMax: curDist + 20,
-        userHeartRateMin: Math.max(45, curHr - 12),
-        userHeartRateMax: curHr + 14
-      });
-      const inpHrMin = byId('modal-inp-hr-min') as HTMLInputElement | null;
-      const inpHrMax = byId('modal-inp-hr-max') as HTMLInputElement | null;
-      const inpDistMin = byId('modal-inp-dist-min') as HTMLInputElement | null;
-      const inpDistMax = byId('modal-inp-dist-max') as HTMLInputElement | null;
-      if (inpHrMin) inpHrMin.value = String(Math.max(45, curHr - 12));
-      if (inpHrMax) inpHrMax.value = String(curHr + 14);
-      if (inpDistMin) inpDistMin.value = String(Math.max(30, curDist - 15));
-      if (inpDistMax) inpDistMax.value = String(curDist + 20);
-      this.pushToast(`Skalibrowano profil: Dystans ${curDist}cm, Tętno ${curHr} BPM`);
-    });
-    byId('btn-bio-save')?.addEventListener('click', () => {
-      const inpHrMin = Number((byId('modal-inp-hr-min') as HTMLInputElement)?.value);
-      const inpHrMax = Number((byId('modal-inp-hr-max') as HTMLInputElement)?.value);
-      const inpDistMin = Number((byId('modal-inp-dist-min') as HTMLInputElement)?.value);
-      const inpDistMax = Number((byId('modal-inp-dist-max') as HTMLInputElement)?.value);
-      this.patchForm({
-        userHeartRateMin: !isNaN(inpHrMin) ? inpHrMin : this.form?.userHeartRateMin,
-        userHeartRateMax: !isNaN(inpHrMax) ? inpHrMax : this.form?.userHeartRateMax,
-        userSeatingDistanceMin: !isNaN(inpDistMin) ? inpDistMin : this.form?.userSeatingDistanceMin,
-        userSeatingDistanceMax: !isNaN(inpDistMax) ? inpDistMax : this.form?.userSeatingDistanceMax
-      });
-      this.bioModalOpen = false;
-      this.save();
-    });
-
 
     // Diagnostics Modal
     byId('btn-diag-close')?.addEventListener('click', () => { this.diagModalOpen = false; this.render(); });
@@ -4104,6 +4367,44 @@ class AppUI {
     byId('diag-overlay')?.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).id === 'diag-overlay') { this.diagModalOpen = false; this.render(); }
     });
+
+    // Sesja diagnostyczna "Wyjście z pokoju"
+    byId('fc-header-diag-btn')?.addEventListener('click', () => void this.toggleDiagSession());
+    byId('btn-diag-session-close')?.addEventListener('click', () => { this.diagReportModalOpen = false; this.render(); });
+    byId('btn-diag-session-cancel')?.addEventListener('click', () => { this.diagReportModalOpen = false; this.render(); });
+    byId('diag-session-overlay')?.addEventListener('click', (e) => {
+      if ((e.target as HTMLElement).id === 'diag-session-overlay') { this.diagReportModalOpen = false; this.render(); }
+    });
+    byId('btn-diag-session-copy')?.addEventListener('click', async () => {
+      await window.api.copyToClipboard(this.diagSessionText);
+      this.pushToast('Raport skopiowany do schowka 🤖');
+    });
+    byId('btn-diag-session-notepad')?.addEventListener('click', async () => {
+      const ok = await window.api.openTextInNotepad(this.diagSessionText);
+      this.pushToast(ok ? 'Otwarto raport w Notatniku 📝' : 'Nie udało się uruchomić Notatnika', !ok);
+    });
+  }
+
+  /** Start/stop sesji diagnostycznej; stop otwiera modal z zebranymi logami. */
+  private async toggleDiagSession(): Promise<void> {
+    if (!this.diagActive) {
+      await window.api.diagStart();
+      this.diagActive = true;
+      this.pushToast('Sesja diagnostyczna rozpoczęta — nagrajmy, co się dzieje po wyjściu…');
+      this.updateHeaderAndLiveDOM();
+      return;
+    }
+
+    const report = await window.api.diagStop();
+    this.diagActive = false;
+    this.updateHeaderAndLiveDOM();
+    if (!report) {
+      this.pushToast('Brak aktywnej sesji diagnostycznej', true);
+      return;
+    }
+    this.diagSessionText = report.text;
+    this.diagReportModalOpen = true;
+    this.render();
   }
 }
 

@@ -12,6 +12,7 @@ import SignalRGBIntegration from './signalrgbIntegration';
 import HomeAssistantIntegration from './haIntegration';
 import DeviceWatcher from './deviceWatcher';
 import ActivityWatcher from './activityWatcher';
+import ScreenManager from './screenManager';
 import type { AppContext } from './appContext';
 import type { DeviceState } from '../shared/types';
 import {
@@ -20,9 +21,9 @@ import {
   ensureToastShortcut,
   resolveConfigPath,
   resolveBinDir,
-  resolveAppIcon,
   applyAutoStart,
-  createNotification
+  createNotification,
+  toggleMuteWithFeedback
 } from './appContext';
 import { interceptConsole, setLogSink, appendLog } from './logger';
 import { createTray, refreshTray } from './tray';
@@ -40,19 +41,19 @@ if (!gotSingleLock) {
   process.exit(0);
 }
 
-// Zwolnij ewentualne osierocone daemony i procesy z poprzedniej sesji
-try {
-  const currentPid = process.pid;
-  const { exec } = require('node:child_process');
-  exec(`powershell -NoProfile -Command "Get-Process | Where-Object { ($_.Name -like 'AudioSwitcher*') -or ($_.Name -like 'DeskSense*' -and $_.Id -ne ${currentPid}) } | Stop-Process -Force"`, () => {});
-} catch {}
-
 interceptConsole();
 
 // Siatka bezpieczeństwa dla apki żyjącej w tray tygodniami: przyszły
 // nieobsłużony rejection logujemy zamiast ryzykować śmierć procesu.
 process.on('unhandledRejection', (reason) => {
   console.warn('[main] unhandledRejection:', reason instanceof Error ? reason.stack : reason);
+});
+
+// Jw. dla wyjątków: domyślnie Electron rzuca modalny dialog "JavaScript error
+// in the main process" i zabija aplikację. Wyścigi zamknięcia portu COM
+// (GetOverlappedResult: Operation aborted) są niegroźne — logujemy i żyjemy.
+process.on('uncaughtException', (err) => {
+  console.error('[main] uncaughtException:', err.stack || err.message);
 });
 
 let ctx: AppContext | null = null;
@@ -87,7 +88,8 @@ function buildSnapshot() {
     },
     ha: ctx.ha.getStatus(),
     telemetry: ctx.radar.telemetry,
-    config: { ...ctx.config.data }
+    config: { ...ctx.config.data },
+    snoozeUntil: ctx.controller.getSnoozeUntil()
   };
 }
 
@@ -172,8 +174,9 @@ app.whenReady().then(() => {
   const discord = new DiscordIntegration(config);
   const signalrgb = new SignalRGBIntegration({ config });
   const ha = new HomeAssistantIntegration({ config, radar });
+  const screen = new ScreenManager(config, audio);
 
-  const controller = new AppController(radar, audio, config, discord, signalrgb);
+  const controller = new AppController(radar, audio, config, screen, discord, signalrgb);
   const updater = new AppUpdater({ onEvent: (ev) => pushEvent(ev.type, ev), config });
 
   audio.on('toolStatus', (msg: string) => pushEvent('toast', { message: msg }));
@@ -207,6 +210,7 @@ app.whenReady().then(() => {
     radar,
     audio,
     controller,
+    screen,
     activityWatcher,
     updater,
     signalrgb,
@@ -274,6 +278,26 @@ app.whenReady().then(() => {
     pushEvent('toast', { error: true, message: `Błąd: ${err.message}` });
     refreshSnapshot();
   });
+  // Synchronizacja mikrofonu z Discordem nie powiodła się — błąd MUSI być
+  // widoczny w UI. Cooldown chroni przed spamem przy każdej zmianie stanu,
+  // gdy Discord jest np. wyłączony na dłużej.
+  let lastDiscordSyncToastAt = 0;
+  controller.on('discordSyncError', (p: { reason?: string; device: string | null }) => {
+    appendLog('DISCORD', `Synchronizacja wejścia z Discordem nieudana (${p.reason ?? 'nieznany powód'}) — "${p.device || 'default'}"`);
+    const now = Date.now();
+    if (now - lastDiscordSyncToastAt < 10 * 60 * 1000) return;
+    lastDiscordSyncToastAt = now;
+    const powod =
+      p.reason === 'not_connected'
+        ? 'Discord nie uruchomiony'
+        : p.reason === 'not_ready'
+          ? 'Discord nie odpowiedział na handshake'
+          : p.reason === 'rejected'
+            ? 'Discord odrzucił zmianę'
+            : 'nieznany powód';
+    pushEvent('toast', { error: true, message: `Discord: nie zsynchronizowano mikrofonu (${powod})` });
+    refreshSnapshot();
+  });
   controller.on('mode', () => refreshSnapshot());
 
   tray = createTray(ctx);
@@ -323,15 +347,10 @@ app.whenReady().then(() => {
 
   // Global hotkey: Ctrl+Shift+M -> szybkie wyciszenie/odciszenie
   try {
-    const registered = globalShortcut.register(config.get('globalShortcut'), async () => {
-      const res = await ctx!.controller.toggleDeviceMute();
-      const isMuted = res?.isMuted;
-      pushEvent('toast', { message: isMuted ? 'Mikrofon wyciszony 🔇' : 'Mikrofon aktywny 🎙️' });
-      showWindowsNotification(
-        'DeskSense',
-        isMuted ? 'Mikrofon został wyciszony 🔇' : 'Wyciszenie mikrofonu wyłączone 🎙️'
-      );
-      refreshSnapshot();
+    const registered = globalShortcut.register(config.get('globalShortcut'), () => {
+      // Wspólny helper (dioda + toast + powiadomienie + snapshot) — ten sam,
+      // którego używa menu tray i IPC audio:toggleMute.
+      void toggleMuteWithFeedback(ctx!);
     });
     // register() zwraca false gdy skrót zajęty przez inną apkę — bez tego
     // awaria przechodzi zupełnie po cichu.
@@ -408,9 +427,13 @@ app.on('before-quit', (e) => {
 const forceCleanup = () => {
   if (ctx) {
     try {
+      ctx.screen.stop();
       ctx.audio.shutdown();
       if (ctx.radar.port) {
         ctx.radar.port.removeAllListeners();
+        // Odbiorca dla porzuconych zapisów — bez tego abort portu przy wyjściu
+        // kończy się nieprzechwyconym wyjątkiem i modalem "JavaScript error".
+        ctx.radar.port.on('error', () => {});
         if (ctx.radar.port.isOpen) ctx.radar.port.close(() => {});
         ctx.radar.port.destroy();
       }
@@ -432,5 +455,3 @@ process.on('SIGTERM', () => {
 app.on('window-all-closed', () => {
   // keep running in tray
 });
-
-export { resolveAppIcon };

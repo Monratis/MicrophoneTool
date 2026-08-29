@@ -1,116 +1,100 @@
-# HANDOVER — DeskSense / MR60BHA2 (kot vs użytkownik)
+# HANDOVER — DeskSense / XIAO ESP32-C6 + MR60BHA2 (Stan i Instrukcja)
 
-Przekazanie wiedzy dla kolejnego agenta. Data: 27.08.2026. Stan: FW = stock V4.3.1 (działa).
+Przekazanie pełnej wiedzy sprzętowej, firmware'owej i aplikacyjnej dla kolejnego agenta AI i dewelopera.
+Data: 28.08.2026.
+Stan: **DeskSense Native OS v1.4.0 (Wgrany na COM3 — dodana fuzja obecnosci)**.
 
-## 1. Cel
+---
 
-DeskSense (Electron, Windows) przełącza domyślny mikrofon wg obecności użytkownika
-przy biurku, wykrywanej radarem mmWave **Seeed MR60BHA2 na XIAO ESP32-C6** (USB/COM3).
+## 1. Architektura sprzętowa (Seeed MR60BHA2 Kit)
 
-Problem: MR60BHA2 raportuje dystans/tętno/oddech tylko dla JEDNEGO (najsilniejszego)
-celu. Kot przy biurku "podkrada" odczyt → apka może błędnie wygaszać obecność
-(fałszywe AWAY → mikrofon na słuchawki, gdy użytkownik siedzi).
+- **Mikrokontroler:** Seeed Studio XIAO ESP32-C6 (`ESP32-C6FH4`, 4MB Flash, RISC-V, USB-CDC).
+- **Radar mmWave 60GHz (MR60BHA2):**
+  - Połączenie UART: `RX: GPIO17`, `TX: GPIO16` na baudzie `115200` (`8N1`).
+  - Strumień danych radaru: Ramki binarne z nagłówkiem `0x01` oraz ramki Seeed `0x53 0x59`.
+  - Kluczowe typy ramek:
+    - `0x0F09` — Obecność człowieka (People Exist / Has Target, uint16 LE, `!= 0` oznacza `ON`).
+    - `0x0A16` — Dystans klatki piersiowej w **cm** (`[u32 flag][float distance_cm LE]` na offsecie 4).
+    - `0x0A15` — Tętno w **BPM** (`float LE`).
+    - `0x0A14` — Częstotliwość oddechu w **RPM** (`float LE`).
+    - `0x0A04` / `0x0A08` — Liczba śledzonych celów (Target Number, `uint32 LE`).
+- **Dioda statusowa (WS2812 RGB):**
+  - Pojedyncza dioda adresowalna podłączona pod pin **`GPIO1`**.
+  - Sterowanie programowe: Biblioteka `Adafruit_NeoPixel` (sprzętowy sterownik RMT ESP32).
+  - Kolory w DeskSense: Zielony (`#22c55e` dla DESK), Bursztynowy (`#f59e0b` dla AWAY), Czerwony (`#ef4444` dla MUTE) + ściemnianie 0–100%.
+- **Czujnik natężenia światła (BH1750):**
+  - Magistrala I2C: `SDA: GPIO22`, `SCL: GPIO23`, adres `0x23`.
+  - Inicjalizacja: Power ON (`0x01`) $\rightarrow$ Continuous H-Resolution (`0x10`), przelicznik `lux = raw / 1.2f`.
 
-## 2. Protokół MR60BHA2 (ZWERYFIKOWANE wobec kodu ESPHome)
+---
 
-- Ramki natywne: SOF `0x01`, id BE(2), len BE(2), type BE(2), head cksum (XOR ~inv), data, data cksum.
-- **Wszystkie pola numeryczne są byte-swapped**: czytaj odwrócone → LE.
-  W apce: `payloadFloat(p)` = `Buffer.from([p[3],p[2],p[1],p[0]]).readFloatLE(0)`; `payloadU32` analogicznie.
-- Typy (ESPHome / moduł):
-  - `0x0F09` obecność: u16 reversed, `!=0`
-  - `0x0A16` dystans: `[u32 rangeFlag][f32 odległość]` — **float na offsecie 4**, wartość w **cm**
-    (log: `74.62000 cm`, brak filtra w YAML). Heurystyka: `f<10 ? f*100 : f`.
-  - `0x0A15` tętno f32 swapped, `0x0A14` oddech f32 swapped
-  - `0x0A04`/`0x0A08` point cloud: `[u32 liczba celów swapped] + N×{x f32, y f32, dop i32, cluster i32}` (wszystko swapped)
-- **Format logów ESPHome zależy od wersji**:
-  - stary: `'Entity': Sending state 74.62 cm`
-  - nowy (V4.3.1): `'Entity' >> 74.62 cm` — także binarny sensor obecności `'Person Information' >> ON`
-  - Apka parsuje OBA (regex w `radarListener.ts` ~linia 461 + fallbacki).
+## 2. Firmware: DeskSense Native OS v1.4.0
 
-## 3. Zmiany w apce (ta sesja) — stan: typecheck ✓, portable zbudowany
+- **Ścieżka do kodu źródłowego:** `firmware/DeskSense_XIAO_ESP32C6/DeskSense_XIAO_ESP32C6.ino`
+- **Rozmiar binarki:** ~315 KB (zaledwie 24% pamięci programu i 5% RAM ESP32-C6).
+- **Zasada działania:**
+  1. Mikrokontroler czyta surowe ramki binarne z UART radaru i w locie je waliduje sumami kontrolnymi (~XOR).
+  2. Wypisuje do USB-CDC czyste, sformatowane linie tekstowe (standard formatu logów ESPHome):
+     ```text
+     'Person Information' >> ON
+     'Distance to detection object' >> 74.62 cm
+     'Real-time heart rate' >> 105 bpm
+     'Real-time respiratory rate' >> 16
+     'Target Number' >> 1
+     'Seeed MR60BHA2 Illuminance' >> 0.8 lx
+     ```
+  3. Obsługuje dwukierunkowe komendy tekstowe z PC (`SET:LED=R,G,B,BRI\r\n` oraz `CMD:REBOOT\r\n`).
+  4. Zapobiega jakimkolwiek kolizjom bajtów binarnych ze strumieniem tekstowym.
+  5. **Fuzja obecnosci (v1.4.0)**: modul MR60BHA2 potrafi trzymac People Exist=ON na
+     statycznym odbiciu (fotel/krzeslo) po wyjsciu uzytkownika. Firmware liczy dowody
+     zywotnosci: swieza biometria (tetno/oddech) i ruch dystansu. Gdy oba zamilkna na
+     `FUSION_GAP_MS` (3 s, `#define` w .ino), emituje `'Person Information' >> OFF`
+     mimo ON z modulu; powrot natychmiastowy po bio lub ruchu dystansu. Diagnostyka:
+     linie `[DeskSense] Fuzja obecnosci -> OFF/ON` w strumieniu (apka loguje je jako RADAR-RAW).
 
-- `src/shared/types.ts`: `radarAmbiguityGuardEnabled` (config), `distanceTrusted`, `targetCount` (telemetry).
-- `src/main/config.ts`: `radarAmbiguityGuardEnabled: true` (default).
-- `src/main/radarListener.ts`:
-  - parser `>>` + `Sending state`,
-  - `targetCount` z linii `'Target Number'` + binarnie `0x0A04/0x0A08`,
-  - **guard niejednoznaczności** (`radarAmbiguous`): sygnały = `multiTarget` (`targetCount>=2`)
-    OR `petAfterHuman` (pet vitals w 10s po ludzkim tętnie, `lastHumanHrAt`),
-  - **NIE używaj rozpiętości dystansu** (usunięte!): moduł naturalnie oscyluje 57-80 cm
-    przy ruszającym się człowieku — dawało fałszywe "CEL NIEPEWNY" bez kota,
-  - gdy ambiguous: bramka odległości / filtr zwierzaka / mismatch NIE nadpisują obecności;
-    auto-tuner nie karmiony; `outOfGateStreak` resetowany przy wejściu w ambiguity,
-  - fix binarnego `0x0A16` (float na offset 4),
-  - watchdog decay `targetCount` (stale → `undefined`),
-  - **`telemetry.targetCount` default = `undefined`** (nie 0!) — 0 = brak danych.
-- `src/renderer/src/main.ts`: raport "Kopiuj dla AI" = 200 ramek bez szumu
-  (wyklucza lux `bh1750`/`Illuminance`, dedup powtórek, RADAR-DSP tylko przy zmianie wartości);
-  scope pokazuje "⚠️ Cel niepewny"; raport pokazuje `Cele: —` gdy brak danych.
+---
 
-## 4. FIRMWARE — ROZSTRZYGNIĘTE (ważne!)
+## 3. Instrukcja Flashowania (Gotowe komendy PowerShell)
 
-- Urządzenie było **pre-flashed przez Seeed**: stary ESPHome (`Sending state`, **bez** `num_targets`).
-- **Stock V4.3.1** (`firmware/seeedstudio-mr60bha2-kit-esp32c6.factory.bin`, GitHub Releases Seeed,
-  wydany 2026-02-28, budowany CI esphome stable ~2026.2.2):
-  MA `num_targets`, loguje `>>`, **DZIAŁA — ZWERYFIKOWANE** (sensory płyną, `'Target Number' >> 1`,
-  `'Person Information' >> ON`). **To jest obecny FW na urządzeniu i REKOMENDACJA.**
-- **Wszystkie lokalne custom buildy ŁAMIĄ sensory** (WiFi/API/HA działają, ZERO logów sensorów):
-  1. esphome **2026.8.1** + external `limengdu/...@main` + heartbeat → brak sensorów
-  2. 2026.8.1 + external bez heartbeat → brak
-  3. 2026.8.1 + **wbudowane** `seeed_mr60bha2` + `bh1750` → brak
-  4. 2026.8.1 + **oryginalny kit YAML 1:1** → brak  ← definitywnie toolchain, nie YAML/komponent
-  5. esphome **2026.2.2** (era CI) → **NIE KOMPILUJE SIĘ**: platforma
-     `pioarduino/platform-espressif32 55.03.37` + framework-espidf 5.5.2 → 
-     `Failed to resolve component 'esp_hal_ieee802154'` (brakujący komponent w pioarduino).
-- **Wniosek**: to lokalny toolchain (PlatformIO lokalny vs Docker CI Seeed). Prawdopodobny
-  winowajca dla 2026.8.1: esp-idf 5.5.5 UART na esp32-c6 (UART RX nie dostarcza ramek).
-  NIE odtwarzane lokalnie — patrz "Następne kroki".
+### Środowisko narzędziowe:
+- **arduino-cli:** `C:\Users\Monra\AppData\Local\Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe`
+- **FQBN płytki:** `esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc`
+- **Port:** `COM3`
 
-## 5. Jak kompilować (działająca metoda lokalna — ale wyniki ZŁAMANE, patrz §4)
+### Krok po kroku:
+```powershell
+# 1. ZAWSZE zamknij procesy DeskSense przed kompilacją/wgrywaniem (żeby zwolnić port COM3):
+Get-Process | Where-Object { $_.ProcessName -like "*DeskSense*" } | Stop-Process -Force -ErrorAction SilentlyContinue
 
-- Python 3.13 + pip, esphome **2026.8.1** (`pip install esphome`). 2026.2.2 też działa pip (ale nie kompiluje).
-- **ESP-IDF nie buduje pod Git Bash**: `idf_tools.py` sprawdza `'MSYSTEM' in os.environ`
-  → "MSys/Mingw is not supported". `env -u` NIE działa (bash tool reinicjalizuje env).
-  **Fix: wrapper Pythona** usuwający klucze MSYS z `os.environ` przed startem esphome:
-  `C:\Users\Monra\AppData\Local\Temp\opencode\run_esphome.py`
-- Kompilacja: `python run_esphome.py compile <yaml>` (workdir `firmware/`).
-- Wynik: `.esphome/build/seeedstudio-mr60bha2-kit/build/firmware.factory.bin`
-- Flash: `python -m esptool --chip esp32c6 --port COM3 --baud 460800 write_flash 0x0 <factory.bin>`
-  (**najpierw `taskkill -F -IM DeskSense.exe`** — apka trzyma COM3; w bashu `taskkill /F` się psuje, użyj `-F`).
-- Port: COM3, ESP32-C6 (VID 303A PID 1001). USB-CDC wymaga DTR/RTS
-  (`port.set({dtr:true,rts:true})`); po resecie odczekaj na re-enumerację portu.
-- WiFi: `M_2.4g` / `grandlinerayman33` (użytkownik nie dba o ekspozycję). V4.3.1 i tak łączy
-  się po zapisanych w NVS danych — nowy flash NIE kasuje NVS (partycja poza zakresem 1MB).
+# 2. Kompilacja firmware'u:
+& "C:\Users\Monra\AppData\Local\Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" compile --fqbn esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc "d:\MicrophoneTool\firmware\DeskSense_XIAO_ESP32C6"
 
-## 6. Pliki firmware (`firmware/`)
+# 3. Wgranie (Upload) na port COM3:
+& "C:\Users\Monra\AppData\Local\Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" upload -p COM3 --fqbn esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc "d:\MicrophoneTool\firmware\DeskSense_XIAO_ESP32C6"
+```
 
-| plik | status |
-|---|---|
-| `seeedstudio-mr60bha2-kit-esp32c6.factory.bin` | stock V4.3.1 — **DZIAŁA, obecny FW** |
-| `kit-original.yaml` | oryginalny kit YAML z Seeed main (1:1) |
-| `kit-original-local.factory.bin` | lokalny build 2026.8.1 tego YAML — sensory martwe |
-| `seeedstudio-mr60bha2-kit-stable.yaml` | wbudowane komponenty + WiFi + heartbeat (sensory martwe) |
-| `DeskSense-MR60BHA2-stable.factory.bin` | build z powyższego |
-| `seeedstudio-mr60bha2-kit-heartbeat.yaml` | external component + heartbeat (martwe) |
-| `seeedstudio-mr60bha2-kit-nohb.yaml` | external component bez heartbeat (martwe) |
-| `DeskSense-MR60BHA2-heartbeat.factory.bin` / `-nohb.factory.bin` | buildy |
+### Alternatywne wgranie fabrycznego obrazu ESPHome (.bin):
+```powershell
+python -m esptool --chip esp32c6 --port COM3 --baud 460800 write_flash 0x0 "d:\MicrophoneTool\firmware\seeedstudio-mr60bha2-kit-esp32c6.factory.bin"
+```
 
-## 7. Następne kroki (gdyby custom FW był potrzebny)
+---
 
-1. **Docker**: buduj przez `esphome/esphome` image (to, co robi CI Seeed) — spójny toolchain.
-   Na tej maszynie brak dockera.
-2. Albo napraw platformę: override `platform_version` w `platformio_options` na nowszy
-   `pioarduino/platform-espressif32` (55.03.38+?), który zawiera `esp_hal_ieee802154`.
-3. Albo znajdź wersję esphome między 2026.2 a 2026.8, która i kompiluje, i daje UART RX na c6.
-4. Cel: wbudowane komponenty + `num_targets` heartbeat 5s + WiFi → sensory działają.
-5. **Bez custom FW apka też działa**: V4.3.1 raportuje liczbę celów na ZMIANĘ — gdy kot
-   wchodzi/wychodzi, `Target Number` się zmienia → apka łapie `Cele: 2` → guard trzyma obecność.
-   Jedyna luka: start apki przy już-stabilnej liczbie → "Cele: —" (guard drzemie do zmiany).
+## 4. Krytyczne fakty i pułapki (Gotchas)
 
-## 8. Inne fakty sesji
-
-- HA 2026.8.3 (192.168.1.30) łączy się do API urządzenia (192.168.1.195, WiFi M_2.4g).
-- Apka build: `node scripts/build.mjs portable` → `releases/DeskSense (Portable).exe` (build ubija DeskSense).
-- `npm run typecheck` przechodzi.
-- Przycisk "Kopiuj dla AI": 200 przefiltrowanych logów (bez lux-spamu, dedup).
-- Test "Kopiuj dla AI" z nowym FW: raport pokazuje `Cele: —` dopóki liczba się nie zmieni.
+1. **USB-CDC DTR/RTS Handshake:**
+   Na ESP32-C6 z `CDCOnBoot=cdc`, sterownik USB CDC w Windows nie przesyła strumienia dopóki aplikacja nie ustawi sygnałów DTR i RTS na `true`.
+   W `src/main/radarListener.ts`:
+   ```ts
+   port.set({ dtr: true, rts: true });
+   ```
+2. **Sterowanie diodą WS2812 na ESP32-C6 (RISC-V):**
+   Wbudowane w stary core `neopixelWrite` lub makra `#ifdef` nie działały prawidłowo. **Wymagana jest biblioteka `Adafruit_NeoPixel`**, która korzysta z hardware RMT na pinie GPIO1.
+3. **Format linii w DeskSense:**
+   Parser w `src/main/radarListener.ts` przetwarza linie pasujące do regexu:
+   `/'([^']+)'\s*(?::\s*(?:Sending state|Got state|state:?)|\s*>>)\s*([^\s,;]+)/i`
+4. **Weryfikacja zmian:**
+   Przed każdym commitem i zakończeniem zadania należy uruchomić:
+   ```bash
+   npm run typecheck
+   ```

@@ -21,21 +21,6 @@ export default class SignalRGBIntegration {
     return `http://127.0.0.1:${port}/api/v1`;
   }
 
-  async probe(): Promise<{ connected: boolean; status?: number; data?: unknown }> {
-    try {
-      const res = await fetch(`${this.getBaseUrl()}/lighting`, {
-        signal: AbortSignal.timeout(1200)
-      });
-      if (res.ok) {
-        const data = await res.json();
-        return { connected: true, data };
-      }
-      return { connected: false, status: res.status };
-    } catch {
-      return { connected: false };
-    }
-  }
-
   private async saveCurrentState(): Promise<void> {
     try {
       const res = await fetch(`${this.getBaseUrl()}/lighting`, {

@@ -125,6 +125,72 @@ namespace AudioSwitcher
         [PreserveSig] int GetVolumeRange(out float pflVolumeMindB, out float pflVolumeMaxdB, out float pflVolumeIncrementdB);
     }
 
+    // ---- Device Topology (KS subunits) ----
+    // Urządzenia bez IAudioEndpointVolume (E_NOINTERFACE — np. USB "Chat" i gamingowe
+    // mikrofony) wystawiają głośność i mute wyłącznie przez podwęzła KS w topologii
+    // urządzenia. Interfejsy nieużywane deklarujemy jako IntPtr — vtable musi się
+    // zgadzać slot w slot, ale nie musimy ich wywoływać.
+        [ComImport, Guid("2A07407E-6497-4A18-9787-32F79BD0D98F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IDeviceTopology
+    {
+        [PreserveSig] int GetConnectorCount(out uint pCount);
+        [PreserveSig] int GetConnector(uint nIndex, out IConnector pConnector);
+        [PreserveSig] int GetSubunitCount(out uint pCount);
+        [PreserveSig] int GetSubunit(uint nIndex, out IPart pPart);
+        [PreserveSig] int GetPartById(uint nId, out IPart pPart);
+        [PreserveSig] int GetDeviceId([MarshalAs(UnmanagedType.LPWStr)] out string pDeviceId);
+        [PreserveSig] int GetSignalPath(out IntPtr pParts);
+    }
+
+    [ComImport, Guid("9C2C4058-23F5-41DE-877A-DF3AF236A09E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IConnector
+    {
+        [PreserveSig] int GetConnType(out int pType);
+        [PreserveSig] int GetConnDataFlow(out int pDataFlow);
+        [PreserveSig] int ConnectTo(IConnector pOther);
+        [PreserveSig] int Disconnect();
+        [PreserveSig] int IsConnected([MarshalAs(UnmanagedType.Bool)] out bool pConnected);
+        [PreserveSig] int GetConnectedTo(out IConnector pConnector);
+        [PreserveSig] int GetConnectorIdConnectedTo([MarshalAs(UnmanagedType.LPWStr)] out string pId);
+        [PreserveSig] int GetDeviceIdConnectedTo([MarshalAs(UnmanagedType.LPWStr)] out string pId);
+    }
+
+    [ComImport, Guid("AE2DE0E4-5BCA-4F2D-AA46-5D13F8FDB3A9"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IPart
+    {
+        [PreserveSig] int GetName([MarshalAs(UnmanagedType.LPWStr)] out string pName);
+        [PreserveSig] int GetLocalId(out uint pId);
+        [PreserveSig] int GetGlobalId([MarshalAs(UnmanagedType.LPWStr)] out string pGlobalId);
+        [PreserveSig] int GetPartType(out int pType);
+        [PreserveSig] int GetSubType(out Guid pSubType);
+        [PreserveSig] int GetControlInterfaceCount(out uint pCount);
+        [PreserveSig] int GetControlInterface(uint nIndex, out IntPtr pControlInterface);
+        [PreserveSig] int EnumPartsIncoming(out IntPtr pParts);
+        [PreserveSig] int EnumPartsOutgoing(out IntPtr pParts);
+        [PreserveSig] int GetTopologyObject(out IntPtr pTopology);
+        [PreserveSig] int Activate(int dwClsContext, ref Guid riid, [MarshalAs(UnmanagedType.IUnknown)] out object ppv);
+        [PreserveSig] int RegisterControlChangeCallback(Guid riid, IntPtr pNotify);
+        [PreserveSig] int UnregisterControlChangeCallback(Guid riid, IntPtr pNotify);
+    }
+
+    // Poziomy są w dB — procent mapujemy liniowo na zakres GetLevelRange.
+    [ComImport, Guid("7FB7B48F-531D-44A2-BCB3-5AD5A134B3DC"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IAudioVolumeLevel
+    {
+        [PreserveSig] int GetChannelCount(out uint pChannels);
+        [PreserveSig] int GetLevelRange(uint nChannel, out float pfMinLevelDB, out float pfMaxLevelDB, out float pfStepping);
+        [PreserveSig] int GetLevel(uint nChannel, out float pfLevelDB);
+        [PreserveSig] int SetLevel(uint nChannel, float fLevelDB, ref Guid pguidEventContext);
+        [PreserveSig] int SetLevelAllChannels(float[] aLevelsDB, uint cChannels, ref Guid pguidEventContext);
+    }
+
+    [ComImport, Guid("DF45A04A-2548-498D-9B15-4B35C0BFBB39"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IAudioMute
+    {
+        [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid pguidEventContext);
+        [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool pbMute);
+    }
+
     public class AudioDevice
     {
         public string Id { get; set; }
@@ -133,6 +199,9 @@ namespace AudioSwitcher
         public bool IsDefaultComm { get; set; }
         public bool IsMuted { get; set; }
         public int Volume { get; set; }
+        // Fizyczny poziom w dB — jedyna dokumentowana, jednoznaczna skala
+        // (procenty UI Windows to nieudokumentowana krzywa audio-tapered).
+        public float VolumeDb { get; set; }
     }
 
     public static class Program
@@ -144,6 +213,14 @@ namespace AudioSwitcher
         };
 
         private static readonly Guid IID_IAudioEndpointVolume = new Guid("5BC644DE-035A-46E0-B884-219C03C28731");
+        private static readonly Guid IID_IDeviceTopology = new Guid("2A07407E-6497-4A18-9787-32F79BD0D98F");
+        private static readonly Guid IID_IAudioVolumeLevel = new Guid("7FB7B48F-531D-44A2-BCB3-5AD5A134B3DC");
+        private static readonly Guid IID_IAudioMute = new Guid("DF45A04A-2548-498D-9B15-4B35C0BFBB39");
+        // Klasyczne GUID-y węzłów KS (ksmedia.h) — dokładnie te zwraca
+        // IPart::GetSubType w Device Topology.
+        private static readonly Guid KSNODETYPE_VOLUME = new Guid("3A5ACC00-C557-11D0-8A2B-00A0C9255AC1");
+        private static readonly Guid KSNODETYPE_MUTE = new Guid("02B223C0-C557-11D0-8A2B-00A0C9255AC1");
+        private static readonly Guid KSNODETYPE_ADC = new Guid("4D837FE0-C555-11D0-8A2B-00A0C9255AC1");
 
         // Zwalnia pamięć COM przydzieloną przez IPropertyStore.GetValue —
         // bez tego daemon wycieka przy każdej enumeracji każdego urządzenia.
@@ -188,6 +265,8 @@ namespace AudioSwitcher
             return _cachedPolicyConfig;
         }
 
+        // STA: obiekty Device Topology (PartsList, kontrolki) żyją na wewnętrznych
+        // wątkach STA audioses — z MTA QI do IPartsList/IAudioMute kończy się
         public static int Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
@@ -324,7 +403,7 @@ namespace AudioSwitcher
             GetEnumerator();
             GetPolicyConfig();
 
-            Console.WriteLine("{\"ready\":true,\"version\":\"0.2.2\"}");
+            Console.WriteLine("{\"ready\":true,\"version\":\"0.2.3\"}");
             Console.Out.Flush();
 
             string line;
@@ -511,20 +590,41 @@ namespace AudioSwitcher
 
                 bool isMuted = false;
                 int volume = 100;
+                float volumeDb = float.NaN;
                 try
                 {
                     Guid iid = IID_IAudioEndpointVolume;
                     object epvObj;
+                    IAudioEndpointVolume epv = null;
                     if (dev.Activate(ref iid, 1, IntPtr.Zero, out epvObj) == 0 && epvObj != null)
                     {
-                        IAudioEndpointVolume epv = epvObj as IAudioEndpointVolume;
-                        if (epv != null)
+                        epv = epvObj as IAudioEndpointVolume;
+                    }
+                    if (epv != null)
+                    {
+                        epv.GetMute(out isMuted);
+                        float volScalar;
+                        if (epv.GetMasterVolumeLevelScalar(out volScalar) == 0)
                         {
-                            epv.GetMute(out isMuted);
-                            float volScalar;
-                            if (epv.GetMasterVolumeLevelScalar(out volScalar) == 0)
+                            volume = (int)Math.Round(volScalar * 100f);
+                        }
+                        epv.GetMasterVolumeLevel(out volumeDb);
+                    }
+                    else
+                    {
+                        // Brak IAudioEndpointVolume (E_NOINTERFACE) — stan z podwęzłów KS.
+                        KsControls ks = ResolveKsControls(id);
+                        if (ks != null)
+                        {
+                            bool ksMuted;
+                            int ksPct;
+                            float ksDb;
+                            if (ks.Mute != null && ks.Mute.GetMute(out ksMuted) == 0) isMuted = ksMuted;
+                            if (ks.Volume != null && ks.Volume.GetLevel(0, out ksDb) == 0)
                             {
-                                volume = (int)Math.Round(volScalar * 100f);
+                                volumeDb = ksDb;
+                                KsGetVolume(ks, out ksPct);
+                                volume = ksPct;
                             }
                         }
                     }
@@ -538,7 +638,8 @@ namespace AudioSwitcher
                     IsDefault = (!string.IsNullOrEmpty(defaultConsoleId) && id == defaultConsoleId),
                     IsDefaultComm = (!string.IsNullOrEmpty(defaultCommId) && id == defaultCommId),
                     IsMuted = isMuted,
-                    Volume = volume
+                    Volume = volume,
+                    VolumeDb = volumeDb
                 });
             }
 
@@ -561,8 +662,16 @@ namespace AudioSwitcher
                   .Append(",\"isDefault\":").Append(d.IsDefault ? "true" : "false")
                   .Append(",\"isDefaultComm\":").Append(d.IsDefaultComm ? "true" : "false")
                   .Append(",\"isMuted\":").Append(d.IsMuted ? "true" : "false")
-                  .Append(",\"volume\":").Append(d.Volume)
-                  .Append("}");
+                  .Append(",\"volume\":").Append(d.Volume);
+                if (float.IsNaN(d.VolumeDb))
+                {
+                    sb.Append(",\"volumeDb\":null");
+                }
+                else
+                {
+                    sb.Append(",\"volumeDb\":").Append(d.VolumeDb.ToString("0.0#", System.Globalization.CultureInfo.InvariantCulture));
+                }
+                sb.Append("}");
             }
             sb.Append("]");
             Console.WriteLine(sb.ToString());
@@ -717,6 +826,244 @@ namespace AudioSwitcher
             return null;
         }
 
+        // ---- Fallback KS: kontrolki z Device Topology dla urządzeń E_NOINTERFACE ----
+
+        private class KsControls
+        {
+            public IAudioVolumeLevel Volume;
+            public IAudioMute Mute;
+            public float MinDb;
+            public float MaxDb;
+        }
+
+        // Rozwiązane kontrolki KS per urządzenie — przejście po topologii jest
+        // wyraźnie droższe niż zwykły odczyt, a zestaw podwęzłów nie zmienia się.
+        private static readonly Dictionary<string, KsControls> KsCache = new Dictionary<string, KsControls>();
+
+        private static void InvalidateKs(string deviceId)
+        {
+            KsCache.Remove(deviceId);
+        }
+
+        private static KsControls ResolveKsControls(string deviceId)
+        {
+            KsControls cached;
+            if (KsCache.TryGetValue(deviceId, out cached)) return cached;
+
+            try
+            {
+                IMMDeviceEnumerator enumerator = GetEnumerator();
+                IMMDevice immDev;
+                if (enumerator.GetDevice(deviceId, out immDev) != 0 || immDev == null) return null;
+
+                Guid iidTopo = IID_IDeviceTopology;
+                object topoObj;
+                if (immDev.Activate(ref iidTopo, 23 /* CLSCTX_ALL */, IntPtr.Zero, out topoObj) != 0 || topoObj == null) return null;
+                IDeviceTopology endpointTopo = topoObj as IDeviceTopology;
+                if (endpointTopo == null) return null;
+
+                // Endpoint USB audio ma zwykle jedno złącze i zero podwęzłów — kontrolki
+                // volume/mute trzyma topologia adaptera po drugiej stronie złącza.
+                // Kandydatami są więc topologia endpointu (nieliczne urządzenia) i adapter.
+                var ks = new KsControls();
+                float volMin = 0f, volMax = 0f;
+                bool volIsAttenuator = false;
+
+                IDeviceTopology[] topologies = CollectTopologies(endpointTopo);
+                foreach (IDeviceTopology topo in topologies)
+                {
+                    ScanTopologySubunits(topo, ks, ref volMin, ref volMax, ref volIsAttenuator);
+                    if (ks.Volume != null && ks.Mute != null) break;
+                }
+
+                if (ks.Volume == null && ks.Mute == null) return null;
+
+                ks.MinDb = volMin;
+                ks.MaxDb = volMax;
+                KsCache[deviceId] = ks;
+                return ks;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // Topologia endpointu + topologie adapterów, do których prowadzą jej złącza.
+        private static IDeviceTopology[] CollectTopologies(IDeviceTopology endpointTopo)
+        {
+            var list = new List<IDeviceTopology>(2) { endpointTopo };
+            try
+            {
+                uint connCount;
+                if (endpointTopo.GetConnectorCount(out connCount) == 0)
+                {
+                    for (uint i = 0; i < connCount; i++)
+                    {
+                        IConnector conn;
+                        if (endpointTopo.GetConnector(i, out conn) != 0 || conn == null) continue;
+                        bool connected;
+                        IConnector peer;
+                        if (conn.IsConnected(out connected) == 0 && connected && conn.GetConnectedTo(out peer) == 0 && peer != null)
+                        {
+                            IPart entry = peer as IPart;
+                            if (entry == null) continue;
+                            IntPtr pAdapter;
+                            if (entry.GetTopologyObject(out pAdapter) == 0 && pAdapter != IntPtr.Zero)
+                            {
+                                object obj = Marshal.GetObjectForIUnknown(pAdapter);
+                                Marshal.Release(pAdapter);
+                                IDeviceTopology adapter = obj as IDeviceTopology;
+                                if (adapter != null && !ReferenceEquals(adapter, endpointTopo)) list.Add(adapter);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+            return list.ToArray();
+        }
+
+        private static void ScanTopologySubunits(IDeviceTopology topo, KsControls ks, ref float volMin, ref float volMax, ref bool volIsAttenuator)
+        {
+            try
+            {
+                uint count;
+                if (topo.GetSubunitCount(out count) != 0) return;
+
+                // Enumeracja idzie wzdłuż ścieżek sygnału: w adapterze wielościeżkowym
+                // (np. słuchawki BT z chat+game) węzły capture (ADC → mute → volume)
+                // siedzą po indeksie ADC, a render po DAC. Volume za ADC = mikrofon,
+                // nie słuchawki. EnumParts jest tu nieprzydatne (obiekt bez QI do
+                // IPartsList), więc scoping robią indeksy.
+                var subTypes = new List<Guid>((int)count);
+                var parts = new List<IPart>((int)count);
+                int adcIndex = -1;
+                for (uint i = 0; i < count; i++)
+                {
+                    IPart part;
+                    Guid subType;
+                    if (topo.GetSubunit(i, out part) != 0 || part == null || part.GetSubType(out subType) != 0)
+                    {
+                        parts.Add(null);
+                        subTypes.Add(Guid.Empty);
+                        continue;
+                    }
+                    parts.Add(part);
+                    subTypes.Add(subType);
+                    if (subType == KSNODETYPE_ADC) adcIndex = (int)i;
+                }
+
+                bool scoped = adcIndex >= 0;
+                for (uint i = 0; i < count; i++)
+                {
+                    IPart part = parts[(int)i];
+                    Guid subType = subTypes[(int)i];
+                    if (part == null) continue;
+                    // Poza ścieżką capture: tylko gdy wiemy, gdzie jest ADC.
+                    if (scoped && (int)i < adcIndex) continue;
+
+                    if ((ks.Volume == null || !volIsAttenuator) && subType == KSNODETYPE_VOLUME)
+                    {
+                        Guid iidVol = IID_IAudioVolumeLevel;
+                        object volObj;
+                        if (part.Activate(23, ref iidVol, out volObj) == 0 && volObj != null)
+                        {
+                            IAudioVolumeLevel vol = volObj as IAudioVolumeLevel;
+                            if (vol != null)
+                            {
+                                uint channels;
+                                float mn, mx, step;
+                                if (vol.GetChannelCount(out channels) == 0 && channels > 0 &&
+                                    vol.GetLevelRange(0, out mn, out mx, out step) == 0 && mx > mn)
+                                {
+                                    // Węzeł z tłumieniem (min < 0 dB) to właściwy volume;
+                                    // wzmacniacze typu "Microphone Boost" startują od 0 dB.
+                                    if (ks.Volume == null || (mn < -0.5f && !volIsAttenuator))
+                                    {
+                                        ks.Volume = vol;
+                                        volMin = mn;
+                                        volMax = mx;
+                                        volIsAttenuator = mn < -0.5f;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (ks.Mute == null && subType == KSNODETYPE_MUTE)
+                    {
+                        Guid iidMute = IID_IAudioMute;
+                        object muteObj;
+                        if (part.Activate(23, ref iidMute, out muteObj) == 0 && muteObj != null)
+                        {
+                            ks.Mute = muteObj as IAudioMute;
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+
+        private static bool KsGetVolume(KsControls ks, out int pct)
+        {
+            pct = 100;
+            try
+            {
+                float db;
+                if (ks.Volume.GetLevel(0, out db) != 0) return false;
+                if (ks.MaxDb <= ks.MinDb) return false;
+                pct = (int)Math.Round((db - ks.MinDb) / (ks.MaxDb - ks.MinDb) * 100f);
+                if (pct < 0) pct = 0;
+                if (pct > 100) pct = 100;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool KsSetVolume(KsControls ks, float scalar, out int pct)
+        {
+            pct = (int)Math.Round(scalar * 100f);
+            if (pct < 0) pct = 0;
+            if (pct > 100) pct = 100;
+            try
+            {
+                float db = ks.MinDb + (ks.MaxDb - ks.MinDb) * scalar;
+                uint channels;
+                Guid ctx = Guid.Empty;
+                if (ks.Volume.GetChannelCount(out channels) != 0 || channels == 0) return false;
+                // SetLevel per kanał — SetLevelAllChannels przez marshaler tablicowy
+                // psuje pamięć (AccessViolation) przy tych węzłach KS.
+                int hr = 0;
+                for (uint c = 0; c < channels && hr == 0; c++)
+                {
+                    hr = ks.Volume.SetLevel(c, db, ref ctx);
+                }
+                return hr == 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool KsSetMute(KsControls ks, bool mute)
+        {
+            try
+            {
+                Guid ctx = Guid.Empty;
+                return ks.Mute.SetMute(mute, ref ctx) == 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private static int SetMute(string target, bool mute)
         {
             string defCon, defComm;
@@ -752,6 +1099,21 @@ namespace AudioSwitcher
             {
                 Console.Error.WriteLine("{\"ok\":false,\"error\":" + EscapeJson(ex.Message) + "}");
                 return 1;
+            }
+
+            // Fallback KS (Device Topology): urządzenie nie wystawia IAudioEndpointVolume.
+            if (hrAct == unchecked((int)0x80004002))
+            {
+                KsControls ks = ResolveKsControls(dev.Id);
+                if (ks != null && ks.Mute != null)
+                {
+                    if (KsSetMute(ks, mute))
+                    {
+                        Console.WriteLine("{\"ok\":true,\"isMuted\":" + (mute ? "true" : "false") + ",\"id\":" + EscapeJson(dev.Id) + ",\"via\":\"ks\"}");
+                        return 0;
+                    }
+                    InvalidateKs(dev.Id);
+                }
             }
 
             Console.Error.WriteLine("{\"ok\":false,\"error\":" + (hrAct == unchecked((int)0x80004002) ? EscapeJson("Device does not support volume/mute control (E_NOINTERFACE)") : EscapeJson("Failed to access endpoint volume hr=0x" + hrAct.ToString("X8"))) + "}");
@@ -795,6 +1157,22 @@ namespace AudioSwitcher
                 return 1;
             }
 
+            // Fallback KS (Device Topology): poziomy są w dB, procent mapujemy na zakres.
+            if (hrAct == unchecked((int)0x80004002))
+            {
+                KsControls ks = ResolveKsControls(dev.Id);
+                if (ks != null && ks.Volume != null)
+                {
+                    int ksPct;
+                    if (KsSetVolume(ks, scalar, out ksPct))
+                    {
+                        Console.WriteLine("{\"ok\":true,\"volume\":" + ksPct + ",\"id\":" + EscapeJson(dev.Id) + ",\"via\":\"ks\"}");
+                        return 0;
+                    }
+                    InvalidateKs(dev.Id);
+                }
+            }
+
             Console.Error.WriteLine("{\"ok\":false,\"error\":" + (hrAct == unchecked((int)0x80004002) ? EscapeJson("Device does not support volume/mute control (E_NOINTERFACE)") : EscapeJson("Failed to access endpoint volume hr=0x" + hrAct.ToString("X8"))) + "}");
             return 1;
         }
@@ -828,6 +1206,22 @@ namespace AudioSwitcher
             {
                 Console.Error.WriteLine("{\"ok\":false,\"error\":" + EscapeJson(ex.Message) + "}");
                 return 1;
+            }
+
+            // Fallback KS (Device Topology): odczyt poziomu z podwęzła i mapowanie na procent.
+            if (hrAct == unchecked((int)0x80004002))
+            {
+                KsControls ks = ResolveKsControls(dev.Id);
+                if (ks != null && ks.Volume != null)
+                {
+                    int ksPct;
+                    if (KsGetVolume(ks, out ksPct))
+                    {
+                        Console.WriteLine("{\"ok\":true,\"volume\":" + ksPct + ",\"id\":" + EscapeJson(dev.Id) + ",\"via\":\"ks\"}");
+                        return 0;
+                    }
+                    InvalidateKs(dev.Id);
+                }
             }
 
             Console.Error.WriteLine("{\"ok\":false,\"error\":" + (hrAct == unchecked((int)0x80004002) ? EscapeJson("Device does not support volume/mute control (E_NOINTERFACE)") : EscapeJson("Failed to access endpoint volume hr=0x" + hrAct.ToString("X8"))) + "}");

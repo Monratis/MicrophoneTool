@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { SerialPort } from 'serialport';
 import AutoTuner from './autoTuner';
-import { MedianFilter, DistanceFilter, IlluminanceFilter } from './signalFilter';
+import { DistanceFilter, BiometricFilter, IlluminanceFilter } from './signalFilter';
 import { appendLog } from './logger';
+import { recordSample } from './diagRecorder';
 import type Config from './config';
 import type ActivityWatcher from './activityWatcher';
 import type { DeskState, DetectedPerson, RadarTelemetry } from '../shared/types';
@@ -35,7 +36,6 @@ interface Sample {
   heartRate: number;
   breathRate: number;
   isSeated: boolean;
-  rawPresence: boolean;
 }
 
 type SerialPortCtor = typeof SerialPort;
@@ -55,32 +55,36 @@ export default class RadarListener extends EventEmitter {
   private running = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   reconnectAttempts = 0;
-  private lastPortName: string | null = null;
   private lineBuffer = '';
   private rawBuffer: Buffer = Buffer.alloc(0);
 
   // Znaczniki czasu dla niezależnego wygaszania telemetrycznego i watchdoga ciszy
   private lastPresencePacketTime = 0;
   private lastDistanceTime = 0;
+  /** Ostatni zaufany (wygładzony) odczyt dystansu — telemetry.distanceCm bywa
+   * zerowany przy OFF, a ten zostaje do oceny geometrii w momencie zgubienia celu. */
+  private lastTrustedDistanceCm = 0;
+  /** Od kiedy (unix ms) świeże odczyty dystansu są ponad górną bramkę — 0 = w bramce. */
+  private outOfGateSince = 0;
+  /** True, gdy obecność została wygaszona przez górną bramkę dystansu (fizyczne wyjście). */
+  private outOfGateCut = false;
+  /** Od kiedy (unix ms) świeże odczyty dystansu są z powrotem w bramce — podstawa
+   * zdejmowania zaczepu outOfGateCut po geometrycznym powrocie do biurka. */
+  private returnGateSince = 0;
+  /** Start ciągłego AWAY (ustawiany w setState) — baza dla potwierdzania powrotu. */
+  private awayContinuousSince = 0;
+  /** Start okna stabilizacji ON przy powrocie po głębokiej nieobecności. */
+  private deepConfirmSince = 0;
   private lastHeartRateTime = 0;
   private lastBreathRateTime = 0;
   private lastTargetCountTime = 0;
 
-  // Filtry uśredniające (5 odczytów)
-  private distanceFilter = new DistanceFilter(5);
-  private heartFilter = new MedianFilter(5);
-  private breathFilter = new MedianFilter(5);
-  private illuminanceFilter = new IlluminanceFilter(5);
+  // Filtry uśredniające (3 odczyty w trybie balanced)
+  private distanceFilter = new DistanceFilter(3);
+  private heartFilter = new BiometricFilter(3);
+  private breathFilter = new BiometricFilter(3);
+  private illuminanceFilter = new IlluminanceFilter(3);
   private petStreak = 0;
-
-  // Potwierdzenie obecności: ostatni moment, w którym radar dostarczył TWARDY
-  // dowód na realnego człowieka przy biurku (dystans w bramce / biometria /
-  // aktywność wejściowa). Brak odświeżenia przez ghostTimeoutMs = fałszywy cel.
-  private lastCorroboratedAt = 0;
-  /** Lockout po wykryciu fałszywego celu: bit obecności nie może go ponownie
-   *  włączyć, dopóki nie przyjdzie realne potwierdzenie człowieka. */
-  private ghostLockoutUntil = 0;
-  private lastLockoutLogAt = 0;
 
   private activityWatcher: ActivityWatcher | null = null;
 
@@ -113,16 +117,8 @@ export default class RadarListener extends EventEmitter {
         this.handleRawPresence(true);
       } else if (this.presence) {
         this.lastPresencePacketTime = Date.now();
-        this.markCorroborated();
       }
     });
-  }
-
-  /** Twardy dowód na realnego człowieka przy biurku (dystans/biometria/aktywność). */
-  private markCorroborated(): void {
-    this.lastCorroboratedAt = Date.now();
-    // Realny dowód = powrót człowieka — natychmiast zdejmij lockout fałszywego celu
-    this.ghostLockoutUntil = 0;
   }
 
   private async loadSerialPort(): Promise<SerialPortCtor> {
@@ -208,7 +204,7 @@ export default class RadarListener extends EventEmitter {
       this.scheduleTelemetry();
     }
 
-    // Watchdog obecności: jeśli obecność aktywna, ale brak jakiegokolwiek sygnału z radaru przez >8s i brak aktywności myszy/klawiatury -> wygaś
+    // Watchdog obecności: jeśli obecność aktywna, ale brak jakiegokolwiek sygnału z radaru przez >15s i brak aktywności myszy/klawiatury -> wygaś
     if (this.presence) {
       const lastDetectionTime = Math.max(
         this.lastPresencePacketTime,
@@ -219,54 +215,13 @@ export default class RadarListener extends EventEmitter {
       const silenceDuration = lastDetectionTime > 0 ? now - lastDetectionTime : 10000;
       const isInputActive = this.activityWatcher?.isUserActiveRecently(15) ?? false;
 
-      if (silenceDuration > 8000 && !isInputActive) {
+      if (silenceDuration > 15000 && !isInputActive) {
         appendLog(
           'RADAR',
           `Brak jakiegokolwiek sygnału z radaru przez ${(silenceDuration / 1000).toFixed(1)}s — automatyczne wygaszenie obecności (watchdog)`
         );
-        this.handleRawPresence(false);
-        return;
+        this.handleRawPresence(false, 'blind');
       }
-
-      // Watchdog fałszywego celu ("duch"): MR60BHA2 potrafi "zablokować" bit obecności
-      // na 1 (statyczny obiekt / kot bez biometrii / odbicie), gdy użytkownik wyszedł.
-      // Sam bit obecności NIE jest tu potwierdzeniem — liczą się twarde dowody:
-      // świeży dystans w bramce, biometria albo aktywność klawiatury/myszy.
-      // Działa tylko gdy radar faktycznie strumieniuje dane koreboracyjne (dystans/bio)
-      // — instalacje presence-only ("nohb") bez tych strumieni nie są karane.
-      const streamsCorroboration =
-        this.lastDistanceTime > 0 || this.lastHeartRateTime > 0 || this.lastBreathRateTime > 0;
-      const ghostTimeoutMs = Math.max(3000, Number(this.config.get('ghostTimeoutMs')) || 12000);
-      if (
-        streamsCorroboration &&
-        this.lastCorroboratedAt > 0 &&
-        now - this.lastCorroboratedAt > ghostTimeoutMs
-      ) {
-        const ghostSeconds = ((now - this.lastCorroboratedAt) / 1000).toFixed(1);
-        appendLog(
-          'RADAR',
-          `Bit obecności trzymany bez potwierdzenia przez ${ghostSeconds}s (brak dystansu w bramce/biometrii) — fałszywy cel, wygaszam obecność`
-        );
-        const lockoutMs = Math.max(10000, Number(this.config.get('ghostLockoutMs')) || 60000);
-        this.ghostLockoutUntil = now + lockoutMs;
-        this.handleRawPresence(false);
-      }
-    }
-  }
-
-  private async releasePortLocks(portName: string): Promise<void> {
-    try {
-      const currentPid = process.pid;
-      const { exec } = await import('node:child_process');
-      await new Promise<void>((resolve) => {
-        exec(
-          `powershell -NoProfile -Command "Get-Process | Where-Object { ($_.Name -like '*AudioSwitcher*' -or ($_.Name -like '*DeskSense*' -and $_.Id -ne ${currentPid})) } | Stop-Process -Force"`,
-          () => resolve()
-        );
-      });
-      appendLog('RADAR', `Wymuszono zwolnienie blokad portu ${portName}`);
-    } catch {
-      /* ignore */
     }
   }
 
@@ -283,7 +238,6 @@ export default class RadarListener extends EventEmitter {
         this.scheduleReconnect();
         return;
       }
-      this.lastPortName = portName;
       this.lineBuffer = '';
       this.rawBuffer = Buffer.alloc(0);
 
@@ -312,7 +266,10 @@ export default class RadarListener extends EventEmitter {
           port.set({ dtr: true, rts: true }, () => {
             try {
               port.flush(() => {
-                port.write('\r\n', () => {});
+                port.write('\r\n', () => {
+                  this.updateLed();
+                  this.sendDeviceCommand('CMD:STATUS');
+                });
               });
             } catch {}
           });
@@ -322,34 +279,32 @@ export default class RadarListener extends EventEmitter {
         this.emit('status', { port: portName, connected: true } satisfies RadarStatusEvent);
       });
       port.on('data', (chunk: Buffer) => this.onData(chunk));
-      port.on('error', async (err: Error) => {
+      port.on('error', (err: Error) => {
         try {
           port.removeAllListeners();
+          // Zob. stop(): odbiorca dla spóźnionych błędów porzuconych operacji
+          port.on('error', () => {});
           port.destroy();
         } catch {}
         this.port = null;
         appendLog('RADAR', `Błąd portu ${portName}: ${err.message}`);
-        this.handleRawPresence(false);
-        if (/access denied|locked|ebusy|in use|permission/i.test(err.message)) {
-          await this.releasePortLocks(portName);
-        }
+        this.handleRawPresence(false, 'blind');
         this.emit('status', { connected: false, error: err.message } satisfies RadarStatusEvent);
         this.scheduleReconnect();
       });
       port.on('close', () => {
         try {
           port.removeAllListeners();
+          // Zob. stop(): odbiorca dla spóźnionych błędów porzuconych operacji
+          port.on('error', () => {});
         } catch {}
         this.port = null;
-        this.handleRawPresence(false);
+        this.handleRawPresence(false, 'blind');
         if (this.running) this.scheduleReconnect();
       });
     } catch (err: any) {
       appendLog('RADAR', `Błąd otwierania portu: ${err.message || err}`);
-      this.handleRawPresence(false);
-      if (/access denied|locked|ebusy|in use|permission/i.test(String(err.message || err))) {
-        await this.releasePortLocks(this.lastPortName || 'COM');
-      }
+      this.handleRawPresence(false, 'blind');
       this.emit('status', { connected: false, error: (err as Error).message } satisfies RadarStatusEvent);
       this.scheduleReconnect();
     }
@@ -362,7 +317,6 @@ export default class RadarListener extends EventEmitter {
     const delay =
       this.reconnectAttempts < 3 ? 600 : this.reconnectAttempts < 8 ? 1500 : 2500;
     this.reconnectAttempts++;
-    this.lastPortName = null;
     this.emit('status', { connected: false, nextReconnectMs: delay } satisfies RadarStatusEvent);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -384,13 +338,16 @@ export default class RadarListener extends EventEmitter {
       this.port = null;
       try {
         p.removeAllListeners();
+        // Po zdjęciu listenerów porzucony zapis (CloseQuery/abort USB) wyemitowałby
+        // 'error' bez odbiorcy — nieprzechwycony wyjątek + modalny dialog Electrona.
+        p.on('error', () => {});
         if (p.isOpen) {
           await new Promise<void>((resolve) => p.close(() => resolve()));
         }
         p.destroy();
       } catch {}
     }
-    this.handleRawPresence(false);
+    this.handleRawPresence(false, 'blind');
   }
 
   private async resolvePort(): Promise<string | null> {
@@ -425,10 +382,6 @@ export default class RadarListener extends EventEmitter {
   }
 
   private onData(chunk: Buffer): void {
-    if (this.listenerCount('raw') > 0) {
-      this.emit('raw', chunk.toString('utf8'));
-    }
-
     this.rawBuffer = Buffer.concat([this.rawBuffer, chunk]);
     this.scanBinaryFrames();
 
@@ -447,8 +400,33 @@ export default class RadarListener extends EventEmitter {
       // bajty 0x0A w polach typu) — linie z niedozwolonymi znakami kontrolnymi odrzucamy.
       if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(line)) continue;
 
-      // Logowanie surowego odczytu tekstowego z sensora
-      appendLog('RADAR-RAW', line);
+      // Telemetria sprzętowa sensora (DeskSense Device) — parsowana zanim
+      // trafi do RAW, żeby heartbeat FW/UPTIME/TEMP nie zaśmiecał logu.
+      if (line.includes('DeskSense Device')) {
+        const fwMatch = line.match(/FW=([^\s,]+)/i);
+        const upMatch = line.match(/UPTIME=([0-9]+)s/i);
+        const tempMatch = line.match(/TEMP=([0-9.]+)C/i);
+        const luxMatch = line.match(/LUX=([0-9.]+)/i);
+
+        this.telemetry.deviceInfo = {
+          fwVersion: fwMatch ? fwMatch[1] : undefined,
+          uptimeSec: upMatch ? parseInt(upMatch[1], 10) : undefined,
+          chipTempC: tempMatch ? parseFloat(tempMatch[1]) : undefined
+        };
+        if (luxMatch) {
+          const lux = parseFloat(luxMatch[1]);
+          if (Number.isFinite(lux) && lux >= 0) this.updateIlluminance(lux);
+        }
+        this.scheduleTelemetry();
+        continue;
+      }
+
+      // Logowanie surowego odczytu tekstowego z sensora; pomijamy resztki strumienia
+      // binarnego bez treści (pojedyncze znaki typu ')' czy 'H?') — zanieczyszczają log.
+      const alnumCount = (line.match(/[A-Za-z0-9]/g) || []).length;
+      if (line.length >= 5 && alnumCount >= 2) {
+        appendLog('RADAR-RAW', line);
+      }
 
       // JSON format
       if (line.charCodeAt(0) === 123) {
@@ -503,11 +481,9 @@ export default class RadarListener extends EventEmitter {
         }
       }
 
-      // ESPHome log formats (np. 'Distance to detection object': Sending state 74.62000 cm...)
-      // ESPHome log formats (np. 'Distance to detection object': Sending state 74.62000 cm...)
-      if (line.includes('state') || line.includes('[sensor') || line.includes('[binary_sensor')) {
-        // ESPHome log formats. Starsze firmware loguje 'X': Sending state 74.62 cm,
-        // nowsze (np. kit V4.3.1) 'X' >> 74.62 cm. Obsługujemy obie formy.
+      // ESPHome / DeskSense Native OS log formats (np. 'Distance to detection object': Sending state 74.62000 cm... lub 'Entity' >> 74.62 cm)
+      if (line.includes('>>') || line.includes('state') || line.includes('[sensor') || line.includes('[binary_sensor')) {
+        // ESPHome / DeskSense log formats: 'X': Sending state 74.62 cm lub 'X' >> 74.62 cm
         const esphomeMatch = line.match(/'([^']+)'\s*(?::\s*(?:Sending state|Got state|state:?)|\s*>>)\s*([^\s,;]+)/i);
         if (esphomeMatch) {
           const entity = esphomeMatch[1].toLowerCase();
@@ -648,6 +624,7 @@ export default class RadarListener extends EventEmitter {
           this.updateDistance(distCm);
         } else if (val === 0) {
           this.updateDistance(0);
+          this.handleRawPresence(false);
         }
       }
       const plainHrMatch = line.match(/^heart_rate:\s*([0-9.]+)/i);
@@ -686,15 +663,11 @@ export default class RadarListener extends EventEmitter {
   }
 
   /**
-   * Parser binarnego protokołu MR60BHA2 (wg implementacji referencyjnej
-   * ESPHome seeed_mr60bha2):
+   * Parser binarnego protokołu Seeed MR60BHA2 (zarówno surowe ramki fabryczne 0x53 0x59,
+   * jak i ramki ESPHome seeed_mr60bha2 0x01 wg implementacji referencyjnej ESPHome):
    *   [0]=0x01 | [1..2]=id BE | [3..4]=len BE | [5..6]=type BE
    *   [7]=cksum nagłówka (XOR b0..b6, inv) | [8..8+len)=payload | ostatni=cksum danych
    * Typy: 0x0A14 oddech, 0x0A15 tętno, 0x0A16 dystans, 0x0F09 obecność.
-   */
-  /**
-   * Parser binarnego protokołu Seeed MR60BHA2 (zarówno surowe ramki fabryczne 0x53 0x59,
-   * jak i ramki ESPHome seeed_mr60bha2 0x01).
    */
   private scanBinaryFrames(): void {
     while (this.rawBuffer.length >= 7) {
@@ -952,8 +925,20 @@ export default class RadarListener extends EventEmitter {
     }
   }
 
+  private autoTuneWasCalibrated = false;
+
   private feedAutoTuner(sample: Sample): void {
     this.autoTuner.feedSample(sample);
+    const gate = this.autoTuner.getDynamicGate();
+    if (gate.isCalibrated !== this.autoTuneWasCalibrated) {
+      this.autoTuneWasCalibrated = gate.isCalibrated;
+      if (gate.isCalibrated) {
+        appendLog(
+          'RADAR',
+          `Auto-tuning: strefa fotela wyuczona (${gate.centerCm} cm) — adaptacyjna bramka górna ${gate.maxGateCm} cm`
+        );
+      }
+    }
     this.telemetry.autoTuning = this.autoTuner.getStatus();
   }
 
@@ -962,12 +947,7 @@ export default class RadarListener extends EventEmitter {
   private lastTelemetrySig = '';
 
   private scheduleTelemetry(): void {
-    const t = this.telemetry;
-    const tun = t.autoTuning;
-    const sig =
-      `${t.presence ? 1 : 0}|${t.distanceCm ?? 0}|${t.targetCount ?? 0}|${t.heartRate ?? 0}|${t.breathRate ?? 0}|${t.illuminanceLux ?? ''}|` +
-      `${t.detectedPerson ?? ''}|${tun?.mode ?? ''}|${Math.floor((tun?.samplesCount ?? 0) / 10)}|` +
-      `${Math.round((tun?.noiseFloor ?? 0) / 5)}`;
+    const sig = this.buildTelemetrySig();
     if (sig === this.lastTelemetrySig) return;
 
     const now = Date.now();
@@ -993,64 +973,110 @@ export default class RadarListener extends EventEmitter {
     const tun = t.autoTuning;
     return (
       `${t.presence ? 1 : 0}|${t.distanceCm ?? 0}|${t.targetCount ?? 0}|${t.heartRate ?? 0}|${t.breathRate ?? 0}|${t.illuminanceLux ?? ''}|` +
-      `${t.detectedPerson ?? ''}|${tun?.mode ?? ''}|${Math.floor((tun?.samplesCount ?? 0) / 10)}|` +
+      `${t.detectedPerson ?? ''}|${Math.floor((tun?.samplesCount ?? 0) / 10)}|` +
       `${Math.round((tun?.noiseFloor ?? 0) / 5)}`
     );
   }
 
+  private appliedSmoothingMode = '';
+
   private applySmoothingConfig(): void {
-    const mode = this.config.get('radarSmoothingMode') || 'ultra';
+    const mode = this.config.get('radarSmoothingMode') || 'balanced';
+    if (mode === this.appliedSmoothingMode) return;
+    this.appliedSmoothingMode = mode;
     this.distanceFilter.setMode(mode);
-    if (mode === 'raw') {
-      this.heartFilter.setSize(1);
-      this.breathFilter.setSize(1);
-    } else if (mode === 'balanced') {
-      this.heartFilter.setSize(3);
-      this.breathFilter.setSize(3);
-    } else {
-      this.heartFilter.setSize(5);
-      this.breathFilter.setSize(5);
-    }
+    this.heartFilter.setMode(mode);
+    this.breathFilter.setMode(mode);
+  }
+
+  private lastDspLog: Record<string, { val: number; time: number }> = {};
+
+  /** Log DSP tylko przy realnej zmianie wartości i nie częściej niż 1/s na metrykę
+   * (dawniej ~30 linii/s czyniło ring buffer bezużytecznym do diagnostyki). */
+  private logDsp(metric: string, label: string, value: number, raw: number, unit: string, rawWord = 'surowy'): void {
+    const now = Date.now();
+    const last = this.lastDspLog[metric];
+    if (last && (last.val === value || now - last.time < 1000)) return;
+    this.lastDspLog[metric] = { val: value, time: now };
+    appendLog('RADAR-DSP', `${label}: ${value} ${unit} (${rawWord}: ${raw} ${unit})`);
   }
 
   private updateDistance(distCm: number): void {
     if (distCm <= 0 || distCm > 800) {
       this.telemetry.distanceCm = 0;
       this.distanceFilter.reset();
+      // Pusty odczyt w nieobecności = czysty sygnał dla pomiaru szumu auto-tuningu.
+      this.feedAutoTuner({
+        distanceCm: 0,
+        heartRate: 0,
+        breathRate: 0,
+        isSeated: Boolean(this.presence || this.state === 'desk')
+      });
       return;
     }
     this.lastDistanceTime = Date.now();
     this.applySmoothingConfig();
 
     const smoothedCm = this.distanceFilter.push(distCm);
+    recordSample('dist', distCm);
     this.telemetry.distanceCm = smoothedCm;
     this.telemetry.lastUpdate = Date.now();
+    this.lastTrustedDistanceCm = smoothedCm;
 
-    // Dystans w aktywnej strefie fotela = dowód obecności. Dystans potwierdza
-    // człowieka, gdy biometria była ostatnio widziana (krótka przerwa w HR/BR nie
-    // zabija obecności) albo radar w ogóle jej nie raportuje (instalacja presence-only).
-    const gateEnabled = this.config.get('radarDistanceGateEnabled') !== false;
-    const minGate = Number(this.config.get('radarMinDistanceCm') ?? 40);
-    const maxGate = Number(this.config.get('radarMaxDistanceCm') ?? 110);
-    const nowMs = Date.now();
-    const bioRecent = this.lastHeartRateTime > nowMs - 20000 || this.lastBreathRateTime > nowMs - 20000;
-    const bioEver = this.lastHeartRateTime > 0 || this.lastBreathRateTime > 0;
-    if (!gateEnabled && smoothedCm > 0) {
-      // Bez bramki każdy realny dystans potwierdza obecność
-      this.markCorroborated();
-    } else if (smoothedCm >= minGate && smoothedCm <= maxGate && (!bioEver || bioRecent)) {
-      // W bramce i (presence-only) albo (człowiek potwierdzony biometrią niedawno)
-      this.markCorroborated();
+    this.logDsp('distance', 'Dystans', smoothedCm, distCm, 'cm');
+
+    // Górna bramka dystansu: cel powyżej radarMaxDistanceCm przez 1,2 s świeżych
+    // odczytów to fizyczne wyjście z zasięgu stacji — wygaszamy obecność,
+    // nie czekając aż firmware odwróci swój bit obecności. Bez tej bramki
+    // wyjście z pomieszczenia potrafiło trzymać DESK kilkanaście sekund.
+    // Po kalibracji auto-tuningu bramka poszerza się o wyuczony margines fotela
+    // (getDynamicGate jest widen-only względem configu — nigdy nie zawęża).
+    const maxGate = this.autoTuner.getDynamicGate().maxGateCm;
+
+    // Kasowanie zaczepu wyjścia WYŁĄCZNIE geometrycznie: świeże odczyty z
+    // powrotem w bramce przez 1 s = cel fizycznie wrócił przy biurko. Ramka ON
+    // tego zaczepu nie zdejmuje (patrz handleRawPresence).
+    if (this.outOfGateCut) {
+      if (smoothedCm <= maxGate) {
+        if (this.returnGateSince === 0) {
+          this.returnGateSince = Date.now();
+        } else if (Date.now() - this.returnGateSince >= 1000) {
+          this.returnGateSince = 0;
+          this.outOfGateCut = false;
+          appendLog(
+            'RADAR',
+            `Cel z powrotem w bramce (${Math.round(smoothedCm)} cm, bramka ${maxGate} cm) — zdejmuje zaczep wyjścia`
+          );
+        }
+      } else {
+        this.returnGateSince = 0;
+      }
     }
 
-    appendLog('RADAR-DSP', `Dystans: ${smoothedCm} cm (surowy: ${distCm} cm)`);
+    if (this.config.get('radarDistanceGateEnabled') !== false && this.presence) {
+      if (smoothedCm > maxGate) {
+        if (this.outOfGateSince === 0) {
+          this.outOfGateSince = Date.now();
+        } else if (Date.now() - this.outOfGateSince >= 1200) {
+          this.outOfGateSince = 0;
+          appendLog(
+            'RADAR',
+            `Cel ${Math.round(smoothedCm)} cm ponad górną bramkę (${maxGate} cm) — wygaszam obecność`
+          );
+          this.outOfGateCut = true;
+          this.handleRawPresence(false);
+          return;
+        }
+      } else {
+        this.outOfGateSince = 0;
+      }
+    }
 
     this.feedAutoTuner({
       distanceCm: smoothedCm,
       heartRate: this.telemetry.heartRate || 0,
       breathRate: this.telemetry.breathRate || 0,
-      isSeated: Boolean(this.presence || this.state === 'desk'),
-      rawPresence: this.presence
+      isSeated: Boolean(this.presence || this.state === 'desk')
     });
 
     this.scheduleTelemetry();
@@ -1091,18 +1117,17 @@ export default class RadarListener extends EventEmitter {
     this.applySmoothingConfig();
 
     const smoothedBpm = this.heartFilter.push(bpm);
+    recordSample('hr', bpm);
     this.telemetry.heartRate = smoothedBpm;
     this.telemetry.lastUpdate = Date.now();
 
-    appendLog('RADAR-DSP', `Tętno: ${smoothedBpm} BPM (surowe: ${bpm} BPM)`);
-    this.markCorroborated();
+    this.logDsp('heart', 'Tętno', smoothedBpm, bpm, 'BPM', 'surowe');
 
     this.feedAutoTuner({
       distanceCm: this.telemetry.distanceCm || 0,
       heartRate: smoothedBpm,
       breathRate: this.telemetry.breathRate || 0,
-      isSeated: Boolean(this.presence || this.state === 'desk'),
-      rawPresence: this.presence
+      isSeated: Boolean(this.presence || this.state === 'desk')
     });
 
     this.scheduleTelemetry();
@@ -1120,18 +1145,17 @@ export default class RadarListener extends EventEmitter {
     this.applySmoothingConfig();
 
     const smoothedRpm = this.breathFilter.push(rpm);
+    recordSample('br', rpm);
     this.telemetry.breathRate = smoothedRpm;
     this.telemetry.lastUpdate = Date.now();
 
-    appendLog('RADAR-DSP', `Oddech: ${smoothedRpm} RPM (surowy: ${rpm} RPM)`);
-    this.markCorroborated();
+    this.logDsp('breath', 'Oddech', smoothedRpm, rpm, 'RPM');
 
     this.feedAutoTuner({
       distanceCm: this.telemetry.distanceCm || 0,
       heartRate: this.telemetry.heartRate || 0,
       breathRate: smoothedRpm,
-      isSeated: Boolean(this.presence || this.state === 'desk'),
-      rawPresence: this.presence
+      isSeated: Boolean(this.presence || this.state === 'desk')
     });
 
     this.scheduleTelemetry();
@@ -1144,31 +1168,68 @@ export default class RadarListener extends EventEmitter {
     this.scheduleTelemetry();
   }
 
-  private handleRawPresence(rawPresent: boolean): void {
+  /**
+   * `source='blind'` oznacza, że radar NIE WIDZI (milczenie strumienia, błąd
+   * portu) — wtedy aktywność wejściowa ratuje obecność przez dłuższe okno.
+   * `source='frame'` to jawny raport radaru "pomieszczenie puste" — ratunek
+   * wejściowy ma wtedy krótkie okno, bo zaufanie Radarowi skraca czas do
+   * przejścia w AWAY (wcześniej 15 s okno trzymało DESK ~15 s po wyjściu).
+   */
+  private handleRawPresence(rawPresent: boolean, source: 'frame' | 'blind' = 'frame'): void {
+    if (source === 'frame') {
+      recordSample('presence', rawPresent ? 1 : 0);
+    }
     if (rawPresent) {
       this.lastPresencePacketTime = Date.now();
+      this.outOfGateSince = 0;
+      // outOfGateCut celowo NIE jest tu kasowany: pojedyncza ramka ON z odbicia
+      // (ghost przy 130+ cm w trakcie odchodzenia) wycierała dowód wyjścia i OFF
+      // po niej wpadał w 5 s ochronę dropoutową, drastycznie wydłużając AWAY.
+      // Zaczep zdejmuje wyłącznie geometria — patrz updateDistance.
+    }
+
+    // Potwierdzanie powrotu po głębokiej nieobecności: po długim ciągłym AWAY
+    // sam bit ON nie przełącza mikrofonu — bit musi wytrzymać stabilnie
+    // deepAwayConfirmMs (krótkie błyski odbić/wielodrogu wygasają po drodze).
+    // Aktywność klawiatury/myszy potwierdza człowieka natychmiast.
+    if (rawPresent && !this.presence && this.isDeepAwayConfirmActive()) {
+      const inputActive = this.activityWatcher?.isUserActiveRecently(2) ?? false;
+      if (!inputActive) {
+        const confirmMs = Number(this.config.get('radarDeepAwayConfirmMs')) || 3000;
+        if (this.deepConfirmSince === 0) {
+          this.deepConfirmSince = Date.now();
+          appendLog(
+            'RADAR',
+            `Długa nieobecność (${this.formatAwayDuration()}) — wymagam ${(confirmMs / 1000).toFixed(0)} s stabilnego sygnału obecności przed przełączeniem`
+          );
+        }
+        if (Date.now() - this.deepConfirmSince < confirmMs) {
+          return;
+        }
+        this.deepConfirmSince = 0;
+        appendLog('RADAR', 'Obecność po nieobecności ustabilizowana — potwierdzam powrót');
+      } else {
+        this.deepConfirmSince = 0;
+        appendLog('RADAR', 'Powrót po długiej nieobecności potwierdzony aktywnością wejścia');
+      }
+    } else if (!rawPresent) {
+      this.deepConfirmSince = 0;
     }
 
     let effectivePresence = rawPresent;
 
-    // 0. Lockout fałszywego celu: po wykryciu ducha bit obecności nie może
-    //    samodzielnie wznowić obecności. Realne dowody (dystans w bramce /
-    //    biometria / aktywność) i tak działają — odświeżają lastCorroboratedAt
-    //    i czyszczą lockout w markCorroborated().
-    const isInputActiveNow = this.activityWatcher?.isUserActiveRecently(15) ?? false;
-    if (effectivePresence && Date.now() < this.ghostLockoutUntil && !isInputActiveNow) {
-      // Odnawiamy lockout przy każdym "gołym" bicie presence — duch nie odblokuje
-      // się po upływie okna, chyba że przyjdzie prawdziwy dowód człowieka.
-      const lockoutMs = Math.max(10000, Number(this.config.get('ghostLockoutMs')) || 60000);
-      this.ghostLockoutUntil = Date.now() + lockoutMs;
-      if (Date.now() - this.lastLockoutLogAt > 30000) {
-        this.lastLockoutLogAt = Date.now();
-        appendLog(
-          'RADAR',
-          `Ignoruję bit obecności — w lockoucie po fałszywym celu (${((this.ghostLockoutUntil - Date.now()) / 1000).toFixed(0)}s). Czekam na twardy dowód.`
-        );
+    // Powrót wymaga geometrii: dopóki trzyma się zaczep wyjścia, ramka ON przy
+    // dystansie nadal ponad górną bramką nie odtwarza obecności (ghost ON na
+    // odbiciu od fotela/ściany po wyjściu przełączał z powrotem na DESK na
+    // kilka-kilkanaście sekund). Ramka ON bez świeżego dystansu przepuszcza —
+    // awaria strumienia nie może uwięzić użytkownika w AWAY.
+    if (rawPresent && this.outOfGateCut && !this.presence) {
+      const maxGate = this.autoTuner.getDynamicGate().maxGateCm;
+      const distFresh =
+        this.lastTrustedDistanceCm > 0 && Date.now() - this.lastDistanceTime < 5000;
+      if (distFresh && this.lastTrustedDistanceCm > maxGate) {
+        return;
       }
-      effectivePresence = false;
     }
 
     // 1. Filtr zwierzaka (kot na fotelu)
@@ -1179,9 +1240,14 @@ export default class RadarListener extends EventEmitter {
 
     // 2. Aktywność wejściowa (klawiatura / mysz) - potwierdzenie człowieka
     if (!effectivePresence) {
-      const isInputActive = this.activityWatcher?.isUserActiveRecently(15) ?? false;
+      const inputWindowSec = source === 'blind' ? 15 : 1;
+      const isInputActive = this.activityWatcher?.isUserActiveRecently(inputWindowSec) ?? false;
       if (isInputActive) {
-        appendLog('RADAR', 'Utrzymuję obecność przy biurku — aktywność klawiatury/myszy');
+        // Log tylko przy realnym "ratunku" obecności — radar potrafi migać OFF
+        // wielokrotnie na minutę podczas pisania i spamował ring buffer.
+        if (!this.presence) {
+          appendLog('RADAR', `Utrzymuję obecność przy biurku — aktywność klawiatury/myszy (okno ${inputWindowSec} s)`);
+        }
         effectivePresence = true;
         this.petStreak = 0;
       }
@@ -1190,6 +1256,9 @@ export default class RadarListener extends EventEmitter {
     if (!effectivePresence) {
       if (isPet) {
         this.telemetry.detectedPerson = 'pet';
+        // Dystans przy wykrytym zwierzaku jest niepewny — pomiar może należeć
+        // do zwierzęcia, nie do człowieka (UI pokazuje "Cel niepewny (kot?)").
+        this.telemetry.distanceTrusted = false;
       } else {
         this.telemetry.heartRate = 0;
         this.telemetry.breathRate = 0;
@@ -1203,6 +1272,7 @@ export default class RadarListener extends EventEmitter {
       }
     } else {
       this.telemetry.detectedPerson = 'me';
+      this.telemetry.distanceTrusted = true;
     }
 
     this.telemetry.presence = effectivePresence;
@@ -1262,18 +1332,6 @@ export default class RadarListener extends EventEmitter {
   setPresence(present: boolean): void {
     if (this.presence === present) return;
     this.presence = present;
-    if (present) {
-      // Start sesji obecności: nadajemy punkt odniesienia do watchdoga fałszywego celu.
-      // Jeśli bit obecności leci, ale żaden twardy dowód (dystans w bramce / biometria /
-      // aktywność) nie odświeży go przez GHOST_TIMEOUT_MS — wygaszamy.
-      if (this.lastCorroboratedAt === 0) {
-        this.lastCorroboratedAt = Date.now();
-      }
-    } else {
-      // Zamknięcie sesji obecności: zeruj potwierdzenie, żeby kolejna sesja
-      // (duch po powrocie) też wymagała twardych dowodów.
-      this.lastCorroboratedAt = 0;
-    }
     if (this.deskTimer) {
       clearTimeout(this.deskTimer);
       this.deskTimer = null;
@@ -1290,11 +1348,38 @@ export default class RadarListener extends EventEmitter {
         this.setState('desk');
       }, deskMs);
     } else {
-      const awayMs = Math.max(250, Number(this.config.get('timeoutAwayMs')) || 2000);
+      const awayMs = Math.max(250, Number(this.config.get('timeoutAwayMs')) || 3000);
+      // Dowód wtórny obecności: radar potrafi stracić target na kilka sekund przy
+      // nieruchomym siedzeniu. Pomiar 2026-08-29 (5 min czytania): dropout
+      // ~4 s (OFF 02:50:24-26, ON 02:50:28) — CAŁY strumień umarł (bio też),
+      // więc treść ramek NIE rozróżnia dropoutu od wyjścia. Rozróżnia geometria:
+      // przy prawdziwym wyjściu dystans rośnie i przecina górną bramkę ( osobna
+      // sciezka 1,2 s, flaga outOfGateCut), przy dropoucie dystans znika W MIEJSCU
+      // w srodku bramki. Wtedy (i tylko wtedy), gdy bio jest swieze — trzymamy
+      // 5 s (dropout mierzy ~4 s). Stanu telemetry.heartRate/breathRate NIE wolno
+      // tu czytać — handleRawPresence zeruje je PRZED setPresence (poprzednio
+      // bio-hold był przez to martwy); liczymy z timestampów ostatniej ramki bio.
+      const bioFresh =
+        Date.now() - this.lastHeartRateTime < 10000 ||
+        Date.now() - this.lastBreathRateTime < 10000;
+      const dropoutSuspect = !this.outOfGateCut && bioFresh;
+      // Zaczep wyjścia (geometria udowodniła przekroczenie bramki): AWAY po
+      // 600 ms — cel fizycznie odszedł, dalsze czekanie tylko opóźnia słuchawki.
+      const effectiveAwayMs = this.outOfGateCut
+        ? Math.min(awayMs, 600)
+        : dropoutSuspect
+          ? Math.max(awayMs, 5000)
+          : awayMs;
+      if (dropoutSuspect) {
+        appendLog(
+          'RADAR',
+          `Obecność OFF wewnątrz bramki przy świeżej biometrii — podejrzenie dropoutu radaru, trzymam ${(Math.max(awayMs, 5000) / 1000).toFixed(0)} s zanim przełączę na AWAY`
+        );
+      }
       this.awayTimer = setTimeout(() => {
         this.awayTimer = null;
         this.setState('away');
-      }, awayMs);
+      }, effectiveAwayMs);
     }
     this.emit('status', {
       presence: present,
@@ -1305,9 +1390,29 @@ export default class RadarListener extends EventEmitter {
     } satisfies RadarStatusEvent);
   }
 
+  /** Czy aktywna ochrona "potwierdzania powrotu" po głębokiej nieobecności. */
+  private isDeepAwayConfirmActive(): boolean {
+    if (this.config.get('radarDeepAwayConfirm') === false) return false;
+    if (this.presence || this.state !== 'away') return false;
+    const minMs = Number(this.config.get('radarDeepAwayMinMs')) || 600000;
+    return this.awayContinuousSince > 0 && Date.now() - this.awayContinuousSince >= minMs;
+  }
+
+  private formatAwayDuration(): string {
+    if (this.awayContinuousSince === 0) return '?';
+    const sec = Math.round((Date.now() - this.awayContinuousSince) / 1000);
+    if (sec < 3600) return `${Math.floor(sec / 60)} min`;
+    return `${Math.floor(sec / 3600)} h ${Math.floor((sec % 3600) / 60)} min`;
+  }
+
   private setState(state: DeskState): void {
     if (this.state === state || !this.running) return;
     this.state = state;
+    // Znacznik ciągłej nieobecności — podstawa "potwierdzania powrotu"
+    // (ochrona przed fałszywym ON z odbić po długim wyjściu z pokoju).
+    this.awayContinuousSince = state === 'away' ? Date.now() : 0;
+    this.deepConfirmSince = 0;
+    this.updateLed(state);
     this.emit(state, Date.now());
     this.emit('status', {
       presence: this.presence,
@@ -1315,5 +1420,57 @@ export default class RadarListener extends EventEmitter {
       telemetry: this.telemetry,
       since: Date.now()
     } satisfies RadarStatusEvent);
+  }
+
+  sendDeviceCommand(command: string): void {
+    if (!this.port || !this.port.isOpen) return;
+    try {
+      this.port.write(`${command}\r\n`, () => {});
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private currentLedState: 'desk' | 'away' | 'headset' | 'mute' | 'off' = 'away';
+
+  updateLed(state?: 'desk' | 'away' | 'headset' | 'mute' | 'off'): void {
+    if (state) {
+      this.currentLedState = state;
+    }
+    if (!this.port || !this.port.isOpen) return;
+
+    const enabled = this.config.get('sensorLedEnabled') !== false;
+    if (!enabled || this.currentLedState === 'off') {
+      this.sendDeviceCommand('SET:LED=0,0,0,0');
+      return;
+    }
+
+    const brightness = Math.max(0, Math.min(100, Number(this.config.get('sensorLedBrightness')) ?? 25));
+    let hex = '#22c55e';
+    if (this.currentLedState === 'mute') {
+      hex = this.config.get('sensorLedMuteColor') || '#ef4444';
+    } else if (this.currentLedState === 'away' || this.currentLedState === 'headset') {
+      hex = this.config.get('sensorLedAwayColor') || '#f59e0b';
+    } else {
+      hex = this.config.get('sensorLedDeskColor') || '#22c55e';
+    }
+
+    const [r, g, b] = this.hexToRgb(hex);
+    this.sendDeviceCommand(`SET:LED=${r},${g},${b},${brightness}`);
+  }
+
+  private hexToRgb(hex: string): [number, number, number] {
+    const clean = hex.replace('#', '').trim();
+    if (clean.length === 6) {
+      const num = parseInt(clean, 16);
+      return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
+    }
+    if (clean.length === 3) {
+      const r = parseInt(clean[0] + clean[0], 16);
+      const g = parseInt(clean[1] + clean[1], 16);
+      const b = parseInt(clean[2] + clean[2], 16);
+      return [r, g, b];
+    }
+    return [34, 197, 94];
   }
 }

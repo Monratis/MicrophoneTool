@@ -1,5 +1,6 @@
 import { Tray, Menu, nativeImage, app } from 'electron';
 import type { AppContext } from './appContext';
+import { toggleMuteWithFeedback } from './appContext';
 
 const STATE_LABEL: Record<string, string> = {
   desk: 'Przy biurku (Stacjonarny)',
@@ -48,15 +49,9 @@ export function refreshTray(ctx: AppContext, tray: Electron.Tray): void {
     { label: 'Ustawienia…', click: () => ctx.showSettings() },
     {
       label: 'Wycisz / Odcisz mikrofon (Ctrl+Shift+M)',
-      click: async () => {
-        const res = await ctx.controller.toggleDeviceMute();
-        const isMuted = res?.isMuted;
-        ctx.pushEvent('toast', { message: isMuted ? 'Mikrofon wyciszony 🔇' : 'Mikrofon aktywny 🎙️' });
-        ctx.showWindowsNotification(
-          'DeskSense',
-          isMuted ? 'Mikrofon został wyciszony 🔇' : 'Wyciszenie wyłączone 🎙️'
-        );
-        ctx.refreshSnapshot();
+      // Wspólny helper: dioda + toast + powiadomienie + snapshot (jak skrót i IPC)
+      click: () => {
+        void toggleMuteWithFeedback(ctx);
       }
     },
     { type: 'separator' },

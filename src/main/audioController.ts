@@ -34,10 +34,6 @@ export default class AudioController extends EventEmitter {
     return this.svv.listRecordingDevices(forceFresh);
   }
 
-  toggleMute(target?: string): Promise<{ ok: boolean; isMuted?: boolean }> {
-    return this.svv.toggleMute(target);
-  }
-
   setMute(target: string, mute: boolean): Promise<{ ok: boolean; isMuted?: boolean }> {
     return this.svv.setMute(target, mute);
   }

@@ -1,11 +1,12 @@
 export type AutoTuningSpeed = 'balanced' | 'fast' | 'conservative';
 
+import { appendLog } from './logger';
+
 interface Sample {
   distanceCm: number;
   heartRate: number;
   breathRate: number;
   isSeated: boolean;
-  rawPresence: boolean;
 }
 
 import type Config from './config';
@@ -28,9 +29,12 @@ export default class AutoTuner {
 
   private samplesCount: number;
   private noiseSamplesCount = 0;
-  private stableStreak = 0;
-  private lastDistanceSample = 0;
   private lastCountAt = 0;
+  private lastNoiseAt = 0;
+  private awaySince = 0;
+  private lastNoiseLogAt = 0;
+  /** Kroczące okno flag "próbka siedzenia w wyuczonej strefie" — podstawa realnej stabilności modelu. */
+  private gateWindow: boolean[] = [];
   private lastAdaptedAt = Date.now();
   private lastSavedAt = Date.now();
   private lastPersistedSig = '';
@@ -39,8 +43,9 @@ export default class AutoTuner {
     this.config = config;
 
     let distCenter = Number(config.get('radarLearnedDistanceCenter') || 0);
-    // Sanityzacja: jeśli historycznie zapisano dystans spoza realnego biurka (np. 141 cm ze ściany/tła), resetujemy do 0
-    if (distCenter < 35 || distCenter > 120) {
+    // Sanityzacja: jeśli historycznie zapisano dystans spoza realnego biurka (np. ze ściany/tła), resetujemy do 0.
+    // Dolna granica 20 cm — sensor może być zamontowany blisko użytkownika (krótkie ramię).
+    if (distCenter < 20 || distCenter > 120) {
       distCenter = 0;
     }
     this.distanceMean = distCenter;
@@ -71,21 +76,25 @@ export default class AutoTuner {
     }
   }
 
-  feedSample({ distanceCm, heartRate, breathRate, isSeated, rawPresence }: Sample): void {
+  feedSample({ distanceCm, heartRate, breathRate, isSeated }: Sample): void {
     if (this.config.get('radarAutoTuningEnabled') === false) return;
     this.applySpeedConfig();
 
     const now = Date.now();
 
-    // Uczymy się TYLKO w realnym korytarzu biurkowym (35 - 120 cm).
-    // Odczyty powyżej 120 cm (stanie, tło, ściana) nie mogą zafałszować środka biurka.
-    if (isSeated && distanceCm >= 35 && distanceCm <= 120) {
+    // Uczymy się w realnym korytarzu biurkowym (20 - 120 cm), także przy montażu
+    // sensora blisko użytkownika. Odczyty powyżej 120 cm (stanie, tło, ściana)
+    // nie mogą zafałszować środka biurka.
+    if (isSeated && distanceCm >= 20 && distanceCm <= 120) {
       // Licznik próbek: feedSample leci osobno dla dystansu/tętna/oddechu
       // (3× na jeden odczyt radaru) — throttling 250 ms liczy burst jako
       // JEDNĄ próbkę, inaczej kalibracja "gotowa" po ~7 prawdziwych odczytach.
       if (now - this.lastCountAt > 250) {
         this.lastCountAt = now;
         this.samplesCount++;
+        // Ocena dopasowania modelu: czy świeży odczyt mieści się w wyuczonej strefie.
+        this.gateWindow.push(this.isInsideLearnedZone(distanceCm));
+        if (this.gateWindow.length > 40) this.gateWindow.shift();
       }
       this.lastAdaptedAt = now;
 
@@ -97,13 +106,6 @@ export default class AutoTuner {
         this.distanceMean = this.distanceMean + this.alphaDist * (distanceCm - this.distanceMean);
         this.distanceMad = this.distanceMad + this.alphaDist * (diff - this.distanceMad);
       }
-
-      if (this.lastDistanceSample > 0 && Math.abs(distanceCm - this.lastDistanceSample) <= 4) {
-        this.stableStreak = Math.min(100, this.stableStreak + 2);
-      } else {
-        this.stableStreak = Math.max(0, this.stableStreak - 1);
-      }
-      this.lastDistanceSample = distanceCm;
 
       if (heartRate >= 48 && heartRate <= 115) {
         if (this.heartRateMean === 0) {
@@ -123,16 +125,46 @@ export default class AutoTuner {
     }
 
     if (!isSeated) {
-      this.noiseSamplesCount++;
-      const currentNoiseReading = rawPresence ? 80 : distanceCm > 0 ? 35 : 0;
-      this.noiseFloor = this.noiseFloor + this.alphaNoise * (currentNoiseReading - this.noiseFloor);
-      this.noiseFloor = Math.max(0, Math.min(100, this.noiseFloor));
+      // Realny szum: udział odczytów w USTABILIZOWANEJ nieobecności (po 15 s od
+      // przejścia w AWAY), w których radar widzi echo w strefie fotela.
+      // Pierwsze sekundy nieobecności wykluczamy celowo — podejście do biurka
+      // i wygaszanie obecności (bramki, bio-hold) samo z siebie generuje echa
+      // w strefie i zawyżałoby wskaźnik. Echo poza strefą (chodzenie po pokoju)
+      // jest neutralne — nie jest to fałszywa okupacja fotela.
+      if (this.awaySince === 0) {
+        this.awaySince = now;
+      }
+      if (now - this.awaySince >= 15000 && now - this.lastNoiseAt > 250) {
+        this.lastNoiseAt = now;
+        this.noiseSamplesCount++;
+        const inZone = distanceCm > 0 && this.distanceMean > 0 && this.isInsideLearnedZone(distanceCm);
+        const noiseEvent = inZone ? 100 : 0;
+        this.noiseFloor = this.noiseFloor + this.alphaNoise * (noiseEvent - this.noiseFloor);
+        this.noiseFloor = Math.max(0, Math.min(100, this.noiseFloor));
+        // Log diagnostyczny: stały dystans godzinami = zamarznięte odbicie fotela;
+        // zmienny dystans + biometria = zwierzak na fotelu.
+        if (inZone && now - this.lastNoiseLogAt > 30000) {
+          this.lastNoiseLogAt = now;
+          appendLog(
+            'RADAR-AUTO',
+            `Fałszywe echo w strefie fotela: ${Math.round(distanceCm)} cm (szum ${Math.round(this.noiseFloor)}%, tętno ${heartRate || '—'}, oddech ${breathRate || '—'})`
+          );
+        }
+      }
+    } else {
+      this.awaySince = 0;
     }
 
     if (now - this.lastSavedAt > 45000 && this.samplesCount >= 10) {
       this.persist();
       this.lastSavedAt = now;
     }
+  }
+
+  /** Czy odczyt mieści się w wyuczonej strefie fotela (środek ± adaptacyjny margines). */
+  private isInsideLearnedZone(distanceCm: number): boolean {
+    const margin = Math.max(12, this.distanceMad * 2);
+    return Math.abs(distanceCm - this.distanceMean) <= margin;
   }
 
   getDynamicGate(): { minGateCm: number; maxGateCm: number; centerCm: number; isCalibrated: boolean } {
@@ -149,7 +181,7 @@ export default class AutoTuner {
     }
 
     const margin = Math.max(18, Math.min(35, Math.round(this.distanceMad * 2.0 + 8)));
-    const calculatedMin = Math.max(25, Math.round(this.distanceMean - margin));
+    const calculatedMin = Math.max(15, Math.round(this.distanceMean - margin));
     const calculatedMax = Math.min(180, Math.round(this.distanceMean + margin + 8));
 
     // Guardrails: Auto-Tuning może tylko ROZSZERZAĆ strefę fotela, a nie odcinać poprawne siedzenie
@@ -161,65 +193,29 @@ export default class AutoTuner {
     };
   }
 
-  getAdaptedBiometrics(): {
-    heartRateAvg: number;
-    heartRateMin: number;
-    heartRateMax: number;
-    breathRateAvg: number;
-    breathRateMin: number;
-    breathRateMax: number;
-    isCalibrated: boolean;
-  } {
-    const hr = Math.round(this.heartRateMean);
-    const br = Math.round(this.breathRateMean);
-    const cfgHrMin = Number(this.config.get('userHeartRateMin') ?? 55);
-    const cfgHrMax = Number(this.config.get('userHeartRateMax') ?? 78);
-
-    return {
-      heartRateAvg: hr || 0,
-      heartRateMin: hr > 0 ? Math.max(45, Math.min(cfgHrMin, hr - 15)) : cfgHrMin,
-      heartRateMax: hr > 0 ? Math.min(130, Math.max(cfgHrMax, hr + 18)) : cfgHrMax,
-      breathRateAvg: br || 0,
-      breathRateMin: br > 0 ? Math.max(7, br - 5) : 10,
-      breathRateMax: br > 0 ? Math.min(32, Math.max(26, br + 6)) : 22,
-      isCalibrated: this.samplesCount >= 20 && hr > 0
-    };
-  }
-
   getStatus() {
     const gate = this.getDynamicGate();
-    const bio = this.getAdaptedBiometrics();
     const enabled = this.config.get('radarAutoTuningEnabled') !== false;
 
-    let mode: 'learning' | 'tracking' | 'idle' = 'idle';
-    if (enabled) {
-      mode = this.samplesCount < 20 ? 'learning' : 'tracking';
+    // Realna stabilność: odsetek ostatnich próbek siedzenia trafiających
+    // w wyuczoną strefę. Zanim okno się napełni (>= 10 próbek) — model w nauce.
+    let stabilityScore = 0;
+    if (this.gateWindow.length >= 10) {
+      const inGate = this.gateWindow.filter((hit) => hit).length;
+      stabilityScore = Math.round((inGate / this.gateWindow.length) * 100);
     }
-
-    const stabilityScore = Math.min(
-      100,
-      Math.max(
-        10,
-        Math.round(
-          (this.samplesCount >= 20 ? 50 : this.samplesCount * 2.5) +
-            this.stableStreak * 0.5 -
-            this.noiseFloor * 0.2
-        )
-      )
-    );
 
     return {
       enabled,
-      mode,
-      speed: this.config.get('radarAutoTuningSpeed') || 'balanced',
       noiseFloor: Math.round(this.noiseFloor),
       samplesCount: this.samplesCount,
       adaptedDistanceCenter: gate.centerCm,
       adaptedDistanceMin: gate.minGateCm,
       adaptedDistanceMax: gate.maxGateCm,
-      adaptedHeartRateAvg: bio.heartRateAvg,
-      adaptedBreathRateAvg: bio.breathRateAvg,
+      adaptedHeartRateAvg: Math.round(this.heartRateMean),
+      adaptedBreathRateAvg: Math.round(this.breathRateMean),
       stabilityScore,
+      stabilityReady: this.gateWindow.length >= 10,
       lastAdaptedAt: this.lastAdaptedAt
     };
   }
@@ -259,8 +255,11 @@ export default class AutoTuner {
     this.noiseFloor = 0;
     this.samplesCount = 0;
     this.noiseSamplesCount = 0;
-    this.stableStreak = 0;
-    this.lastDistanceSample = 0;
+    this.gateWindow = [];
+    this.lastCountAt = 0;
+    this.lastNoiseAt = 0;
+    this.awaySince = 0;
+    this.lastNoiseLogAt = 0;
     this.lastAdaptedAt = Date.now();
 
     const data = this.config.data;

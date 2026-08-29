@@ -5,22 +5,20 @@ const api = {
   getState: () => ipcRenderer.invoke('state:get'),
   getPorts: () => ipcRenderer.invoke('ports:list'),
   setMode: (mode: string) => ipcRenderer.invoke('state:mode', mode),
-  setPort: (port: string) => ipcRenderer.invoke('ports:set', port),
   updateConfig: (patch: Record<string, unknown>) => ipcRenderer.invoke('config:update', patch),
   detectDevices: () => ipcRenderer.invoke('devices:detect'),
   listDevices: () => ipcRenderer.invoke('devices:list'),
-  toggleMute: (target?: string) => ipcRenderer.invoke('audio:toggleMute', target),
-  setMute: (target: string, mute: boolean) => ipcRenderer.invoke('audio:setMute', { target, mute }),
-  setVolume: (target: string, percent: number) => ipcRenderer.invoke('audio:setVolume', { target, percent }),
-  getVolume: (target?: string) => ipcRenderer.invoke('audio:getVolume', target),
+  toggleMute: () => ipcRenderer.invoke('audio:toggleMute'),
   discordApplyVoice: (args: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }) =>
     ipcRenderer.invoke('discord:applyVoice', args),
   discordGetStatus: () => ipcRenderer.invoke('discord:getStatus'),
   discordGetVoiceSettings: () => ipcRenderer.invoke('discord:getVoiceSettings'),
   discordAuthorize: () => ipcRenderer.invoke('discord:authorize'),
   testDevice: (name: string) => ipcRenderer.invoke('audio:testDevice', name),
-  sleepDisplay: () => ipcRenderer.invoke('display:sleep'),
-  wakeDisplay: () => ipcRenderer.invoke('display:wake'),
+  screensaverStart: () => ipcRenderer.invoke('screensaver:start'),
+  // Ewakuacja z nakładki wygaszacza: dowolne wejście użytkownika natychmiast
+  // ją zdejmuje (screensaver.ts używa tego samego preloadu co okno główne).
+  screensaverDismiss: () => ipcRenderer.send('screensaver:dismiss'),
   openConfigDir: () => ipcRenderer.invoke('config:openDir'),
   resetConfig: () => ipcRenderer.invoke('config:reset'),
   closeWindow: () => ipcRenderer.send('window:close'),
@@ -31,6 +29,9 @@ const api = {
   // Radar Auto-Tuning
   resetAutoTuning: () => ipcRenderer.invoke('radar:resetAutoTuning'),
 
+  // Rejestrator surowego strumienia radaru (kalibracja progów fuzji)
+  diagRecord: () => ipcRenderer.invoke('diag:record'),
+
   // Home Assistant (HAOS) Integration
   haTestConnection: (opts?: { url?: string; token?: string }) =>
     ipcRenderer.invoke('ha:testConnection', opts),
@@ -38,12 +39,10 @@ const api = {
     ipcRenderer.invoke('ha:fetchEntities', opts),
 
   // SignalRGB Integration
-  signalrgbProbe: () => ipcRenderer.invoke('signalrgb:probe'),
   signalrgbTestAway: () => ipcRenderer.invoke('signalrgb:testAway'),
   signalrgbTestDesk: () => ipcRenderer.invoke('signalrgb:testDesk'),
 
   // GitHub Auto Updater & Token
-  openGitHubTokenPage: () => ipcRenderer.invoke('github:openTokenPage'),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
   downloadUpdate: () => ipcRenderer.invoke('updater:download'),
   installUpdate: () => ipcRenderer.invoke('updater:install'),
@@ -52,11 +51,19 @@ const api = {
   // External URL opener & Native Clipboard
   openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
   copyToClipboard: (text: string) => ipcRenderer.invoke('app:copyToClipboard', text),
+  pickAudioFile: () => ipcRenderer.invoke('app:pickAudioFile'),
+  refreshLed: () => ipcRenderer.invoke('led:refresh'),
 
   // Diagnostic Logs
   getLogs: () => ipcRenderer.invoke('logs:get'),
   clearLogs: () => ipcRenderer.invoke('logs:clear'),
   openLogsInNotepad: () => ipcRenderer.invoke('logs:openInNotepad'),
+
+  // Sesja diagnostyczna "Wyjście z pokoju"
+  diagStart: () => ipcRenderer.invoke('diag:start'),
+  diagStatus: () => ipcRenderer.invoke('diag:status'),
+  diagStop: () => ipcRenderer.invoke('diag:stop'),
+  openTextInNotepad: (text: string) => ipcRenderer.invoke('app:openTextInNotepad', text),
 
   onEvent: (cb: (e: unknown) => void) => {
     const listener = (_e: IpcRendererEvent, payload: unknown): void => cb(payload);
