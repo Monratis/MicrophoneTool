@@ -1,5 +1,5 @@
 /*
- * DeskSense Native OS (v1.5.0) for Seeed XIAO ESP32-C6 + MR60BHA2 Kit
+ * DeskSense Native OS (v1.5.1) for Seeed XIAO ESP32-C6 + MR60BHA2 Kit
  *
  * Funkcjonalność:
  * 1. Natywny dekoder ramek binarnych MR60BHA2 (ESPHome/Seeed protocol).
@@ -19,7 +19,7 @@
 #include <Wire.h>
 #include <Adafruit_NeoPixel.h>
 
-#define FIRMWARE_VERSION "1.5.0"
+#define FIRMWARE_VERSION "1.5.1"
 
 // --- Piny i konfiguracja sprzętowa ---
 #define RADAR_RX_PIN    17
@@ -52,15 +52,20 @@ String pcCmd = "";
 // (b) netto przemieszczenie dystansu >= FUSION_DIST_NET_CM w oknie FUSION_GAP_MS
 //     (drgajace odbicie ±2 cm nie udaje juz ruchu; czlowiek wstajacy/odchodzacy
 //     robi net kilka-kilkanascie cm).
-#define FUSION_GAP_MS          3000UL  // cisza dowodow przez tyle = cel martwy
+#define FUSION_GAP_MS          3000UL  // okno ruchu dystansu (odbicie zamarza szybciej)
 // Pomiar 2026-08-29 (5 min czytania): dystans jest kwantyzowany do binow po
 // 5,74 cm (63.14/68.88/.../114.80), |delta| to ZAWSZE 0 lub 5.74 cm.Prog netto
 // 8 cm wymaga przeskoku o 2 biny — pojedynczy flicker odbicia (1 bin = 5.74 cm)
 // juz nie udaje ruchu; siedzacy czlowiek robi >=8 cm netto w 56% okien 3 s,
-// a w pozostalych dowodem zycia jest bio (max przerwa bio zmierzona: 2 s).
+// a w pozostalych dowodem zycia jest bio.
+// Korekta 2026-08-29 (sesja totalnie nieruchomo): przy pelnym bezruchu bio
+// zamilka na 6-24 s (log: "bio bez dowodu 24s"), a wtedy FUSION_GAP_MS=3 s
+// wygasal zywego czlowieka. Bio dostaje wlasne, duzo dluzsze okno — chair-ghost
+// i tak nie ma bio NIGDY, wiec czyszczenie zamlga do ~FUSION_BIO_GAP_MS.
 #define FUSION_DIST_NET_CM     8.0f    // netto max-min dystansu w oknie = ruch
 #define FUSION_BIO_MIN_FRAMES  2       // ile ramek bio w oknie dowodzi zycia
 #define FUSION_BIO_WINDOW_MS   10000UL // okno wiarygodnosci bio
+#define FUSION_BIO_GAP_MS      45000UL // cisza bio przez tyle = cel martwy (zycy bezruch: do 24 s)
 bool rawPresence = false;              // surowy bit obecności z modulu radaru
 unsigned long lastBioEvidenceMs = 0;   // ostatnio potwierdzona wiarygodna bio
 bool fusedOff = false;                 // fuzja aktualnie wymusza OFF mimo raw=ON
@@ -188,7 +193,7 @@ float distanceWindowRange(unsigned long now) {
 // Przy zaczepieniu na fotelu raw zostaje ON, ale fuzja zwraca OFF; powrot
 // nastepuje sam, gdy tylko wiarygodna bio albo netto ruch dystansu ozyje.
 void updatePresenceOutput(unsigned long now) {
-  bool bioAlive = (now - lastBioEvidenceMs) < FUSION_GAP_MS;
+  bool bioAlive = (now - lastBioEvidenceMs) < FUSION_BIO_GAP_MS;
   bool distAlive = distanceWindowRange(now) >= FUSION_DIST_NET_CM;
   bool wantFusedOff = rawPresence && !bioAlive && !distAlive;
   if (wantFusedOff != fusedOff) {
