@@ -19,23 +19,18 @@ export default class AutoTuner {
 
   private alphaDist = 0.05;
   private alphaBio = 0.03;
-  private alphaNoise = 0.08;
 
   private distanceMean: number;
   private distanceMad: number;
   private heartRateMean: number;
   private breathRateMean: number;
-  private noiseFloor: number;
 
   private samplesCount: number;
-  private noiseSamplesCount = 0;
   private lastCountAt = 0;
-  private lastNoiseAt = 0;
   private awaySince = 0;
   private lastNoiseLogAt = 0;
   /** Kroczące okno flag "próbka siedzenia w wyuczonej strefie" — podstawa realnej stabilności modelu. */
   private gateWindow: boolean[] = [];
-  private lastAdaptedAt = Date.now();
   private lastSavedAt = Date.now();
   private lastPersistedSig = '';
 
@@ -52,7 +47,6 @@ export default class AutoTuner {
     this.distanceMad = Number(config.get('radarLearnedDistanceVariance') || 0);
     this.heartRateMean = Number(config.get('radarLearnedHeartRate') || 0);
     this.breathRateMean = Number(config.get('radarLearnedBreathRate') || 0);
-    this.noiseFloor = Number(config.get('radarAutoTuningNoiseFloor') || 0);
 
     this.samplesCount = this.distanceMean > 0 ? 50 : 0;
 
@@ -64,15 +58,12 @@ export default class AutoTuner {
     if (speed === 'fast') {
       this.alphaDist = 0.12;
       this.alphaBio = 0.08;
-      this.alphaNoise = 0.15;
     } else if (speed === 'conservative') {
       this.alphaDist = 0.02;
       this.alphaBio = 0.015;
-      this.alphaNoise = 0.03;
     } else {
       this.alphaDist = 0.05;
       this.alphaBio = 0.03;
-      this.alphaNoise = 0.08;
     }
   }
 
@@ -96,7 +87,6 @@ export default class AutoTuner {
         this.gateWindow.push(this.isInsideLearnedZone(distanceCm));
         if (this.gateWindow.length > 40) this.gateWindow.shift();
       }
-      this.lastAdaptedAt = now;
 
       if (this.distanceMean === 0) {
         this.distanceMean = distanceCm;
@@ -125,31 +115,28 @@ export default class AutoTuner {
     }
 
     if (!isSeated) {
-      // Realny szum: udział odczytów w USTABILIZOWANEJ nieobecności (po 15 s od
-      // przejścia w AWAY), w których radar widzi echo w strefie fotela.
-      // Pierwsze sekundy nieobecności wykluczamy celowo — podejście do biurka
-      // i wygaszanie obecności (bramki, bio-hold) samo z siebie generuje echa
-      // w strefie i zawyżałoby wskaźnik. Echo poza strefą (chodzenie po pokoju)
-      // jest neutralne — nie jest to fałszywa okupacja fotela.
+      // Diagnostyka nieobecności: echo w strefie fotela po 15 s od przejścia w AWAY.
+      // Pierwsze sekundy wykluczamy celowo — wygaszanie obecności (bramki, bio-hold)
+      // samo z siebie generuje echa w strefie. Echo poza strefą (chodzenie po pokoju)
+      // jest neutralne. Celowo sam log, bez licznika-procentu w UI: ten sensor
+      // z zasady widzi odbicie fotela, więc procent był zawsze ~100% i nic nie mówił.
       if (this.awaySince === 0) {
         this.awaySince = now;
       }
-      if (now - this.awaySince >= 15000 && now - this.lastNoiseAt > 250) {
-        this.lastNoiseAt = now;
-        this.noiseSamplesCount++;
-        const inZone = distanceCm > 0 && this.distanceMean > 0 && this.isInsideLearnedZone(distanceCm);
-        const noiseEvent = inZone ? 100 : 0;
-        this.noiseFloor = this.noiseFloor + this.alphaNoise * (noiseEvent - this.noiseFloor);
-        this.noiseFloor = Math.max(0, Math.min(100, this.noiseFloor));
-        // Log diagnostyczny: stały dystans godzinami = zamarznięte odbicie fotela;
-        // zmienny dystans + biometria = zwierzak na fotelu.
-        if (inZone && now - this.lastNoiseLogAt > 30000) {
-          this.lastNoiseLogAt = now;
-          appendLog(
-            'RADAR-AUTO',
-            `Fałszywe echo w strefie fotela: ${Math.round(distanceCm)} cm (szum ${Math.round(this.noiseFloor)}%, tętno ${heartRate || '—'}, oddech ${breathRate || '—'})`
-          );
-        }
+      // Log diagnostyczny: stały dystans godzinami = zamarznięte odbicie fotela;
+      // zmienny dystans + biometria = zwierzak na fotelu.
+      if (
+        now - this.awaySince >= 15000 &&
+        now - this.lastNoiseLogAt > 30000 &&
+        distanceCm > 0 &&
+        this.distanceMean > 0 &&
+        this.isInsideLearnedZone(distanceCm)
+      ) {
+        this.lastNoiseLogAt = now;
+        appendLog(
+          'RADAR-AUTO',
+          `Echo w strefie fotela podczas nieobecności: ${Math.round(distanceCm)} cm (tętno ${heartRate || '—'}, oddech ${breathRate || '—'})`
+        );
       }
     } else {
       this.awaySince = 0;
@@ -207,7 +194,6 @@ export default class AutoTuner {
 
     return {
       enabled,
-      noiseFloor: Math.round(this.noiseFloor),
       samplesCount: this.samplesCount,
       adaptedDistanceCenter: gate.centerCm,
       adaptedDistanceMin: gate.minGateCm,
@@ -215,8 +201,7 @@ export default class AutoTuner {
       adaptedHeartRateAvg: Math.round(this.heartRateMean),
       adaptedBreathRateAvg: Math.round(this.breathRateMean),
       stabilityScore,
-      stabilityReady: this.gateWindow.length >= 10,
-      lastAdaptedAt: this.lastAdaptedAt
+      stabilityReady: this.gateWindow.length >= 10
     };
   }
 
@@ -224,7 +209,7 @@ export default class AutoTuner {
     try {
       // Zapis tylko przy realnej zmianie wartości (EMA zawsze lekko dryfuje —
       // bez dedupu dysk dostawał zapis co 45 s w nieskończoność).
-      const sig = `${Math.round(this.distanceMean)}|${Math.round(this.distanceMad)}|${Math.round(this.heartRateMean)}|${Math.round(this.breathRateMean)}|${Math.round(this.noiseFloor)}`;
+      const sig = `${Math.round(this.distanceMean)}|${Math.round(this.distanceMad)}|${Math.round(this.heartRateMean)}|${Math.round(this.breathRateMean)}`;
       if (sig === this.lastPersistedSig) return;
       this.lastPersistedSig = sig;
 
@@ -239,7 +224,6 @@ export default class AutoTuner {
       if (this.breathRateMean > 0) {
         data.radarLearnedBreathRate = Math.round(this.breathRateMean);
       }
-      data.radarAutoTuningNoiseFloor = Math.round(this.noiseFloor);
       this.config.save();
     } catch (err) {
       console.warn('[auto-tuner] persist warning:', (err as Error).message);
@@ -252,22 +236,17 @@ export default class AutoTuner {
     this.distanceMad = 0;
     this.heartRateMean = 0;
     this.breathRateMean = 0;
-    this.noiseFloor = 0;
     this.samplesCount = 0;
-    this.noiseSamplesCount = 0;
     this.gateWindow = [];
     this.lastCountAt = 0;
-    this.lastNoiseAt = 0;
     this.awaySince = 0;
     this.lastNoiseLogAt = 0;
-    this.lastAdaptedAt = Date.now();
 
     const data = this.config.data;
     data.radarLearnedDistanceCenter = 0;
     data.radarLearnedDistanceVariance = 0;
     data.radarLearnedHeartRate = 0;
     data.radarLearnedBreathRate = 0;
-    data.radarAutoTuningNoiseFloor = 0;
     this.config.save();
 
     return this.getStatus();

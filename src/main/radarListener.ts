@@ -103,8 +103,7 @@ export default class RadarListener extends EventEmitter {
       breathRate: 0,
       illuminanceLux: undefined,
       detectedPerson: 'unknown' as DetectedPerson,
-      autoTuning: this.autoTuner.getStatus(),
-      lastUpdate: 0
+      autoTuning: this.autoTuner.getStatus()
     };
   }
 
@@ -973,8 +972,7 @@ export default class RadarListener extends EventEmitter {
     const tun = t.autoTuning;
     return (
       `${t.presence ? 1 : 0}|${t.distanceCm ?? 0}|${t.targetCount ?? 0}|${t.heartRate ?? 0}|${t.breathRate ?? 0}|${t.illuminanceLux ?? ''}|` +
-      `${t.detectedPerson ?? ''}|${Math.floor((tun?.samplesCount ?? 0) / 10)}|` +
-      `${Math.round((tun?.noiseFloor ?? 0) / 5)}`
+      `${t.detectedPerson ?? ''}|${Math.floor((tun?.samplesCount ?? 0) / 10)}`
     );
   }
 
@@ -1020,7 +1018,6 @@ export default class RadarListener extends EventEmitter {
     const smoothedCm = this.distanceFilter.push(distCm);
     recordSample('dist', distCm);
     this.telemetry.distanceCm = smoothedCm;
-    this.telemetry.lastUpdate = Date.now();
     this.lastTrustedDistanceCm = smoothedCm;
 
     this.logDsp('distance', 'Dystans', smoothedCm, distCm, 'cm');
@@ -1119,7 +1116,6 @@ export default class RadarListener extends EventEmitter {
     const smoothedBpm = this.heartFilter.push(bpm);
     recordSample('hr', bpm);
     this.telemetry.heartRate = smoothedBpm;
-    this.telemetry.lastUpdate = Date.now();
 
     this.logDsp('heart', 'Tętno', smoothedBpm, bpm, 'BPM', 'surowe');
 
@@ -1147,7 +1143,6 @@ export default class RadarListener extends EventEmitter {
     const smoothedRpm = this.breathFilter.push(rpm);
     recordSample('br', rpm);
     this.telemetry.breathRate = smoothedRpm;
-    this.telemetry.lastUpdate = Date.now();
 
     this.logDsp('breath', 'Oddech', smoothedRpm, rpm, 'RPM');
 

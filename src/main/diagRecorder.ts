@@ -33,10 +33,6 @@ export function recordSample(kind: DiagSampleKind, value: number): void {
   samples.push({ t: Date.now() - startedAt, kind, value });
 }
 
-export function isRecording(): boolean {
-  return active;
-}
-
 function pct(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
   const idx = Math.min(sorted.length - 1, Math.round((p / 100) * (sorted.length - 1)));
