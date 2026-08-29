@@ -35,7 +35,7 @@ src/main/audioController.ts # fasada audio -> soundVolumeView
 src/main/soundVolumeView.ts # daemon AudioSwitcher.exe (stdin/stdout) + fallback CLI/kompilacja
 src/main/discordIntegration.ts # Discord RPC: OAuth, synchronizacja wejścia, profile głosu
 src/main/signalrgbIntegration.ts # SignalRGB REST (away/desk akcje oświetlenia)
-src/main/haIntegration.ts  # Home Assistant WebSocket: zewnętrzna telemetria radaru
+src/main/haIntegration.ts  # Home Assistant WebSocket: telemetria radaru + automatyzacje AWAY/DESK + przyciski HAOS
 src/main/updater.ts        # GitHub Releases: check/download/install
 src/main/diagRecorder.ts   # rejestrator surowego strumienia radaru (kalibracja progów)
 src/main/diagSession.ts    # sesja diagnostyczna "Wyjście z pokoju"
@@ -46,6 +46,20 @@ src/main/ipc.ts            # handlery IPC
 src/native/*.cs            # AudioSwitcher (audio CoreAudio daemon), IconGenerator (ikony .ico/.png)
 bin/                       # skompilowane EXE natywne (trackowane w git!)
 releases/                  # artefakty do publikacji (*.exe NIE są w gicie — patrz niżej)
+```
+
+Renderer (Vanilla TS, rozbity na moduły — NIE wracać do mega-main.ts):
+```
+src/renderer/src/main.ts   # punkt wejścia: bootstrap AppUI + globalne handlery błędów
+src/renderer/src/app.ts    # rdzeń AppUI: stan, init, handleEvent, render(), patchForm/save, toasty
+src/renderer/src/events.ts # bindEvents: podpięcie wszystkich zdarzeń UI
+src/renderer/src/homeView.ts # live DOM dashboardu: nagłówek, karty mikrofonów, telemetria, radar-scope
+src/renderer/src/settingsPanels.ts # panele ustawień: Port, Czasy, Biometria
+src/renderer/src/integrationsPanels.ts # panele: Discord, SignalRGB, Chime, HAOS (automatyzacje+przyciski)
+src/renderer/src/logsAbout.ts # zakładka logów (filtry) i O aplikacji
+src/renderer/src/modals.ts # modale: kalibracja VAD, wizard radaru, sesja diagnostyczna, diag
+src/renderer/src/liveAudioEngine.ts # silnik VU-metru / śledzenia bramki VAD
+src/renderer/src/ui.ts     # esc, STATE_LABEL, chime (Web Audio), typy zakładek
 ```
 
 ## Komendy
