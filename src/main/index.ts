@@ -171,6 +171,7 @@ app.whenReady().then(() => {
   });
 
   const config = new Config(resolveConfigPath(appDataDir));
+  config.upgradeEncryption();
   const activityWatcher = new ActivityWatcher(config);
   const radar = new RadarListener(config);
   radar.setActivityWatcher(activityWatcher);

@@ -141,22 +141,94 @@ MicrophoneTool/
 
 ## ⚡ Wgrywanie Firmware'u Sensora (XIAO ESP32-C6 + MR60BHA2)
 
-Kod mikrokontrolera znajduje się w `firmware/DeskSense_XIAO_ESP32C6/DeskSense_XIAO_ESP32C6.ino`.
+Kod źródłowy firmware'u (DeskSense Native OS v1.6.0 z fuzją obecności i dowodami żywotności) znajduje się w folderze:
+`firmware/DeskSense_XIAO_ESP32C6/DeskSense_XIAO_ESP32C6.ino`
 
-### Wgrywanie przez `arduino-cli`:
+Obsługiwany sprzęt:
+- **Mikrokontroler**: Seeed Studio XIAO ESP32-C6 (4MB Flash, USB-CDC)
+- **Radar mmWave**: Seeed Studio MR60BHA2 60 GHz (piny: RX=17, TX=16 na UART1, 115200 baud)
+- **Dioda statusowa**: WS2812 RGB (GPIO 1)
+- **Czujnik natężenia światła**: BH1750 (I2C: SDA=22, SCL=23, adres `0x23`)
+
+---
+
+### Metoda 1: Wgrywanie przez terminal (`arduino-cli`) — Krok po kroku
+
+Jeśli nie masz jeszcze `arduino-cli`, zainstaluj je w Windows komendą:
+```powershell
+winget install Arduino.arduino-cli
+```
+*(lub pobierz plik `.exe` ze strony https://arduino.github.io/arduino-cli/)*
+
+#### Krok 1: Dodanie repozytorium płytek ESP32
+```powershell
+arduino-cli config init --overwrite
+arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+```
+
+#### Krok 2: Instalacja rdzenia ESP32 (Core)
+```powershell
+arduino-cli core update-index
+arduino-cli core install esp32:esp32
+```
+
+#### Krok 3: Instalacja wymaganych bibliotek (Dependencies)
+Firmware wymaga biblioteki do sterowania diodą adresowalną WS2812 RGB:
+```powershell
+arduino-cli lib install "Adafruit NeoPixel"
+```
+*(Czujnik światła BH1750 korzysta z wbudowanej w rdzeń magistrali `Wire.h` i nie wymaga dodatkowych zewnętrznych bibliotek).*
+
+#### Krok 4: Wykrycie portu COM płytki XIAO ESP32-C6
+Podłącz płytkę kablem USB-C do komputera i wpisz:
+```powershell
+arduino-cli board list
+```
+*(Zapamiętaj numer portu, np. `COM3` lub `COM5`).*
+
+#### Krok 5: Zamknięcie DeskSense (Zwolnienie portu COM)
+Aplikacja DeskSense nie może blokować portu szeregowego podczas programowania:
+```powershell
+Get-Process | Where-Object { $_.ProcessName -like "*DeskSense*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+```
+
+#### Krok 6: Kompilacja i Wgranie Firmware'u (Upload)
+*(Zastąp `COM3` numerem swojego wykrytego portu z Kroku 4)*:
 
 ```powershell
-# 1. Zamknij DeskSense przed otwarciem portu COM:
-Get-Process | Where-Object { $_.ProcessName -like "*DeskSense*" } | Stop-Process -Force -ErrorAction SilentlyContinue
-
-# 2. Kompilacja:
+# 1. Kompilacja:
 arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc "firmware\DeskSense_XIAO_ESP32C6"
 
-# 3. Wgrywanie (np. na port COM3):
+# 2. Wgrywanie:
 arduino-cli upload -p COM3 --fqbn esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc "firmware\DeskSense_XIAO_ESP32C6"
 ```
 
-Możesz także skorzystać z **wbudowanego kreatora flashowania USB** w panelu ustawień aplikacji DeskSense (wykorzystuje `esptool-js` bezpośrednio w oknie programu).
+---
+
+### Metoda 2: Wgrywanie przez graficzne Arduino IDE 2.x
+
+1. Pobierz i zainstaluj **Arduino IDE 2.x**.
+2. Wejdź w `File` $\rightarrow$ `Preferences` i w polu **Additional boards manager URLs** wklej:
+   ```
+   https://espressif.github.io/arduino-esp32/package_esp32_index.json
+   ```
+3. Otwórz menedżer płytek (`Tools` $\rightarrow$ `Board` $\rightarrow$ `Boards Manager...`), wyszukaj **esp32** (od Espressif Systems) i kliknij **Install**.
+4. Otwórz menedżer bibliotek (`Tools` $\rightarrow$ `Manage Libraries...`), wyszukaj **Adafruit NeoPixel** (od Adafruit) i kliknij **Install**.
+5. Otwórz plik `firmware/DeskSense_XIAO_ESP32C6/DeskSense_XIAO_ESP32C6.ino`.
+6. W menu `Tools` ustaw:
+   - **Board**: `XIAO_ESP32C6`
+   - **USB CDC On Boot**: `Enabled` (Kluczowe dla komunikacji USB Serial!)
+   - **Port**: wybierz wykryty port `COMx (XIAO ESP32C6)`
+7. Kliknij ikonę strzałki **Upload** (Wgraj).
+
+---
+
+### Metoda 3: Wbudowany Web Flasher w DeskSense (Zero instalacji narzędzi!)
+
+Jeśli nie chcesz instalować Arduino CLI ani IDE, DeskSense posiada wbudowany silnik flashowania USB (`esptool-js`):
+1. Uruchom aplikację DeskSense i wejdź w zakładkę **Sensor / Radar**.
+2. W sekcji **Flashowanie sensora** kliknij przycisk **Wgraj firmware fabryczny**.
+3. Aplikacja automatycznie sflashuje mikrokontroler przez USB bez żadnych zewnętrznych kompilatorów.
 
 ---
 
