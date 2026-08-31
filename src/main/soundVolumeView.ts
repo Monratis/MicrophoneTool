@@ -59,6 +59,8 @@ export default class SoundVolumeView {
 
   private daemonProc: ReturnType<typeof spawn> | null = null;
   private readonly daemonQueue: DaemonQueueItem[] = [];
+  private readonly daemonCmdQueue: Array<{ cmd: string; resolve: (val: ExecResult | null) => void }> = [];
+  private daemonBusy = false;
   private daemonStarting: Promise<ReturnType<typeof spawn> | null> | null = null;
 
   constructor({ binDir, toolsDir }: { binDir: string; toolsDir: string; config?: Config }) {
@@ -189,9 +191,36 @@ export default class SoundVolumeView {
           if (item) item.resolve(val);
         };
 
+        // Czekamy na baner startowy {"ready":true,"version":"..."} zanim zaczniemy przyjmować komendy
+        await new Promise<void>((resolveReady) => {
+          let readyDone = false;
+          const onLineInit = (line: string): void => {
+            const trimmed = line.trim();
+            if (trimmed.includes('"ready":true')) {
+              if (!readyDone) {
+                readyDone = true;
+                rl.off('line', onLineInit);
+                resolveReady();
+              }
+            }
+          };
+          rl.on('line', onLineInit);
+          setTimeout(() => {
+            if (!readyDone) {
+              readyDone = true;
+              rl.off('line', onLineInit);
+              resolveReady();
+            }
+          }, 1500);
+        });
+
         rl.on('line', (line) => {
           const trimmed = line.trim();
           if (!trimmed) return;
+          if (trimmed.includes('"ready":true')) {
+            // Ignoruj powtórzony lub spóźniony baner powitalny daemona
+            return;
+          }
           dequeue({ ok: true, stdout: trimmed, stderr: '' });
         });
 
@@ -211,8 +240,15 @@ export default class SoundVolumeView {
 
         proc.on('exit', (code, signal) => {
           this.daemonProc = null;
+          this.daemonBusy = false;
           while (this.daemonQueue.length > 0) {
             const item = this.daemonQueue.shift();
+            if (item) {
+              item.resolve({ ok: false, stdout: '', stderr: `Daemon exited (code: ${code}, signal: ${signal})` });
+            }
+          }
+          while (this.daemonCmdQueue.length > 0) {
+            const item = this.daemonCmdQueue.shift();
             if (item) {
               item.resolve({ ok: false, stdout: '', stderr: `Daemon exited (code: ${code}, signal: ${signal})` });
             }
@@ -237,7 +273,7 @@ export default class SoundVolumeView {
   }
 
   /**
-   * Wysyła komendę do rezydentnego daemona z timeoutem 1000ms.
+   * Wysyła komendę do rezydentnego daemona w zserializowanej kolejce.
    */
   private async sendDaemonCommand(cmd: string): Promise<ExecResult | null> {
     const proc = await this.ensureDaemon();
@@ -245,35 +281,65 @@ export default class SoundVolumeView {
       return null;
     }
 
-    const stdin = proc.stdin;
-
-    return new Promise<ExecResult>((resolve) => {
-      let done = false;
-      const timer = setTimeout(() => {
-        if (done) return;
-        done = true;
-        // NIE usuwamy pozycji z kolejki — spóźniona odpowiedź na tę komendę
-        // musi zostać skonsumowana (i odrzucona), żeby nie rozwiązała
-        // następnej komendy z kolejki.
-        const idx = this.daemonQueue.findIndex((q) => q.resolve === wrappedResolve);
-        if (idx !== -1) this.daemonQueue[idx].timedOut = true;
-        resolve({ ok: false, stdout: '', stderr: 'Daemon request timeout' });
-      }, 1000);
-
-      const wrappedResolve = (val: ExecResult): void => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        resolve(val);
-      };
-
-      this.daemonQueue.push({ resolve: wrappedResolve });
-      try {
-        stdin.write(cmd + '\n');
-      } catch (err) {
-        wrappedResolve({ ok: false, stdout: '', stderr: (err as Error).message });
-      }
+    return new Promise<ExecResult | null>((resolve) => {
+      this.daemonCmdQueue.push({ cmd, resolve });
+      void this.processDaemonQueue();
     });
+  }
+
+  private async processDaemonQueue(): Promise<void> {
+    if (this.daemonBusy || this.daemonCmdQueue.length === 0) return;
+    this.daemonBusy = true;
+
+    const item = this.daemonCmdQueue.shift();
+    if (!item) {
+      this.daemonBusy = false;
+      return;
+    }
+
+    const proc = this.daemonProc;
+    if (!proc || !proc.stdin || proc.killed || proc.exitCode !== null) {
+      item.resolve({ ok: false, stdout: '', stderr: 'Daemon not available' });
+      this.daemonBusy = false;
+      void this.processDaemonQueue();
+      return;
+    }
+
+    try {
+      const res = await new Promise<ExecResult>((resolveCmd) => {
+        let done = false;
+        const timer = setTimeout(() => {
+          if (done) return;
+          done = true;
+          const idx = this.daemonQueue.findIndex((q) => q.resolve === wrappedResolve);
+          if (idx !== -1) this.daemonQueue[idx].timedOut = true;
+          resolveCmd({ ok: false, stdout: '', stderr: 'Daemon request timeout' });
+        }, 2000);
+
+        const wrappedResolve = (val: ExecResult): void => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolveCmd(val);
+        };
+
+        this.daemonQueue.push({ resolve: wrappedResolve });
+        try {
+          proc.stdin!.write(item.cmd + '\n');
+        } catch (err) {
+          wrappedResolve({ ok: false, stdout: '', stderr: (err as Error).message });
+        }
+      });
+
+      item.resolve(res);
+    } catch (err) {
+      item.resolve({ ok: false, stdout: '', stderr: (err as Error).message });
+    } finally {
+      this.daemonBusy = false;
+      if (this.daemonCmdQueue.length > 0) {
+        void this.processDaemonQueue();
+      }
+    }
   }
 
   private run(exe: string, args: string[]): Promise<ExecResult> {

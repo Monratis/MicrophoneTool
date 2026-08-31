@@ -186,13 +186,59 @@ export function resolveWindowIcon(): Electron.NativeImage | null {
 // ---------- autostart ----------
 
 export function applyAutoStart(enabled: boolean): void {
-  // W wersji portable używamy faktycznej ścieżki do pliku .exe (PORTABLE_EXECUTABLE_FILE),
-  // a nie tymczasowej ścieżki z %TEMP%, która znika po wyłączeniu aplikacji.
-  const execPath = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
-  app.setLoginItemSettings({
-    openAtLogin: enabled,
-    path: execPath
-  });
+  try {
+    const startupDir = path.join(
+      app.getPath('appData'),
+      'Microsoft',
+      'Windows',
+      'Start Menu',
+      'Programs',
+      'Startup'
+    );
+    const startupLnk = path.join(startupDir, 'DeskSense.lnk');
+    const oldStartupLnk = path.join(startupDir, 'Auto Audio Switch.lnk');
+
+    // Usuń stary skrót z poprzedniej nazwy jeśli istnieje
+    if (fs.existsSync(oldStartupLnk)) {
+      try { fs.unlinkSync(oldStartupLnk); } catch (_) {}
+    }
+
+    const targetExe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
+    const targetDir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(targetExe);
+
+    if (enabled) {
+      fs.mkdirSync(startupDir, { recursive: true });
+
+      // Tworzymy skrót .lnk w folderze Autostartu Windows z jawnym katalogiem roboczym (cwd).
+      // To gwarantuje, że wersja Portable odpala się bezbłędnie niezależnie od ścieżki ze spacjami.
+      shell.writeShortcutLink(startupLnk, 'replace', {
+        target: targetExe,
+        cwd: targetDir,
+        appUserModelId: 'com.monratis.desksense',
+        description: 'DeskSense'
+      });
+
+      // Synchronizujemy również rejestr Windows
+      try {
+        app.setLoginItemSettings({
+          openAtLogin: true,
+          path: targetExe
+        });
+      } catch (_) {}
+    } else {
+      if (fs.existsSync(startupLnk)) {
+        try { fs.unlinkSync(startupLnk); } catch (_) {}
+      }
+      try {
+        app.setLoginItemSettings({
+          openAtLogin: false,
+          path: targetExe
+        });
+      } catch (_) {}
+    }
+  } catch (err) {
+    console.warn('[autostart] applyAutoStart warning:', (err as Error).message);
+  }
 }
 
 export function createNotification(

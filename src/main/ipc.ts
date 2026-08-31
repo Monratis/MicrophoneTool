@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { exec } from 'node:child_process';
-import { ipcMain, shell, clipboard, app } from 'electron';
+import { ipcMain, shell, clipboard } from 'electron';
 import RadarListener from './radarListener';
 import type { AppContext } from './appContext';
 import { applyAutoStart } from './appContext';
@@ -11,7 +11,7 @@ import { DEFAULTS } from './config';
 import { toggleMuteWithFeedback } from './appContext';
 import { getLogs, clearLogs } from './logger';
 import { startDiagSession, stopDiagSession, isDiagSessionActive, diagSessionStartedAt } from './diagSession';
-import { toggleRecording } from './diagRecorder';
+import { toggleRecording, startRecording, stopRecording } from './diagRecorder';
 
 export function registerIpc(ctx: AppContext): void {
   ipcMain.handle('state:get', () => ctx.buildSnapshot());
@@ -44,6 +44,12 @@ export function registerIpc(ctx: AppContext): void {
 
     for (const [key, value] of Object.entries(patch || {})) {
       if (key in ctx.config.data) {
+        // Tokeny OAuth Discorda zarządzane są WYŁĄCZNIE przez discordIntegration.ts
+        // (proaktywny refresh co 6h). Renderer odsyła stary token z chwili otwarcia okna,
+        // który może być już nieaktualny — nadpisanie spowodowałoby utratę sesji.
+        if (key === 'discordAccessToken' || key === 'discordRefreshToken' || key === 'discordTokenExpiresAt') {
+          continue;
+        }
         (ctx.config.data as unknown as Record<string, unknown>)[key] = value;
       }
     }
@@ -73,10 +79,12 @@ export function registerIpc(ctx: AppContext): void {
     const discordVoiceNeedsUpdate =
       Boolean(patch) &&
       ('micDeskGateDb' in patch ||
+        'micDeskAutoThreshold' in patch ||
         'micDeskKrisp' in patch ||
         'micDeskAgc' in patch ||
         'micDeskEcho' in patch ||
         'micHeadsetGateDb' in patch ||
+        'micHeadsetAutoThreshold' in patch ||
         'micHeadsetKrisp' in patch ||
         'micHeadsetAgc' in patch ||
         'micHeadsetEcho' in patch ||
@@ -124,26 +132,36 @@ export function registerIpc(ctx: AppContext): void {
   });
   ipcMain.handle(
     'discord:applyVoice',
-    async (_e, args: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }) =>
+    async (_e, args: { gateDb?: number; autoThreshold?: boolean; krisp?: boolean; agc?: boolean; echo?: boolean }) =>
       ctx.controller.discord ? ctx.controller.discord.applyMicSettings(args || {}) : false
   );
   ipcMain.handle('discord:getStatus', async () =>
-    ctx.controller.discord ? ctx.controller.discord.getStatus() : { connected: false, ready: false, authenticated: false }
+    ctx.controller.discord
+      ? ctx.controller.discord.getStatus()
+      : { enabled: false, connected: false, ready: false, authenticated: false }
   );
   ipcMain.handle('discord:getVoiceSettings', async () =>
-    ctx.controller.discord ? ctx.controller.discord.getVoiceSettings() : null
+    ctx.controller.discord
+      ? await ctx.controller.discord.getVoiceSettings()
+      : { ok: false, error: 'Discord nie jest zainicjalizowany' }
   );
   ipcMain.handle('discord:authorize', async () => {
     if (ctx.controller.discord) {
-      ctx.controller.discord.authorizeManually();
-      return true;
+      return await ctx.controller.discord.authorizeManually();
     }
-    return false;
+    return { ok: false, error: 'Integracja z Discordem jest niedostępna' };
   });
   ipcMain.handle('config:reset', () => {
+    const savedAccessToken = ctx.config.get('discordAccessToken');
+    const savedRefreshToken = ctx.config.get('discordRefreshToken');
+    const savedTokenExpiresAt = ctx.config.get('discordTokenExpiresAt');
     for (const [key, value] of Object.entries(DEFAULTS)) {
       (ctx.config.data as unknown as Record<string, unknown>)[key] = value;
     }
+    // Zachowaj aktywne tokeny Discorda przy resecie ustawień
+    if (savedAccessToken) ctx.config.data.discordAccessToken = savedAccessToken;
+    if (savedRefreshToken) ctx.config.data.discordRefreshToken = savedRefreshToken;
+    if (savedTokenExpiresAt) ctx.config.data.discordTokenExpiresAt = savedTokenExpiresAt;
     ctx.config.save();
     applyAutoStart(ctx.config.get('autoStart'));
     void ctx.restartRadar();
@@ -198,6 +216,10 @@ export function registerIpc(ctx: AppContext): void {
   ipcMain.handle('signalrgb:listEffects', () =>
     ctx.signalrgb ? ctx.signalrgb.listLocalEffects() : []
   );
+  // Ręczny/testowy podgląd wybranego efektu z opcjonalnym kolorem
+  ipcMain.handle('signalrgb:applyEffect', async (_e, effectName: string, color?: string) =>
+    ctx.signalrgb ? ctx.signalrgb.applyEffect(effectName, color) : { ok: false, reason: 'Integracja niezainicjalizowana' }
+  );
 
   // Updater IPC
   ipcMain.handle('updater:check', async () => await ctx.updater.checkForUpdates());
@@ -210,15 +232,20 @@ export function registerIpc(ctx: AppContext): void {
   });
   ipcMain.handle('updater:status', () => ctx.updater.getStatus());
 
-  // Radar Auto-Tuning IPC
+  // Radar Auto-Tuning & Calibration IPC
   ipcMain.handle('radar:resetAutoTuning', () => {
-    const status = ctx.radar.resetAutoTuning();
     ctx.refreshSnapshot();
-    return status;
+    return { ok: true };
+  });
+  ipcMain.handle('radar:applyCalibration', () => {
+    ctx.refreshSnapshot();
+    return { ok: true, snapshot: ctx.buildSnapshot() };
   });
 
   // Rejestrator surowego strumienia radaru (toggle: start / stop + raport)
-  ipcMain.handle('diag:record', () => toggleRecording(300));
+  ipcMain.handle('diag:record', (_e, durationSec?: number) => toggleRecording(durationSec ?? 300));
+  ipcMain.handle('diag:recordStart', (_e, durationSec?: number) => startRecording(durationSec ?? 300));
+  ipcMain.handle('diag:recordStop', () => stopRecording());
 
   // General External URL Opener IPC
   ipcMain.handle('app:openExternal', (_e, url: string) => {
@@ -257,7 +284,26 @@ export function registerIpc(ctx: AppContext): void {
 
   // Sesja diagnostyczna "Wyjście z pokoju" — patrz src/main/diagSession.ts
   ipcMain.handle('diag:start', () => {
-    startDiagSession();
+    const discordStatus = ctx.controller.discord ? ctx.controller.discord.getStatus() : null;
+    startDiagSession({
+      initialState: ctx.controller.currentDevice,
+      initialPresence: ctx.radar.presence,
+      portName: ctx.config.get('port') || 'COM3',
+      firmwareVersion: ctx.radar.telemetry.deviceInfo?.fwVersion ? `v${ctx.radar.telemetry.deviceInfo.fwVersion}` : 'nieznana',
+      timeoutAwayMs: ctx.config.get('timeoutAwayMs'),
+      timeoutDeskMs: ctx.config.get('timeoutDeskMs'),
+      userInputPresenceHoldSec: ctx.config.get('userInputPresenceHoldSec'),
+      micDeskName: ctx.config.get('micDeskName'),
+      micDeskVolume: ctx.config.get('micDeskVolume'),
+      micHeadsetName: ctx.config.get('micHeadsetName'),
+      micHeadsetVolume: ctx.config.get('micHeadsetVolume'),
+      unmuteOnDesk: ctx.config.get('unmuteOnDesk'),
+      muteBehaviorOnAway: ctx.config.get('muteBehaviorOnAway'),
+      discordConnected: Boolean(discordStatus?.connected),
+      discordAuth: Boolean(discordStatus?.authenticated),
+      micDeskGateDb: ctx.config.get('micDeskGateDb'),
+      micHeadsetGateDb: ctx.config.get('micHeadsetGateDb')
+    });
     return true;
   });
   ipcMain.handle('diag:status', () => ({
@@ -267,19 +313,14 @@ export function registerIpc(ctx: AppContext): void {
   ipcMain.handle('diag:stop', () => {
     const res = stopDiagSession();
     if (!res) return null;
-    const durationMin = ((res.endedAt - res.startedAt) / 60000).toFixed(1);
-    const header = [
-      `# DeskSense — sesja diagnostyczna "Wyjście z pokoju"`,
-      `Start: ${new Date(res.startedAt).toLocaleString('pl-PL')} | Koniec: ${new Date(res.endedAt).toLocaleString('pl-PL')} | Czas trwania: ${durationMin} min`,
-      `Wersja: v${app.getVersion()} | Tryb: ${ctx.controller.mode} | Obecność: ${ctx.radar.presence ? 'OBECNY' : 'BRAK'}`,
-      `Logów w sesji: ${res.logs.length}`,
-      ``
-    ].join('\n');
     return {
       startedAt: res.startedAt,
       endedAt: res.endedAt,
+      durationSec: res.durationSec,
+      timeline: res.timeline,
+      analysis: res.analysis,
       count: res.logs.length,
-      text: header + res.logs.join('\n')
+      text: res.text
     };
   });
 

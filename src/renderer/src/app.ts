@@ -1,12 +1,12 @@
 import './styles.css';
-import type { AudioDeviceItem, PushEvent, RadarTelemetry, SerialPortInfo, Snapshot, UpdaterStatus } from './global';
+import type { AudioDeviceItem, DiagSessionReport, PushEvent, RadarTelemetry, SerialPortInfo, Snapshot, UpdaterStatus } from './global';
 import { esc, playChime, playCustomAudioFile, type ChimeStyle, type TabType, type SettingsTab } from './ui';
 import { LiveAudioEngine } from './liveAudioEngine';
 import { renderHomeTab, triggerOsdHud, updateHeaderAndLiveDOM, updateRadarScopeDOM, updateTelemetryDOM } from './homeView';
 import { renderSettingsTab } from './settingsPanels';
-import { renderHaPickerModal } from './integrationsPanels';
+import { renderHaPickerModal, refreshDiscordRpcStatus } from './integrationsPanels';
 import { renderLogsTab, renderAboutTab, refreshLogConsoleDOM } from './logsAbout';
-import { closeCalibrationWizard, closeVadModal, renderDiagModal, renderDiagSessionModal, renderVadModal, renderWizardModal } from './modals';
+import { closeVadModal, renderDiagModal, renderDiagSessionModal, renderVadModal } from './modals';
 import { bindEvents } from './events';
 
 
@@ -75,6 +75,10 @@ export class AppUI {
   /** Trwa auto-pobieranie katalogu encji po otwarciu pickera */
   haFetchingPicker = false;
   haShowToken = false;
+  // SignalRGB State
+  signalrgbEffects: string[] = [];
+  signalrgbCustomAway = false;
+  signalrgbCustomDesk = false;
 
   // Telemetria biometryczna na żywo
   telemetry: RadarTelemetry = {
@@ -84,34 +88,7 @@ export class AppUI {
     heartRate: 0,
     breathRate: 0,
     illuminanceLux: undefined,
-    detectedPerson: 'unknown',
-    autoTuning: {
-      enabled: true,
-      samplesCount: 0,
-      adaptedDistanceCenter: 0,
-      adaptedDistanceMin: 0,
-      adaptedDistanceMax: 0,
-      adaptedHeartRateAvg: 0,
-      adaptedBreathRateAvg: 0,
-      stabilityScore: 0,
-      stabilityReady: false
-    }
-  };
-
-  // Modale aplikacji
-  wizardOpen = false;
-  wizardStep: 1 | 2 | 3 = 1;
-  wizardCountdown = 0;
-  wizardInterval: any = null;
-  wizardWarning = '';
-  wizardPresenceSeen = false;
-  wizardSamples: { distances: number[] } = {
-    distances: []
-  };
-  wizardResults = {
-    distance: 75,
-    gateMin: 45,
-    gateMax: 110
+    detectedPerson: 'unknown'
   };
 
   diagModalOpen = false;
@@ -120,6 +97,7 @@ export class AppUI {
   // Sesja diagnostyczna "Wyjście z pokoju"
   diagActive = false;
   diagSessionText = '';
+  diagSessionReport: DiagSessionReport | null = null;
   diagReportModalOpen = false;
 
   lastDeviceSig = '';
@@ -189,6 +167,12 @@ export class AppUI {
     } catch (_) {}
 
     try {
+      if (window.api && typeof window.api.signalrgbListEffects === 'function') {
+        this.signalrgbEffects = (await window.api.signalrgbListEffects()) || [];
+      }
+    } catch (_) {}
+
+    try {
       if (window.api && typeof window.api.onEvent === 'function') {
         window.api.onEvent((e: PushEvent) => this.handleEvent(e));
       }
@@ -246,10 +230,7 @@ export class AppUI {
           window.api?.toggleDevTools?.();
         } catch (_) {}
       } else if (ev.key === 'Escape') {
-        if (this.wizardOpen) {
-          ev.preventDefault();
-          closeCalibrationWizard(this);
-        } else if (this.vadModalOpen) {
+        if (this.vadModalOpen) {
           ev.preventDefault();
           closeVadModal(this);
         } else if (this.diagModalOpen || this.diagReportModalOpen) {
@@ -316,6 +297,9 @@ export class AppUI {
       }
       this.loadAudioDevices().then(() => {
         updateHeaderAndLiveDOM(this);
+        if (this.currentTab === 'settings' && this.settingsTab === 'discord') {
+          void refreshDiscordRpcStatus(this);
+        }
       });
       return;
     }
@@ -345,12 +329,6 @@ export class AppUI {
       const { type: _ignored, ...tel } = e;
       this.telemetry = { ...this.telemetry, ...tel };
       updateTelemetryDOM(this);
-
-      if (this.wizardOpen && this.wizardCountdown > 0) {
-        if (this.wizardStep === 2 && this.telemetry.distanceCm) {
-          this.wizardSamples.distances.push(this.telemetry.distanceCm);
-        }
-      }
     }
 
     if (e.type === 'window:state' && typeof e.isMaximized === 'boolean') {
@@ -745,12 +723,15 @@ export class AppUI {
 
           <main class="fc-content">
             ${isUnconfigured ? `
-              <div class="update-banner" style="border-color: rgba(245, 158, 11, 0.6); background: rgba(245, 158, 11, 0.12)">
-                <div class="update-banner-icon" style="background: #f59e0b">⚠️</div>
-                <div class="update-banner-content">
-                  <strong style="color: #fbbf24">Wybierz swoje mikrofony</strong>
-                  <p>Wskaż mikrofon stacjonarny i mobilny w kasetkach poniżej lub użyj <strong>Auto-wykrywania</strong>.</p>
+              <div class="update-banner" style="border-color: rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.08); margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px">
+                <div style="display: flex; align-items: center; gap: 12px">
+                  <div class="update-banner-icon" style="background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); width: 28px; height: 28px; font-size: 13px">⚠️</div>
+                  <div class="update-banner-content">
+                    <strong style="color: #fbbf24; font-size: 12px; margin-bottom: 2px">Wybierz mikrofony robocze</strong>
+                    <div style="font-size: 11px; color: var(--fc-text-secondary); line-height: 1.3">Wskaż mikrofon stacjonarny i mobilny w kartach poniżej lub kliknij automatyczne wykrywanie.</div>
+                  </div>
                 </div>
+                <button class="btn btn-secondary btn-sm" id="btn-banner-detect-mics" style="border-color: rgba(245, 158, 11, 0.5); color: #fbbf24; font-weight: 600; white-space: nowrap; padding: 4px 10px; font-size: 11px">🔍 Auto-wykryj</button>
               </div>` : ''}
 
             ${this.currentTab === 'home' ? renderHomeTab(this) : ''}
@@ -773,7 +754,6 @@ export class AppUI {
         </footer>
 
         <!-- MODALS -->
-        ${this.wizardOpen ? renderWizardModal(this) : ''}
         ${this.vadModalOpen ? renderVadModal(this) : ''}
         ${this.diagModalOpen ? renderDiagModal(this) : ''}
         ${this.diagReportModalOpen ? renderDiagSessionModal(this) : ''}

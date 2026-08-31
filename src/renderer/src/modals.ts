@@ -1,6 +1,7 @@
 // Modale: kalibracja VAD, wizard kalibracji radaru, sesja diagnostyczna, diag telemetrii
 
 import type { AppUI } from './app';
+import type { DiagSessionTimelineItem } from './global';
 import { esc, playChime } from './ui';
 import { isMicActive, updateHeaderAndLiveDOM } from './homeView';
 
@@ -149,90 +150,6 @@ export function applyVadResults(app: AppUI) {
     app.save();
   }
 
-  // Wizard Methods
-export function openCalibrationWizard(app: AppUI) {
-    app.wizardOpen = true;
-    app.wizardStep = 1;
-    app.wizardCountdown = 0;
-    app.wizardWarning = '';
-    if (app.wizardInterval) clearInterval(app.wizardInterval);
-    app.wizardInterval = null;
-    app.render();
-  }
-
-export function closeCalibrationWizard(app: AppUI) {
-    app.wizardOpen = false;
-    if (app.wizardInterval) clearInterval(app.wizardInterval);
-    app.wizardInterval = null;
-    app.render();
-  }
-
-export function runWizardStep1(app: AppUI) {
-    app.wizardCountdown = 5;
-    app.wizardWarning = '';
-    app.wizardPresenceSeen = false;
-    app.render();
-    app.wizardInterval = setInterval(() => {
-      app.wizardCountdown--;
-      if (app.telemetry.presence === true) app.wizardPresenceSeen = true;
-      if (app.wizardCountdown <= 0) {
-        clearInterval(app.wizardInterval);
-        app.wizardInterval = null;
-        if (app.wizardPresenceSeen) {
-          // Uczciwa walidacja: kalibracja pustego fotela nie ma sensu, gdy radar
-          // wciąż widzi człowieka — blokujemy krok zamiast udawać sukces.
-          app.wizardWarning = 'Radar nadal wykrywa obecność przy biurku — odsuń się dalej od sensora (2–3 m) i rozpocznij pomiar ponownie.';
-          app.render();
-          return;
-        }
-        playChime('desk', 0.2, app.selectedChimeStyle);
-        app.wizardStep = 2;
-      }
-      app.render();
-    }, 1000);
-  }
-
-export function runWizardStep2(app: AppUI) {
-    app.wizardCountdown = 6;
-    app.wizardSamples.distances = [];
-    if (app.telemetry.distanceCm) app.wizardSamples.distances.push(app.telemetry.distanceCm);
-    app.render();
-
-    app.wizardInterval = setInterval(() => {
-      app.wizardCountdown--;
-      if (app.wizardCountdown <= 0) {
-        clearInterval(app.wizardInterval);
-        app.wizardInterval = null;
-
-        const validDistances = app.wizardSamples.distances.filter((d) => d >= 30 && d <= 180);
-        const avgDist = validDistances.length > 0
-          ? Math.round(validDistances.reduce((a, b) => a + b, 0) / validDistances.length)
-          : (app.telemetry.distanceCm || 75);
-
-        app.wizardResults.distance = avgDist;
-        app.wizardResults.gateMin = Math.max(30, avgDist - 25);
-        app.wizardResults.gateMax = Math.min(200, avgDist + 35);
-
-        playChime('desk', 0.2, app.selectedChimeStyle);
-        app.wizardStep = 3;
-      }
-      app.render();
-    }, 1000);
-  }
-
-export function applyWizardCalibration(app: AppUI) {
-    app.patchForm({
-      radarDistanceGateEnabled: true,
-      radarMinDistanceCm: app.wizardResults.gateMin,
-      radarMaxDistanceCm: app.wizardResults.gateMax,
-      petFilterEnabled: true
-    });
-
-    closeCalibrationWizard(app);
-    app.save();
-    app.pushToast('Kalibracja sensora zakończona i zapisana ✓');
-  }
-
   // ---------- MODAL: VAD Auto-Calibration Assistant Modal ----------
 export function renderVadModal(app: AppUI): string {
     const isDesk = app.vadTarget === 'desk';
@@ -339,116 +256,101 @@ export function renderVadModal(app: AppUI): string {
     `;
   }
 
-  // ---------- MODAL 1: Wizard Kalibracji Radaru ----------
-export function renderWizardModal(app: AppUI): string {
-    const step = app.wizardStep;
-    const count = app.wizardCountdown;
-
-    return `
-      <div class="modal-overlay" id="wizard-overlay">
-        <div class="modal-dialog">
-          <div class="modal-header">
-            <h3>✨ Kreator Kalibracji Sensora (Krok ${step} z 3)</h3>
-            <button class="close" id="btn-wizard-close" title="Zamknij">✕</button>
-          </div>
-
-          <div class="modal-body">
-            <div class="wizard-steps">
-              <div class="wizard-step-dot ${step >= 1 ? (step === 1 ? 'active' : 'done') : ''}"></div>
-              <div class="wizard-step-dot ${step >= 2 ? (step === 2 ? 'active' : 'done') : ''}"></div>
-              <div class="wizard-step-dot ${step >= 3 ? 'done' : ''}"></div>
-            </div>
-
-            ${app.wizardWarning ? `
-              <div class="update-banner" style="border-color: rgba(239, 68, 68, 0.6); background: rgba(239, 68, 68, 0.12); margin-bottom: 12px">
-                <div class="update-banner-icon" style="background: #ef4444">⚠️</div>
-                <div class="update-banner-content">
-                  <strong style="color: #fca5a5">Uwaga kalibracji</strong>
-                  <p style="color: #fecaca; margin: 0">${esc(app.wizardWarning)}</p>
-                </div>
-              </div>
-            ` : ''}
-
-            ${step === 1 ? `
-              <div>
-                <div class="wizard-icon-hero">🪑</div>
-                <h4 style="text-align: center; font-size: 14px; font-weight: 600; margin-bottom: 6px">Krok 1: Weryfikacja pustego fotela</h4>
-                <p class="wizard-instruction">
-                  Odejdź od biurka na 2–3 metry lub wyjdź z zasięgu radaru.<br/>
-                  Aplikacja sprawdzi, czy radar widzi już pusty fotel — dopiero wtedy przejdziemy do pomiaru pozycji siedzenia.
-                </p>
-                <div style="margin-top: 16px">
-                  ${count > 0 ? `
-                    <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px">
-                      <strong>Skanowanie otoczenia…</strong>
-                      <span>${count} s</span>
-                    </div>
-                    <div class="wizard-meter"><div class="wizard-meter-fill" style="width: ${((5 - count) / 5) * 100}%"></div></div>
-                  ` : `<button class="btn btn-primary" id="btn-run-step-1" style="width: 100%">Rozpocznij skanowanie tła (5s)</button>`}
-                </div>
-              </div>` : ''}
-
-            ${step === 2 ? `
-              <div>
-                <div class="wizard-icon-hero">🧘</div>
-                <h4 style="text-align: center; font-size: 14px; font-weight: 600; margin-bottom: 6px">Krok 2: Pozycja w fotelu (Bramka zasięgu)</h4>
-                <p class="wizard-instruction">
-                  Usiądź wygodnie w fotelu w swojej naturalnej pozycji do pracy lub grania.<br/>
-                  Radar ustali Twoją strefę fotela i odetnie wszystko za Twoim oparciem.
-                </p>
-                <div style="margin-top: 16px">
-                  ${count > 0 ? `
-                    <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px">
-                      <strong>Mierzenie dystansu klatki piersiowej…</strong>
-                      <span>${count} s (${app.telemetry.distanceCm ? app.telemetry.distanceCm + ' cm' : 'namierzanie…'})</span>
-                    </div>
-                    <div class="wizard-meter"><div class="wizard-meter-fill" style="width: ${((6 - count) / 6) * 100}%"></div></div>
-                  ` : `<button class="btn btn-primary" id="btn-run-step-2" style="width: 100%">Rozpocznij pomiar pozycji fotela (6s)</button>`}
-                </div>
-              </div>` : ''}
-
-            ${step === 3 ? `
-              <div>
-                <div class="wizard-icon-hero">🎉</div>
-                <h4 style="text-align: center; font-size: 14px; font-weight: 600; margin-bottom: 6px">Kalibracja zakończona sukcesem!</h4>
-                <div style="margin-top: 12px">
-                  <div class="fc-card" style="text-align: center">
-                    <div style="font-size: 11px; color: var(--fc-text-secondary)">📏 Strefa fotela</div>
-                    <strong style="font-size: 16px; color: var(--fc-accent-green)">${app.wizardResults.distance} cm</strong>
-                    <span style="font-size: 10px; color: var(--fc-text-muted)">Bramka: ${app.wizardResults.gateMin}–${app.wizardResults.gateMax} cm</span>
-                  </div>
-                </div>
-              </div>` : ''}
-          </div>
-
-          <div class="modal-footer">
-            ${step > 1 && step < 3 ? `<button class="btn btn-ghost btn-sm" id="btn-wizard-back">← Wstecz</button>` : ''}
-            <button class="btn btn-ghost btn-sm" id="btn-wizard-cancel">Anuluj</button>
-            ${step === 3 ? `<button class="btn btn-primary btn-sm" id="btn-wizard-apply">Zastosuj i zapisz kalibrację ✓</button>` : `<span style="font-size: 11px; color: var(--fc-text-muted)">Krok ${step} z 3</span>`}
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
   // ---------- MODAL 4: QoL Diagnostics Hub Modal ----------
-  /** Modal z logami zebranej sesji "Wyjście z pokoju" (kopiuj AI / notatnik). */
+  /** Modal z raportem z sesji "Wyjście z pokoju" — analiza prędkości, wąskich gardeł i timeline. */
 export function renderDiagSessionModal(app: AppUI): string {
-    const lines = app.diagSessionText.split('\n').length;
+    const report = app.diagSessionReport;
+    const analysis = report?.analysis;
+    const timeline = report?.timeline || [];
+
+    const exitLatency = analysis?.exitLatencySec;
+    const ratingClass = analysis?.speedRating || 'moderate';
+    const ratingLabel =
+      analysis?.speedRating === 'ultra_fast'
+        ? '🔥 Błyskawiczna (Wzorowa)'
+        : analysis?.speedRating === 'fast'
+          ? '⚡ Szybka (Optymalna)'
+          : analysis?.speedRating === 'moderate'
+            ? '⏱️ Umiarkowana'
+            : '⚠️ Opóźniona';
+
     return `
       <div class="modal-overlay" id="diag-session-overlay">
-        <div class="modal-dialog modal-lg">
+        <div class="modal-dialog modal-lg" style="max-width: 620px">
           <div class="modal-header">
-            <h3>🧪 Sesja diagnostyczna — raport "Wyjście z pokoju"</h3>
+            <h3>⚡ Raport Testu Wyjścia z Pokoju (Prędkość Przełączania)</h3>
             <button class="close" id="btn-diag-session-close" title="Zamknij">✕</button>
           </div>
 
           <div class="modal-body">
-            <div style="font-size: 11.5px; color: var(--fc-text-secondary); margin-bottom: 8px">
-              Zebrano <strong>${lines}</strong> linii logów od momentu kliknięcia „Wyjście z pokoju”.
-              Prześlij raport przy zgłaszaniu problemu z wykrywaniem nieobecności.
+            <!-- 1. KARTY BENCHMARKU PRĘDKOŚCI -->
+            <div class="diag-benchmark-grid">
+              <div class="diag-benchmark-card">
+                <div style="font-size: 11px; color: var(--fc-text-secondary)">⚡ Czas do przełączenia</div>
+                <div class="diag-benchmark-val ${ratingClass}">
+                  ${exitLatency !== null && exitLatency !== undefined ? `${exitLatency} s` : '—'}
+                </div>
+                <div style="font-size: 10px; color: var(--fc-text-muted); margin-top: 2px">${ratingLabel}</div>
+              </div>
+
+              <div class="diag-benchmark-card">
+                <div style="font-size: 11px; color: var(--fc-text-secondary)">🛣️ Wybrana ścieżka</div>
+                <div style="font-size: 12.5px; font-weight: 700; color: #fff; margin-top: 4px; line-height: 1.3">
+                  ${analysis?.pathTaken === 'geometric_fast' ? '⚡ Geometria (outOfGateCut)' : analysis?.pathTaken === 'seat_abandoned' ? '🚀 Błyskawiczne wyjście (Seat Loss)' : analysis?.pathTaken === 'dropout_protection' ? '⏱️ Ochrona dropoutu radaru' : analysis?.pathTaken === 'input_held' ? '⌨️ Utrzymanie wejściem' : '⏱️ Standardowy timeout'}
+                </div>
+                <div style="font-size: 10px; color: var(--fc-text-muted); margin-top: 2px">
+                  ${analysis?.pathTaken === 'geometric_fast' ? 'Skrócony timer 100–250 ms' : analysis?.pathTaken === 'seat_abandoned' ? 'Zanik biometrii + strefy' : analysis?.pathTaken === 'dropout_protection' ? 'Bio-hold' : 'Timeout bazowy'}
+                </div>
+              </div>
+
+              <div class="diag-benchmark-card">
+                <div style="font-size: 11px; color: var(--fc-text-secondary)">🎙️ Windows CoreAudio</div>
+                <div style="font-size: 14px; font-weight: 700; color: #4ade80; margin-top: 4px">
+                  ${analysis?.audioSwitchLatencyMs !== null && analysis?.audioSwitchLatencyMs !== undefined ? `${analysis.audioSwitchLatencyMs} ms` : '—'}
+                </div>
+                <div style="font-size: 10px; color: var(--fc-text-muted); margin-top: 2px">AudioSwitcher daemon</div>
+              </div>
             </div>
-            <pre class="fc-diag-session-log">${esc(app.diagSessionText)}</pre>
+
+            <!-- 2. WĄSKIE GARDŁA & REKOMENDACJE -->
+            <div style="margin-bottom: 12px; padding: 10px 12px; background: ${analysis?.bottlenecks && analysis.bottlenecks.length > 0 ? 'rgba(245, 158, 11, 0.1)' : 'rgba(34, 197, 94, 0.08)'}; border: 1px solid ${analysis?.bottlenecks && analysis.bottlenecks.length > 0 ? 'rgba(245, 158, 11, 0.35)' : 'rgba(34, 197, 94, 0.25)'}; border-radius: var(--fc-radius-sm)">
+              <strong style="font-size: 12px; color: ${analysis?.bottlenecks && analysis.bottlenecks.length > 0 ? '#fbbf24' : '#4ade80'}; display: block; margin-bottom: 4px">
+                ${analysis?.bottlenecks && analysis.bottlenecks.length > 0 ? '🔍 Diagnoza wąskich gardeł prędkości:' : '✅ Wzorowa konfiguracja przełączania:'}
+              </strong>
+              ${analysis?.bottlenecks && analysis.bottlenecks.length > 0 ? `
+                <ul style="margin: 0 0 6px 16px; padding: 0; font-size: 11px; color: var(--fc-text-secondary); line-height: 1.4">
+                  ${analysis.bottlenecks.map((b: string) => `<li>${esc(b)}</li>`).join('')}
+                </ul>
+              ` : ''}
+              ${analysis?.recommendations && analysis.recommendations.length > 0 ? `
+                <div style="font-size: 11px; color: #f1f5f9; line-height: 1.4">
+                  ${analysis.recommendations.map((r: string) => `<div>👉 <strong>${esc(r)}</strong></div>`).join('')}
+                </div>
+              ` : ''}
+            </div>
+
+            <!-- 3. PRECYZYJNA OŚ CZASU (TIMELINE) -->
+            ${timeline.length > 0 ? `
+              <div style="font-size: 11px; font-weight: 600; color: var(--fc-text-secondary); margin-bottom: 4px; display: flex; justify-content: space-between">
+                <span>⏱️ Precyzyjna Oś Czasu (Timeline zdarzeń):</span>
+                <span style="color: var(--fc-text-muted)">${timeline.length} zdarzeń</span>
+              </div>
+              <div class="diag-timeline-box" style="margin-bottom: 12px">
+                ${timeline.map((ev: DiagSessionTimelineItem) => `
+                  <div class="diag-timeline-row">
+                    <span class="diag-timeline-time">+${(ev.offsetMs / 1000).toFixed(2)}s</span>
+                    <span class="diag-timeline-cat ${ev.category.toLowerCase()}">${ev.category}</span>
+                    <span style="color: #cbd5e1">${esc(ev.message)}</span>
+                  </div>
+                `).join('')}
+              </div>
+            ` : ''}
+
+            <!-- 4. SUROWE LOGI -->
+            <details style="font-size: 11px; color: var(--fc-text-muted)">
+              <summary style="cursor: pointer; padding: 4px 0; color: var(--fc-text-secondary)">📋 Pokaż pełny tekst raportu i surowe logi</summary>
+              <pre class="fc-diag-session-log" style="margin-top: 6px; max-height: 140px">${esc(app.diagSessionText)}</pre>
+            </details>
           </div>
 
           <div class="modal-footer">
@@ -533,6 +435,7 @@ export async function toggleDiagSession(app: AppUI): Promise<void> {
       app.pushToast('Brak aktywnej sesji diagnostycznej', true);
       return;
     }
+    app.diagSessionReport = report;
     app.diagSessionText = report.text;
     app.diagReportModalOpen = true;
     app.render();

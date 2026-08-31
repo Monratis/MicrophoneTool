@@ -2,9 +2,7 @@
 
 import type { AppUI } from './app';
 import { esc } from './ui';
-
-/** Throttle odpytywania stanow RPC — render potrafi zdarzyc sie kilkanascie razy na minute. */
-let lastRpcStatusFetch = 0;
+import { DEFAULT_CONFIG } from '../../shared/types';
 
 let lastSrgbStatusFetch = 0;
 
@@ -14,6 +12,27 @@ export function renderDiscordPanel(app: AppUI): string {
     const gateVal = snap.state === 'desk'
       ? Math.max(-100, Math.min(0, form.micDeskGateDb ?? -45))
       : Math.max(-100, Math.min(0, form.micHeadsetGateDb ?? -45));
+
+    const discord = snap.discord;
+    let statusText = 'Brak połączenia — Discord nie uruchomiony ✗';
+    let statusColor = '#ef4444';
+
+    if (form.discordIntegration === false) {
+      statusText = 'Integracja wyłączona';
+      statusColor = 'var(--fc-text-dim)';
+    } else if (discord?.ready) {
+      if (discord.authenticated) {
+        statusText = `Połączono${discord.user ? ` (@${discord.user})` : ''} ✓`;
+        statusColor = '#22c55e';
+      } else {
+        statusText = 'Połączono (wymagana autoryzacja OAuth) ⚠';
+        statusColor = '#fbbf24';
+      }
+    } else if (discord?.connected) {
+      statusText = 'Handshake w toku…';
+      statusColor = '#fbbf24';
+    }
+
     return `
       <div class="fc-settings-panel">
         <div class="fc-settings-group">
@@ -32,13 +51,14 @@ export function renderDiscordPanel(app: AppUI): string {
             </div>
             <button class="fc-switch ${form.discordGateFollowMic !== false ? 'active' : ''}" id="sw-discord-follow" aria-checked="${form.discordGateFollowMic !== false}" role="switch"></button>
           </div>
-          <div style="display: flex; gap: 6px">
-            <button class="btn btn-secondary btn-sm" id="btn-discord-auth" style="flex: 1" title="Wywołaj okno autoryzacji OAuth w aplikacji Discord">🔐 Autoryzuj Discord</button>
-            <button class="btn btn-ghost btn-sm" id="btn-discord-sync" style="flex: 1" title="Wyślij bieżący profil głosu i przełącz urządzenie wejściowe w Discordzie">🔄 Synchronizuj profil</button>
+          <div style="display: flex; gap: 6px; flex-wrap: wrap">
+            <button class="btn btn-secondary btn-sm" id="btn-discord-auth" style="flex: 1; min-width: 140px" title="Wywołaj okno autoryzacji OAuth w aplikacji Discord">🔐 Autoryzuj Discord</button>
+            <button class="btn btn-primary btn-sm" id="btn-discord-fetch" style="flex: 1; min-width: 130px" title="Pobierz bieżący próg VAD i filtry DSP z aplikacji Discord">⬇️ Pobierz profil</button>
+            <button class="btn btn-ghost btn-sm" id="btn-discord-sync" style="flex: 1; min-width: 130px" title="Wyślij bieżący profil głosu i przełącz urządzenie wejściowe w Discordzie">📤 Wyślij do Discorda</button>
           </div>
           <div class="fc-field-row">
             <span class="fc-field-label">Połączenie z Discordem</span>
-            <strong id="discord-rpc-status-val" style="color: var(--fc-text-dim)">…</strong>
+            <strong id="discord-rpc-status-val" style="color: ${statusColor}">${statusText}</strong>
           </div>
           <div class="fc-field-row" style="border-top: 1px solid var(--fc-card-border); padding-top: 10px">
             <span class="fc-field-label">Aktywny próg Discord</span>
@@ -80,15 +100,19 @@ export async function refreshSignalrgbStatus(_app: AppUI): Promise<void> {
     }
   }
 
-  /** Podpowiedzi nazw efektów z dysku VortxEngine (bez Pro) do obu pickerów. */
-export async function refreshSignalrgbEffectList(_app: AppUI): Promise<void> {
-    const el = document.getElementById('signalrgb-effects-list');
-    if (!el) return;
+  /** Podpowiedzi i lista efektów z dysku SignalRGB (bez Pro) do obu pickerów. */
+export async function refreshSignalrgbEffectList(app: AppUI): Promise<void> {
     try {
       const names = await window.api.signalrgbListEffects();
-      const target = document.getElementById('signalrgb-effects-list');
-      if (!target) return; // render mógł podmienić DOM w trakcie zapytania
-      target.innerHTML = names.map((n) => `<option value="${esc(n)}"></option>`).join('');
+      if (Array.isArray(names) && names.length > 0) {
+        app.signalrgbEffects = names;
+        const countEl = document.getElementById('signalrgb-effects-count');
+        if (countEl) countEl.textContent = `(wykryto: ${names.length})`;
+        const target = document.getElementById('signalrgb-effects-list');
+        if (target) {
+          target.innerHTML = names.map((n) => `<option value="${esc(n)}"></option>`).join('');
+        }
+      }
     } catch {
       /* lista niedostępna — inputy zostają free-text */
     }
@@ -96,9 +120,6 @@ export async function refreshSignalrgbEffectList(_app: AppUI): Promise<void> {
 
   /** Aktualizuje wiersz "Połączenie z Discordem" w panelu (element istnieje tylko tam). */
 export async function refreshDiscordRpcStatus(_app: AppUI): Promise<void> {
-    const now = Date.now();
-    if (now - lastRpcStatusFetch < 5000) return;
-    lastRpcStatusFetch = now;
     const val = document.getElementById('discord-rpc-status-val');
     if (!val) return;
     try {
@@ -108,7 +129,7 @@ export async function refreshDiscordRpcStatus(_app: AppUI): Promise<void> {
       if (s.ready) {
         target.textContent = s.authenticated
           ? `Połączono${s.user ? ` (@${s.user})` : ''} ✓`
-          : 'Połączono (bez autoryzacji OAuth) ⚠';
+          : 'Połączono (wymagana autoryzacja OAuth) ⚠';
         target.style.color = s.authenticated ? '#22c55e' : '#fbbf24';
       } else if (s.connected) {
         target.textContent = 'Handshake w toku…';
@@ -128,6 +149,37 @@ export async function refreshDiscordRpcStatus(_app: AppUI): Promise<void> {
 
 export function renderSignalrgbPanel(app: AppUI): string {
     const form = app.form!;
+    const effects =
+      app.signalrgbEffects && app.signalrgbEffects.length > 0
+        ? app.signalrgbEffects
+        : ['Solid Color', 'Neon Shift', 'Rainbow', 'Screen Ambience', 'Color Shift', 'Side To Side'];
+
+    const deskAction =
+      form.signalrgbDeskAction ||
+      (form.signalrgbRestoreOnDesk === false ? 'none' : 'effect');
+    const awayAction = form.signalrgbAwayAction || 'solid_color';
+
+    const curAway = (form.signalrgbAwayEffect || '').trim();
+    const curDesk = (form.signalrgbDeskEffect || '').trim();
+
+    const isAwayInList = !curAway || curAway === 'Solid Color' || effects.includes(curAway);
+    const isDeskInList = !curDesk || curDesk === 'Neon Shift' || effects.includes(curDesk);
+
+    const awayOptions = [
+      `<option value="Solid Color" ${!curAway || curAway === 'Solid Color' ? 'selected' : ''}>Solid Color (z kolorem)</option>`,
+      ...effects
+        .filter((e) => e !== 'Solid Color')
+        .map((e) => `<option value="${esc(e)}" ${curAway === e ? 'selected' : ''}>${esc(e)}</option>`),
+      ...(!isAwayInList && curAway ? [`<option value="${esc(curAway)}" selected>Własny: ${esc(curAway)}</option>`] : []),
+      `<option value="__custom__" ${app.signalrgbCustomAway ? 'selected' : ''}>✏️ Wpisz własną nazwę…</option>`
+    ].join('');
+
+    const deskOptions = [
+      ...effects.map((e) => `<option value="${esc(e)}" ${(curDesk || 'Neon Shift') === e ? 'selected' : ''}>${esc(e)}</option>`),
+      ...(!isDeskInList && curDesk ? [`<option value="${esc(curDesk)}" selected>Własny: ${esc(curDesk)}</option>`] : []),
+      `<option value="__custom__" ${app.signalrgbCustomDesk ? 'selected' : ''}>✏️ Wpisz własną nazwę…</option>`
+    ].join('');
+
     return `
       <div class="fc-settings-panel">
         <div class="fc-settings-group">
@@ -135,7 +187,7 @@ export function renderSignalrgbPanel(app: AppUI): string {
           <div class="fc-field-row">
             <div>
               <div class="fc-field-label">Włącz synchronizację oświetlenia</div>
-              <div class="fc-field-desc">Lokalne REST API SignalRGB (port ${form.signalrgbPort ?? 16038})</div>
+              <div class="fc-field-desc">Lokalne REST API SignalRGB (port ${form.signalrgbPort ?? DEFAULT_CONFIG.signalrgbPort})</div>
             </div>
             <button class="fc-switch ${form.signalrgbEnabled ? 'active' : ''}" id="sw-signalrgb" aria-checked="${form.signalrgbEnabled ?? false}" role="switch"></button>
           </div>
@@ -143,62 +195,120 @@ export function renderSignalrgbPanel(app: AppUI): string {
             <span class="fc-field-label">Local API SignalRGB</span>
             <strong id="signalrgb-status-val" style="color: var(--fc-text-dim)">…</strong>
           </div>
+
+          <div style="border-top: 1px solid var(--fc-card-border); margin: 10px 0 6px; padding-top: 8px">
+            <div style="font-size: 11.5px; font-weight: 700; color: var(--fc-accent-green); margin-bottom: 8px">🖥️ Gdy jesteś przy biurku (Stan: BIURKO)</div>
+          </div>
+
           <div class="fc-field-row">
             <div>
-              <div class="fc-field-label">Po odejściu od biurka</div>
+              <div class="fc-field-label">Akcja oświetlenia przy biurku</div>
+              <div class="fc-field-desc">Wybierz stały efekt pracy przy biurku lub odtwórz stan sprzed odejścia</div>
             </div>
-            <select class="fc-select fc-select-sm" id="sel-signalrgb-away-action" style="width: 180px">
-              <option value="turn_off" ${(form.signalrgbAwayAction || 'turn_off') === 'turn_off' ? 'selected' : ''}>Zgaś całkowicie LED</option>
-              <option value="dim" ${form.signalrgbAwayAction === 'dim' ? 'selected' : ''}>Przyciemnij</option>
-              <option value="solid_color" ${form.signalrgbAwayAction === 'solid_color' ? 'selected' : ''}>Kolor ostrzegawczy</option>
+            <select class="fc-select fc-select-sm" id="sel-signalrgb-desk-action" style="width: 200px">
+              <option value="effect" ${deskAction === 'effect' ? 'selected' : ''}>Ustaw wybrany efekt</option>
+              <option value="restore" ${deskAction === 'restore' ? 'selected' : ''}>Przywróć stan sprzed odejścia (Pro)</option>
+              <option value="none" ${deskAction === 'none' ? 'selected' : ''}>Brak akcji (nie zmieniaj)</option>
             </select>
           </div>
-          ${(form.signalrgbAwayAction || 'solid_color') === 'solid_color' ? `
+
+          ${deskAction === 'effect' ? `
           <div class="fc-field-row">
             <div>
-              <div class="fc-field-label">Efekt przy odejściu (deep-link)</div>
-              <div class="fc-field-desc">Dowolny zainstalowany efekt z biblioteki SignalRGB (nazwa dokładnie jak w apce). Kolor przenosimy jako parametr deep-linku. Puste = Solid Color.</div>
+              <div class="fc-field-label">Efekt przy biurku</div>
+              <div class="fc-field-desc">Efekt świetlny aktywowany, gdy usiądziesz przy biurku</div>
             </div>
-            <input type="text" class="fc-input" id="inp-signalrgb-away-effect" list="signalrgb-effects-list" placeholder="Solid Color" value="${esc(form.signalrgbAwayEffect || '')}" style="width: 170px; height: 30px; font-size: 11.5px" />
+            <div style="display: flex; gap: 6px; align-items: center">
+              ${app.signalrgbCustomDesk ? `
+                <input type="text" class="fc-input fc-input-sm" id="inp-signalrgb-desk-effect-custom" list="signalrgb-effects-list" placeholder="np. Neon Shift" value="${esc(curDesk || 'Neon Shift')}" style="width: 155px; height: 30px; font-size: 11.5px" />
+                <button class="btn btn-ghost btn-sm" id="btn-cancel-custom-desk" title="Wróć do listy rozwijanej" style="padding: 4px 8px">↩️</button>
+              ` : `
+                <select class="fc-select fc-select-sm" id="sel-signalrgb-desk-effect" style="width: 180px">
+                  ${deskOptions}
+                </select>
+              `}
+              <button class="btn btn-ghost btn-sm" id="btn-preview-signalrgb-desk" title="Sprawdź / przetestuj ten efekt na żywo w SignalRGB" style="padding: 4px 9px">▶️</button>
+            </div>
+          </div>
+          ${(curDesk === 'Solid Color' || app.signalrgbCustomDesk) ? `
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Kolor efektu przy biurku</div>
+              <div class="fc-field-desc">Kolor przekazywany jako parametr dla efektu Solid Color</div>
+            </div>
+            <input type="color" class="fc-color-input" id="clr-signalrgb-desk" value="${esc(form.signalrgbDeskColor || '#00e5ff')}" title="Kolor oświetlenia przy biurku" />
+          </div>` : ''}
+          ` : ''}
+
+          <div style="border-top: 1px solid var(--fc-card-border); margin: 10px 0 6px; padding-top: 8px">
+            <div style="font-size: 11.5px; font-weight: 700; color: #fbbf24; margin-bottom: 8px">🚶 Po odejściu od biurka (Stan: ODEJŚCIE)</div>
+          </div>
+
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Akcja po odejściu</div>
+              <div class="fc-field-desc">Co zrobić z podświetleniem po wykryciu nieobecności</div>
+            </div>
+            <select class="fc-select fc-select-sm" id="sel-signalrgb-away-action" style="width: 200px">
+              <option value="solid_color" ${awayAction === 'solid_color' ? 'selected' : ''}>Ustaw efekt / Kolor ostrzegawczy</option>
+              <option value="turn_off" ${awayAction === 'turn_off' ? 'selected' : ''}>Zgaś całkowicie LED (Black)</option>
+              <option value="dim" ${awayAction === 'dim' ? 'selected' : ''}>Przyciemnij oświetlenie (Pro)</option>
+            </select>
+          </div>
+
+          ${awayAction === 'solid_color' ? `
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Efekt przy odejściu</div>
+              <div class="fc-field-desc">Wybierz efekt z biblioteki SignalRGB. Kolor przekazywany jest jako parametr.</div>
+            </div>
+            <div style="display: flex; gap: 6px; align-items: center">
+              ${app.signalrgbCustomAway ? `
+                <input type="text" class="fc-input fc-input-sm" id="inp-signalrgb-away-effect-custom" list="signalrgb-effects-list" placeholder="Nazwa efektu" value="${esc(curAway)}" style="width: 155px; height: 30px; font-size: 11.5px" />
+                <button class="btn btn-ghost btn-sm" id="btn-cancel-custom-away" title="Wróć do listy rozwijanej" style="padding: 4px 8px">↩️</button>
+              ` : `
+                <select class="fc-select fc-select-sm" id="sel-signalrgb-away-effect" style="width: 180px">
+                  ${awayOptions}
+                </select>
+              `}
+              <button class="btn btn-ghost btn-sm" id="btn-preview-signalrgb-away" title="Sprawdź / przetestuj ten efekt na żywo w SignalRGB" style="padding: 4px 9px">▶️</button>
+            </div>
           </div>
           <div class="fc-field-row">
             <div>
               <div class="fc-field-label">Kolor ostrzegawczy</div>
               <div class="fc-field-desc">Kolor przekazany efektowi jako parametr (efekty bez parametru koloru go ignorują)</div>
             </div>
-            <input type="color" class="fc-color-input" id="clr-signalrgb-away" value="${esc(form.signalrgbAwayColor || '#f59e0b')}" title="Kolor oświetlenia po odejściu" />
+            <input type="color" class="fc-color-input" id="clr-signalrgb-away" value="${esc(form.signalrgbAwayColor || DEFAULT_CONFIG.signalrgbAwayColor)}" title="Kolor oświetlenia po odejściu" />
           </div>` : ''}
-          ${form.signalrgbAwayAction === 'dim' ? `
+
+          ${awayAction === 'dim' ? `
           <div class="fc-field-row">
             <div>
               <div class="fc-field-label">Poziom przyciemnienia</div>
             </div>
             <div class="fc-slider-row" style="width: 180px">
-              <input type="range" class="fc-slider" id="rng-signalrgb-bri" min="0" max="100" step="5" value="${form.signalrgbAwayBrightness ?? 0}" />
-              <span style="font-size: 11px; font-weight: 600; color: #fff; width: 34px; text-align: right" id="val-signalrgb-bri">${form.signalrgbAwayBrightness ?? 0}%</span>
+              <input type="range" class="fc-slider" id="rng-signalrgb-bri" min="0" max="100" step="5" value="${form.signalrgbAwayBrightness ?? DEFAULT_CONFIG.signalrgbAwayBrightness}" />
+              <span style="font-size: 11px; font-weight: 600; color: #fff; width: 34px; text-align: right" id="val-signalrgb-bri">${form.signalrgbAwayBrightness ?? DEFAULT_CONFIG.signalrgbAwayBrightness}%</span>
             </div>
           </div>` : ''}
-          <div class="fc-field-row">
-            <div>
-              <div class="fc-field-label">Przywróć oświetlenie po powrocie</div>
-              <div class="fc-field-desc">Odtwarza efekt i jasność zapamiętane sprzed odejścia</div>
-            </div>
-            <button class="fc-switch ${form.signalrgbRestoreOnDesk !== false ? 'active' : ''}" id="sw-signalrgb-restore" aria-checked="${form.signalrgbRestoreOnDesk !== false}" role="switch"></button>
+
+          <datalist id="signalrgb-effects-list">
+            ${effects.map((e) => `<option value="${esc(e)}"></option>`).join('')}
+          </datalist>
+
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px; padding: 4px 0">
+            <span style="font-size: 10.5px; color: var(--fc-text-muted)">Zainstalowane efekty: <strong id="signalrgb-effects-count" style="color: var(--fc-text-primary)">${effects.length}</strong></span>
+            <button class="text-btn" id="btn-refresh-signalrgb-effects" title="Przeskanuj ponownie bibliotekę SignalRGB w poszukiwaniu nowych efektów">🔄 Odśwież listę efektów</button>
           </div>
-          <div class="fc-field-row">
-            <div>
-              <div class="fc-field-label">Efekt powrotu (fallback bez Pro)</div>
-              <div class="fc-field-desc">Gdy REST niedostępny (Local API wymaga SignalRGB Pro), przy powrocie aplikowany jest ten efekt przez deep-link. Puste = brak przywracania bez Pro.</div>
-            </div>
-            <input type="text" class="fc-input" id="inp-signalrgb-desk-effect" list="signalrgb-effects-list" placeholder="np. Neon Shift" value="${esc(form.signalrgbDeskEffect || '')}" style="width: 170px; height: 30px; font-size: 11.5px" />
+
+          <div style="font-size: 10.5px; color: var(--fc-text-muted); line-height: 1.5; margin-top: 4px">
+            Bez SignalRGB Pro działają: wybór dowolnego efektu na biurko i odejście, „Kolor ostrzegawczy" oraz „Zgaś całkowicie" (czarny Solid Color). „Przyciemnij" oraz automatyczne przywracanie stanu sprzed odejścia wymagają REST z Pro.
           </div>
-          <datalist id="signalrgb-effects-list"></datalist>
-          <div style="font-size: 10.5px; color: var(--fc-text-muted); line-height: 1.5; margin-top: 2px">
-            Bez SignalRGB Pro działają: „Kolor ostrzegawczy" (deep-link z kolorem) i „Zgaś całkowicie" (czarny Solid Color). „Przyciemnij" oraz odtwarzanie zapisanego stanu wymagają REST z Pro — apka wykrywa odmowę 403 i stosuje fallbacki.
-          </div>
-          <div style="display: flex; gap: 6px">
-            <button class="btn btn-ghost btn-sm" id="btn-test-signalrgb-away" style="flex: 1">Test: Odejście</button>
+
+          <div style="display: flex; gap: 6px; margin-top: 10px">
             <button class="btn btn-ghost btn-sm" id="btn-test-signalrgb-desk" style="flex: 1">Test: Biurko</button>
+            <button class="btn btn-ghost btn-sm" id="btn-test-signalrgb-away" style="flex: 1">Test: Odejście</button>
           </div>
         </div>
       </div>
@@ -227,9 +337,9 @@ export function renderCustomAudioRow(_app: AppUI, variant: 'desk' | 'headset', l
 
 export function renderChimePanel(app: AppUI): string {
     const form = app.form!;
-    const chimeVol = Math.round((form.audioChimeVolume ?? 0.2) * 100);
-    const ssDelay = form.screensaverDelayMs ?? 60000;
-    const sleepDelay = form.sleepMonitorsDelayMs ?? 600000;
+    const chimeVol = Math.round((form.audioChimeVolume ?? DEFAULT_CONFIG.audioChimeVolume) * 100);
+    const ssDelay = form.screensaverDelayMs ?? DEFAULT_CONFIG.screensaverDelayMs;
+    const sleepDelay = form.sleepMonitorsDelayMs ?? DEFAULT_CONFIG.sleepMonitorsDelayMs;
     return `
       <div class="fc-settings-panel">
         <div class="fc-settings-group">

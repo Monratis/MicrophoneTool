@@ -1,9 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { SerialPort } from 'serialport';
-import AutoTuner from './autoTuner';
 import { DistanceFilter, BiometricFilter, IlluminanceFilter } from './signalFilter';
 import { appendLog } from './logger';
 import { recordSample } from './diagRecorder';
+import { recordDiagTimelineEvent, isDiagSessionActive } from './diagSession';
 import type Config from './config';
 import type ActivityWatcher from './activityWatcher';
 import type { DeskState, DetectedPerson, RadarTelemetry } from '../shared/types';
@@ -31,18 +31,10 @@ interface RadarStatusEvent {
   since?: number;
 }
 
-interface Sample {
-  distanceCm: number;
-  heartRate: number;
-  breathRate: number;
-  isSeated: boolean;
-}
-
 type SerialPortCtor = typeof SerialPort;
 
 export default class RadarListener extends EventEmitter {
   private readonly config: Config;
-  private readonly autoTuner: AutoTuner;
 
   port: InstanceType<typeof SerialPort> | null = null;
   private SerialPortCtor: SerialPortCtor | null = null;
@@ -61,20 +53,6 @@ export default class RadarListener extends EventEmitter {
   // Znaczniki czasu dla niezależnego wygaszania telemetrycznego i watchdoga ciszy
   private lastPresencePacketTime = 0;
   private lastDistanceTime = 0;
-  /** Ostatni zaufany (wygładzony) odczyt dystansu — telemetry.distanceCm bywa
-   * zerowany przy OFF, a ten zostaje do oceny geometrii w momencie zgubienia celu. */
-  private lastTrustedDistanceCm = 0;
-  /** Od kiedy (unix ms) świeże odczyty dystansu są ponad górną bramkę — 0 = w bramce. */
-  private outOfGateSince = 0;
-  /** True, gdy obecność została wygaszona przez górną bramkę dystansu (fizyczne wyjście). */
-  private outOfGateCut = false;
-  /** Od kiedy (unix ms) świeże odczyty dystansu są z powrotem w bramce — podstawa
-   * zdejmowania zaczepu outOfGateCut po geometrycznym powrocie do biurka. */
-  private returnGateSince = 0;
-  /** Start ciągłego AWAY (ustawiany w setState) — baza dla potwierdzania powrotu. */
-  private awayContinuousSince = 0;
-  /** Start okna stabilizacji ON przy powrocie po głębokiej nieobecności. */
-  private deepConfirmSince = 0;
   private lastHeartRateTime = 0;
   private lastBreathRateTime = 0;
   private lastTargetCountTime = 0;
@@ -93,7 +71,6 @@ export default class RadarListener extends EventEmitter {
   constructor(config: Config) {
     super();
     this.config = config;
-    this.autoTuner = new AutoTuner(config);
     this.telemetry = {
       presence: false,
       distanceCm: 0,
@@ -102,21 +79,45 @@ export default class RadarListener extends EventEmitter {
       heartRate: 0,
       breathRate: 0,
       illuminanceLux: undefined,
-      detectedPerson: 'unknown' as DetectedPerson,
-      autoTuning: this.autoTuner.getStatus()
+      detectedPerson: 'unknown' as DetectedPerson
     };
   }
 
   setActivityWatcher(watcher: ActivityWatcher): void {
     this.activityWatcher = watcher;
     watcher.on('activity', ({ freshInput }) => {
+      if (isDiagSessionActive()) {
+        recordDiagTimelineEvent('INPUT_HOLD', 'Wykryto aktywność wejścia (klawiatura / mysz)');
+      }
       if (this.config.get('userInputPresenceEnabled') === false) return;
-      if (!this.presence && freshInput) {
+      if (!this.presence && freshInput && !watcher.isLocked && !watcher.isSuspended) {
         appendLog('RADAR', 'Potwierdzono powrót do biurka aktywnością klawiatury/myszy (instant wake)');
         this.handleRawPresence(true);
-      } else if (this.presence) {
+      } else if (this.presence && !watcher.isLocked && !watcher.isSuspended) {
         this.lastPresencePacketTime = Date.now();
       }
+    });
+
+    watcher.on('lock', () => {
+      if (this.config.get('userInputPresenceEnabled') === false) return;
+      appendLog('RADAR', 'Zablokowanie ekranu Windows — natychmiastowe przejście w stan AWAY (0 ms)');
+      recordDiagTimelineEvent('LOCK_SCREEN', 'Zablokowano ekran Windows (Win + L) — natychmiastowe przejście w AWAY (0 ms)');
+      this.handleRawPresence(false, 'seat_abandoned');
+    });
+
+    watcher.on('unlock', () => {
+      if (this.config.get('userInputPresenceEnabled') === false) return;
+      appendLog('RADAR', 'Odblokowanie ekranu Windows — natychmiastowy powrót na DESK (0 ms)');
+      recordDiagTimelineEvent('UNLOCK_SCREEN', 'Odblokowano ekran Windows — natychmiastowy powrót na DESK (0 ms)');
+      this.handleRawPresence(true, 'frame');
+    });
+
+    watcher.on('suspend', () => {
+      this.handleRawPresence(false, 'blind');
+    });
+
+    watcher.on('resume', () => {
+      // Wybudzenie
     });
   }
 
@@ -150,7 +151,7 @@ export default class RadarListener extends EventEmitter {
 
   private startWatchdog(): void {
     if (this.watchdogTimer) return;
-    this.watchdogTimer = setInterval(() => this.onWatchdogTick(), 1000);
+    this.watchdogTimer = setInterval(() => this.onWatchdogTick(), 200);
   }
 
   private stopWatchdog(): void {
@@ -203,7 +204,9 @@ export default class RadarListener extends EventEmitter {
       this.scheduleTelemetry();
     }
 
-    // Watchdog obecności: jeśli obecność aktywna, ale brak jakiegokolwiek sygnału z radaru przez >15s i brak aktywności myszy/klawiatury -> wygaś
+
+
+    // Watchdog obecności: jeśli obecność aktywna, ale brak jakiegokolwiek sygnału z radaru przez >10s i brak aktywności myszy/klawiatury -> wygaś
     if (this.presence) {
       const lastDetectionTime = Math.max(
         this.lastPresencePacketTime,
@@ -212,9 +215,9 @@ export default class RadarListener extends EventEmitter {
         this.lastBreathRateTime
       );
       const silenceDuration = lastDetectionTime > 0 ? now - lastDetectionTime : 10000;
-      const isInputActive = this.activityWatcher?.isUserActiveRecently(15) ?? false;
+      const isInputActive = this.activityWatcher?.isUserActiveRecently(10) ?? false;
 
-      if (silenceDuration > 15000 && !isInputActive) {
+      if (silenceDuration > 10000 && !isInputActive) {
         appendLog(
           'RADAR',
           `Brak jakiegokolwiek sygnału z radaru przez ${(silenceDuration / 1000).toFixed(1)}s — automatyczne wygaszenie obecności (watchdog)`
@@ -437,7 +440,6 @@ export default class RadarListener extends EventEmitter {
               this.updateDistance(dist);
             } else {
               this.updateDistance(0);
-              this.handleRawPresence(false);
             }
           }
           if (
@@ -504,7 +506,6 @@ export default class RadarListener extends EventEmitter {
               this.updateDistance(distCm);
             } else if (val === 0) {
               this.updateDistance(0);
-              this.handleRawPresence(false);
             }
           }
 
@@ -534,9 +535,6 @@ export default class RadarListener extends EventEmitter {
             if (Number.isFinite(count) && count >= 0) {
               this.telemetry.targetCount = Math.max(0, Math.min(5, count));
               this.lastTargetCountTime = Date.now();
-              if (count === 0) {
-                this.handleRawPresence(false);
-              }
               continue;
             }
           }
@@ -623,7 +621,6 @@ export default class RadarListener extends EventEmitter {
           this.updateDistance(distCm);
         } else if (val === 0) {
           this.updateDistance(0);
-          this.handleRawPresence(false);
         }
       }
       const plainHrMatch = line.match(/^heart_rate:\s*([0-9.]+)/i);
@@ -669,6 +666,9 @@ export default class RadarListener extends EventEmitter {
    * Typy: 0x0A14 oddech, 0x0A15 tętno, 0x0A16 dystans, 0x0F09 obecność.
    */
   private scanBinaryFrames(): void {
+    if (this.rawBuffer.length > 4096) {
+      this.rawBuffer = this.rawBuffer.subarray(this.rawBuffer.length - 1024);
+    }
     while (this.rawBuffer.length >= 7) {
       // Szukanie początku ramki (0x53 0x59 lub 0x01)
       if (
@@ -864,8 +864,6 @@ export default class RadarListener extends EventEmitter {
         const val = payload[0];
         if (val === 0x01 || val === 0x02) {
           this.handleRawPresence(true);
-        } else {
-          this.handleRawPresence(false);
         }
       }
       return;
@@ -924,23 +922,6 @@ export default class RadarListener extends EventEmitter {
     }
   }
 
-  private autoTuneWasCalibrated = false;
-
-  private feedAutoTuner(sample: Sample): void {
-    this.autoTuner.feedSample(sample);
-    const gate = this.autoTuner.getDynamicGate();
-    if (gate.isCalibrated !== this.autoTuneWasCalibrated) {
-      this.autoTuneWasCalibrated = gate.isCalibrated;
-      if (gate.isCalibrated) {
-        appendLog(
-          'RADAR',
-          `Auto-tuning: strefa fotela wyuczona (${gate.centerCm} cm) — adaptacyjna bramka górna ${gate.maxGateCm} cm`
-        );
-      }
-    }
-    this.telemetry.autoTuning = this.autoTuner.getStatus();
-  }
-
   private lastTelemetryEmit = 0;
   private telemetryFlushTimer: NodeJS.Timeout | null = null;
   private lastTelemetrySig = '';
@@ -969,10 +950,9 @@ export default class RadarListener extends EventEmitter {
 
   private buildTelemetrySig(): string {
     const t = this.telemetry;
-    const tun = t.autoTuning;
     return (
       `${t.presence ? 1 : 0}|${t.distanceCm ?? 0}|${t.targetCount ?? 0}|${t.heartRate ?? 0}|${t.breathRate ?? 0}|${t.illuminanceLux ?? ''}|` +
-      `${t.detectedPerson ?? ''}|${Math.floor((tun?.samplesCount ?? 0) / 10)}`
+      `${t.detectedPerson ?? ''}`
     );
   }
 
@@ -1000,81 +980,27 @@ export default class RadarListener extends EventEmitter {
   }
 
   private updateDistance(distCm: number): void {
-    if (distCm <= 0 || distCm > 800) {
+    if (distCm <= 0 || distCm > 200) {
       this.telemetry.distanceCm = 0;
       this.distanceFilter.reset();
-      // Pusty odczyt w nieobecności = czysty sygnał dla pomiaru szumu auto-tuningu.
-      this.feedAutoTuner({
-        distanceCm: 0,
-        heartRate: 0,
-        breathRate: 0,
-        isSeated: Boolean(this.presence || this.state === 'desk')
-      });
       return;
     }
-    this.lastDistanceTime = Date.now();
+    const now = Date.now();
+    this.lastDistanceTime = now;
     this.applySmoothingConfig();
 
     const smoothedCm = this.distanceFilter.push(distCm);
     recordSample('dist', distCm);
     this.telemetry.distanceCm = smoothedCm;
-    this.lastTrustedDistanceCm = smoothedCm;
 
     this.logDsp('distance', 'Dystans', smoothedCm, distCm, 'cm');
 
-    // Górna bramka dystansu: cel powyżej radarMaxDistanceCm przez 1,2 s świeżych
-    // odczytów to fizyczne wyjście z zasięgu stacji — wygaszamy obecność,
-    // nie czekając aż firmware odwróci swój bit obecności. Bez tej bramki
-    // wyjście z pomieszczenia potrafiło trzymać DESK kilkanaście sekund.
-    // Po kalibracji auto-tuningu bramka poszerza się o wyuczony margines fotela
-    // (getDynamicGate jest widen-only względem configu — nigdy nie zawęża).
-    const maxGate = this.autoTuner.getDynamicGate().maxGateCm;
-
-    // Kasowanie zaczepu wyjścia WYŁĄCZNIE geometrycznie: świeże odczyty z
-    // powrotem w bramce przez 1 s = cel fizycznie wrócił przy biurko. Ramka ON
-    // tego zaczepu nie zdejmuje (patrz handleRawPresence).
-    if (this.outOfGateCut) {
-      if (smoothedCm <= maxGate) {
-        if (this.returnGateSince === 0) {
-          this.returnGateSince = Date.now();
-        } else if (Date.now() - this.returnGateSince >= 1000) {
-          this.returnGateSince = 0;
-          this.outOfGateCut = false;
-          appendLog(
-            'RADAR',
-            `Cel z powrotem w bramce (${Math.round(smoothedCm)} cm, bramka ${maxGate} cm) — zdejmuje zaczep wyjścia`
-          );
-        }
-      } else {
-        this.returnGateSince = 0;
-      }
+    if (isDiagSessionActive()) {
+      recordDiagTimelineEvent('DISTANCE', `Dystans: ${distCm.toFixed(1)} cm (DSP: ${smoothedCm.toFixed(1)} cm)`, {
+        distCm,
+        smoothedCm
+      });
     }
-
-    if (this.config.get('radarDistanceGateEnabled') !== false && this.presence) {
-      if (smoothedCm > maxGate) {
-        if (this.outOfGateSince === 0) {
-          this.outOfGateSince = Date.now();
-        } else if (Date.now() - this.outOfGateSince >= 1200) {
-          this.outOfGateSince = 0;
-          appendLog(
-            'RADAR',
-            `Cel ${Math.round(smoothedCm)} cm ponad górną bramkę (${maxGate} cm) — wygaszam obecność`
-          );
-          this.outOfGateCut = true;
-          this.handleRawPresence(false);
-          return;
-        }
-      } else {
-        this.outOfGateSince = 0;
-      }
-    }
-
-    this.feedAutoTuner({
-      distanceCm: smoothedCm,
-      heartRate: this.telemetry.heartRate || 0,
-      breathRate: this.telemetry.breathRate || 0,
-      isSeated: Boolean(this.presence || this.state === 'desk')
-    });
 
     this.scheduleTelemetry();
   }
@@ -1119,12 +1045,9 @@ export default class RadarListener extends EventEmitter {
 
     this.logDsp('heart', 'Tętno', smoothedBpm, bpm, 'BPM', 'surowe');
 
-    this.feedAutoTuner({
-      distanceCm: this.telemetry.distanceCm || 0,
-      heartRate: smoothedBpm,
-      breathRate: this.telemetry.breathRate || 0,
-      isSeated: Boolean(this.presence || this.state === 'desk')
-    });
+    if (isDiagSessionActive()) {
+      recordDiagTimelineEvent('BIO', `Tętno: ${smoothedBpm} BPM (surowe: ${bpm} BPM)`, { bpm, smoothedBpm });
+    }
 
     this.scheduleTelemetry();
   }
@@ -1137,7 +1060,8 @@ export default class RadarListener extends EventEmitter {
       }
       return;
     }
-    this.lastBreathRateTime = Date.now();
+    const now = Date.now();
+    this.lastBreathRateTime = now;
     this.applySmoothingConfig();
 
     const smoothedRpm = this.breathFilter.push(rpm);
@@ -1145,13 +1069,6 @@ export default class RadarListener extends EventEmitter {
     this.telemetry.breathRate = smoothedRpm;
 
     this.logDsp('breath', 'Oddech', smoothedRpm, rpm, 'RPM');
-
-    this.feedAutoTuner({
-      distanceCm: this.telemetry.distanceCm || 0,
-      heartRate: this.telemetry.heartRate || 0,
-      breathRate: smoothedRpm,
-      isSeated: Boolean(this.presence || this.state === 'desk')
-    });
 
     this.scheduleTelemetry();
   }
@@ -1164,68 +1081,20 @@ export default class RadarListener extends EventEmitter {
   }
 
   /**
-   * `source='blind'` oznacza, że radar NIE WIDZI (milczenie strumienia, błąd
-   * portu) — wtedy aktywność wejściowa ratuje obecność przez dłuższe okno.
-   * `source='frame'` to jawny raport radaru "pomieszczenie puste" — ratunek
-   * wejściowy ma wtedy krótkie okno, bo zaufanie Radarowi skraca czas do
-   * przejścia w AWAY (wcześniej 15 s okno trzymało DESK ~15 s po wyjściu).
+   * `source='blind'` oznacza, że radar NIE WIDZI (milczenie strumienia, błąd portu).
+   * `source='seat_abandoned'` to szybkie wykrycie opuszczenia fotela (zanik bio + odległość).
+   * `source='frame'` to jawny raport radaru "pomieszczenie puste" (OFF z fuzji/sprzętu).
    */
-  private handleRawPresence(rawPresent: boolean, source: 'frame' | 'blind' = 'frame'): void {
+  private handleRawPresence(rawPresent: boolean, source: 'frame' | 'blind' | 'seat_abandoned' = 'frame'): void {
     if (source === 'frame') {
       recordSample('presence', rawPresent ? 1 : 0);
+      recordDiagTimelineEvent('RADAR_RAW', `Radar zgłasza bit obecności: ${rawPresent ? 'ON' : 'OFF'} (strumień UART)`, { rawPresent });
     }
     if (rawPresent) {
       this.lastPresencePacketTime = Date.now();
-      this.outOfGateSince = 0;
-      // outOfGateCut celowo NIE jest tu kasowany: pojedyncza ramka ON z odbicia
-      // (ghost przy 130+ cm w trakcie odchodzenia) wycierała dowód wyjścia i OFF
-      // po niej wpadał w 5 s ochronę dropoutową, drastycznie wydłużając AWAY.
-      // Zaczep zdejmuje wyłącznie geometria — patrz updateDistance.
-    }
-
-    // Potwierdzanie powrotu po głębokiej nieobecności: po długim ciągłym AWAY
-    // sam bit ON nie przełącza mikrofonu — bit musi wytrzymać stabilnie
-    // deepAwayConfirmMs (krótkie błyski odbić/wielodrogu wygasają po drodze).
-    // Aktywność klawiatury/myszy potwierdza człowieka natychmiast.
-    if (rawPresent && !this.presence && this.isDeepAwayConfirmActive()) {
-      const inputActive = this.activityWatcher?.isUserActiveRecently(2) ?? false;
-      if (!inputActive) {
-        const confirmMs = Number(this.config.get('radarDeepAwayConfirmMs')) || 3000;
-        if (this.deepConfirmSince === 0) {
-          this.deepConfirmSince = Date.now();
-          appendLog(
-            'RADAR',
-            `Długa nieobecność (${this.formatAwayDuration()}) — wymagam ${(confirmMs / 1000).toFixed(0)} s stabilnego sygnału obecności przed przełączeniem`
-          );
-        }
-        if (Date.now() - this.deepConfirmSince < confirmMs) {
-          return;
-        }
-        this.deepConfirmSince = 0;
-        appendLog('RADAR', 'Obecność po nieobecności ustabilizowana — potwierdzam powrót');
-      } else {
-        this.deepConfirmSince = 0;
-        appendLog('RADAR', 'Powrót po długiej nieobecności potwierdzony aktywnością wejścia');
-      }
-    } else if (!rawPresent) {
-      this.deepConfirmSince = 0;
     }
 
     let effectivePresence = rawPresent;
-
-    // Powrót wymaga geometrii: dopóki trzyma się zaczep wyjścia, ramka ON przy
-    // dystansie nadal ponad górną bramką nie odtwarza obecności (ghost ON na
-    // odbiciu od fotela/ściany po wyjściu przełączał z powrotem na DESK na
-    // kilka-kilkanaście sekund). Ramka ON bez świeżego dystansu przepuszcza —
-    // awaria strumienia nie może uwięzić użytkownika w AWAY.
-    if (rawPresent && this.outOfGateCut && !this.presence) {
-      const maxGate = this.autoTuner.getDynamicGate().maxGateCm;
-      const distFresh =
-        this.lastTrustedDistanceCm > 0 && Date.now() - this.lastDistanceTime < 5000;
-      if (distFresh && this.lastTrustedDistanceCm > maxGate) {
-        return;
-      }
-    }
 
     // 1. Filtr zwierzaka (kot na fotelu)
     const isPet = this.checkPetPresence();
@@ -1235,14 +1104,14 @@ export default class RadarListener extends EventEmitter {
 
     // 2. Aktywność wejściowa (klawiatura / mysz) - potwierdzenie człowieka
     if (!effectivePresence) {
-      const inputWindowSec = source === 'blind' ? 15 : 1;
+      const holdSec = Math.max(0.5, Number(this.config.get('userInputPresenceHoldSec')) || 0.5);
+      const inputWindowSec = source === 'blind' ? Math.max(15, holdSec) : holdSec;
       const isInputActive = this.activityWatcher?.isUserActiveRecently(inputWindowSec) ?? false;
       if (isInputActive) {
-        // Log tylko przy realnym "ratunku" obecności — radar potrafi migać OFF
-        // wielokrotnie na minutę podczas pisania i spamował ring buffer.
         if (!this.presence) {
           appendLog('RADAR', `Utrzymuję obecność przy biurku — aktywność klawiatury/myszy (okno ${inputWindowSec} s)`);
         }
+        recordDiagTimelineEvent('INPUT_HOLD', `Aktywność wejścia (okno ${inputWindowSec} s) podtrzymuje obecność DESK pomimo braku sygnału z radaru`);
         effectivePresence = true;
         this.petStreak = 0;
       }
@@ -1251,8 +1120,6 @@ export default class RadarListener extends EventEmitter {
     if (!effectivePresence) {
       if (isPet) {
         this.telemetry.detectedPerson = 'pet';
-        // Dystans przy wykrytym zwierzaku jest niepewny — pomiar może należeć
-        // do zwierzęcia, nie do człowieka (UI pokazuje "Cel niepewny (kot?)").
         this.telemetry.distanceTrusted = false;
       } else {
         this.telemetry.heartRate = 0;
@@ -1273,13 +1140,6 @@ export default class RadarListener extends EventEmitter {
     this.telemetry.presence = effectivePresence;
     this.scheduleTelemetry();
     this.setPresence(effectivePresence);
-  }
-
-  resetAutoTuning(): ReturnType<AutoTuner['getStatus']> {
-    const status = this.autoTuner.reset();
-    this.telemetry.autoTuning = status;
-    this.scheduleTelemetry();
-    return status;
   }
 
   /**
@@ -1337,44 +1197,27 @@ export default class RadarListener extends EventEmitter {
     }
 
     if (present) {
-      const deskMs = Math.max(0, Number(this.config.get('timeoutDeskMs')) || 300);
-      this.deskTimer = setTimeout(() => {
-        this.deskTimer = null;
+      const deskMs = Math.max(0, Number(this.config.get('timeoutDeskMs')) || 50);
+      recordDiagTimelineEvent('AWAY_TIMER', `Zaplanowano powrót na DESK za ${(deskMs / 1000).toFixed(2)} s`);
+      if (deskMs <= 0) {
         this.setState('desk');
-      }, deskMs);
-    } else {
-      const awayMs = Math.max(250, Number(this.config.get('timeoutAwayMs')) || 3000);
-      // Dowód wtórny obecności: radar potrafi stracić target na kilka sekund przy
-      // nieruchomym siedzeniu. Pomiar 2026-08-29 (5 min czytania): dropout
-      // ~4 s (OFF 02:50:24-26, ON 02:50:28) — CAŁY strumień umarł (bio też),
-      // więc treść ramek NIE rozróżnia dropoutu od wyjścia. Rozróżnia geometria:
-      // przy prawdziwym wyjściu dystans rośnie i przecina górną bramkę ( osobna
-      // sciezka 1,2 s, flaga outOfGateCut), przy dropoucie dystans znika W MIEJSCU
-      // w srodku bramki. Wtedy (i tylko wtedy), gdy bio jest swieze — trzymamy
-      // 5 s (dropout mierzy ~4 s). Stanu telemetry.heartRate/breathRate NIE wolno
-      // tu czytać — handleRawPresence zeruje je PRZED setPresence (poprzednio
-      // bio-hold był przez to martwy); liczymy z timestampów ostatniej ramki bio.
-      const bioFresh =
-        Date.now() - this.lastHeartRateTime < 10000 ||
-        Date.now() - this.lastBreathRateTime < 10000;
-      const dropoutSuspect = !this.outOfGateCut && bioFresh;
-      // Zaczep wyjścia (geometria udowodniła przekroczenie bramki): AWAY po
-      // 600 ms — cel fizycznie odszedł, dalsze czekanie tylko opóźnia słuchawki.
-      const effectiveAwayMs = this.outOfGateCut
-        ? Math.min(awayMs, 600)
-        : dropoutSuspect
-          ? Math.max(awayMs, 5000)
-          : awayMs;
-      if (dropoutSuspect) {
-        appendLog(
-          'RADAR',
-          `Obecność OFF wewnątrz bramki przy świeżej biometrii — podejrzenie dropoutu radaru, trzymam ${(Math.max(awayMs, 5000) / 1000).toFixed(0)} s zanim przełączę na AWAY`
-        );
+      } else {
+        this.deskTimer = setTimeout(() => {
+          this.deskTimer = null;
+          this.setState('desk');
+        }, deskMs);
       }
+    } else {
+      const awayMs = Math.max(50, Number(this.config.get('timeoutAwayMs')) || 300);
+      recordDiagTimelineEvent(
+        'AWAY_TIMER',
+        `Zaplanowano przejście w AWAY za ${(awayMs / 1000).toFixed(2)} s`,
+        { awayMs }
+      );
       this.awayTimer = setTimeout(() => {
         this.awayTimer = null;
         this.setState('away');
-      }, effectiveAwayMs);
+      }, awayMs);
     }
     this.emit('status', {
       presence: present,
@@ -1385,28 +1228,10 @@ export default class RadarListener extends EventEmitter {
     } satisfies RadarStatusEvent);
   }
 
-  /** Czy aktywna ochrona "potwierdzania powrotu" po głębokiej nieobecności. */
-  private isDeepAwayConfirmActive(): boolean {
-    if (this.config.get('radarDeepAwayConfirm') === false) return false;
-    if (this.presence || this.state !== 'away') return false;
-    const minMs = Number(this.config.get('radarDeepAwayMinMs')) || 600000;
-    return this.awayContinuousSince > 0 && Date.now() - this.awayContinuousSince >= minMs;
-  }
-
-  private formatAwayDuration(): string {
-    if (this.awayContinuousSince === 0) return '?';
-    const sec = Math.round((Date.now() - this.awayContinuousSince) / 1000);
-    if (sec < 3600) return `${Math.floor(sec / 60)} min`;
-    return `${Math.floor(sec / 3600)} h ${Math.floor((sec % 3600) / 60)} min`;
-  }
-
   private setState(state: DeskState): void {
     if (this.state === state || !this.running) return;
     this.state = state;
-    // Znacznik ciągłej nieobecności — podstawa "potwierdzania powrotu"
-    // (ochrona przed fałszywym ON z odbić po długim wyjściu z pokoju).
-    this.awayContinuousSince = state === 'away' ? Date.now() : 0;
-    this.deepConfirmSince = 0;
+    recordDiagTimelineEvent('STATE_CHANGE', `Radar przełączył stan na: ${state.toUpperCase()}`);
     this.updateLed(state);
     this.emit(state, Date.now());
     this.emit('status', {

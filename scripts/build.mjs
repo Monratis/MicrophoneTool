@@ -1,5 +1,5 @@
 import os from 'node:os';
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -159,6 +159,20 @@ if (mode !== 'app') {
     const stat = fs.statSync(path.join(releasesDir, f));
     const mb = (stat.size / (1024 * 1024)).toFixed(2);
     console.log(` -> releases/${f} (${mb} MB)`);
+  }
+
+  // Automatyczne uruchomienie wersji Portable po udanym buildzie (chyba że podano --no-launch)
+  const portableExe = path.join(releasesDir, `${productName} (Portable).exe`);
+  const shouldLaunch = (mode === 'portable' || mode === 'all' || process.argv.includes('--launch')) && !process.argv.includes('--no-launch');
+  if (shouldLaunch && fs.existsSync(portableExe)) {
+    console.log(`\n[build] 🚀 Uruchamiam nowo zbudowaną wersję: ${path.basename(portableExe)}...`);
+    try {
+      const child = spawn(portableExe, [], { detached: true, stdio: 'ignore' });
+      child.unref();
+      console.log('[build] Aplikacja uruchomiona w tle.');
+    } catch (err) {
+      console.warn(`[build] Nie udało się automatycznie uruchomić aplikacji: ${err.message}`);
+    }
   }
 } else {
   console.log('\n[build] SUCCESS! Unpacked app in dist/win-unpacked/');

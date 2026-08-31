@@ -14,8 +14,12 @@ export interface AppConfig {
   micHeadsetVolume: number;
   /** Bramka VAD Discorda dla mikrofonu stacjonarnego (-100..0 dB); -1 = nie steruj (szanuj PTT/auto próg) */
   micDeskGateDb: number;
+  /** Wymuszenie automatycznej czułości wejścia Discorda (Voice Isolation) dla mikrofonu stacjonarnego */
+  micDeskAutoThreshold?: boolean;
   /** Bramka VAD Discorda dla mikrofonu mobilnego (-100..0 dB); -1 = nie steruj */
   micHeadsetGateDb: number;
+  /** Wymuszenie automatycznej czułości wejścia Discorda (Voice Isolation) dla mikrofonu mobilnego */
+  micHeadsetAutoThreshold?: boolean;
   /** Wyciszenie szumów (Krisp) dla mikrofonu stacjonarnego */
   micDeskKrisp: 'default' | 'on' | 'off';
   /** Wyciszenie szumów (Krisp) dla mikrofonu mobilnego */
@@ -53,22 +57,9 @@ export interface AppConfig {
   timeoutDeskMs: number;
   /** Wykorzystuje aktywność klawiatury i myszy (GetLastInputInfo) jako potwierdzenie obecności */
   userInputPresenceEnabled: boolean;
-  radarDistanceGateEnabled: boolean;
-  radarMinDistanceCm: number;
-  radarMaxDistanceCm: number;
-  /** Potwierdzanie powrotu po głębokiej nieobecności: ON musi się ustabilizować, zanim przełączy mikrofon */
-  radarDeepAwayConfirm: boolean;
-  /** Długość ciągłego AWAY, po której powrót wymaga potwierdzenia (ms) */
-  radarDeepAwayMinMs: number;
-  /** Jak długo sygnał obecności musi wytrzymać ON, zanim uznamy powrót (ms) */
-  radarDeepAwayConfirmMs: number;
+  /** Czas podtrzymania obecności DESK po ostatnim dotknięciu klawiatury/myszy (sekundy, domyślnie 1s) */
+  userInputPresenceHoldSec?: number;
   petFilterEnabled: boolean;
-  radarAutoTuningEnabled: boolean;
-  radarAutoTuningSpeed: 'balanced' | 'fast' | 'conservative';
-  radarLearnedDistanceCenter: number;
-  radarLearnedDistanceVariance: number;
-  radarLearnedHeartRate: number;
-  radarLearnedBreathRate: number;
   switchMicOnAway: boolean;
   switchMicOnDesk: boolean;
   muteBehaviorOnAway: 'none' | 'mute_stationary' | 'mute_all' | 'mute_inactive';
@@ -81,9 +72,13 @@ export interface AppConfig {
   /** Nazwa efektu aplikowanego przy odejściu przez deep-link (case-sensitive); '' = Solid Color */
   signalrgbAwayEffect: string;
   signalrgbAwayBrightness: number;
+  /** Akcja oświetlenia przy biurku: 'effect' (konkretny efekt), 'restore' (przywróć stan sprzed odejścia), 'none' */
+  signalrgbDeskAction?: 'effect' | 'restore' | 'none';
   signalrgbRestoreOnDesk: boolean;
-  /** Efekt aplikowany przy powrocie przez deep-link, gdy REST niedostępny (brak Pro); '' = brak */
+  /** Efekt aplikowany przy powrocie do biurka; '' = domyślny */
   signalrgbDeskEffect: string;
+  /** Opcjonalny kolor dla efektu biurkowego */
+  signalrgbDeskColor?: string;
   /** Włącz czarny wygaszacz ekranu po odejściu od biurka */
   screensaverOnAway: boolean;
   /** Czas w ms nieobecności, po którym włącza się czarny wygaszacz (domyślnie 60000 = 1 min) */
@@ -147,6 +142,103 @@ export interface AppConfig {
   sensorLedMuteColor: string;
 }
 
+export const DEFAULT_CONFIG: AppConfig = {
+  port: 'auto',
+  baudRate: 115200,
+  micDeskName: '',
+  micHeadsetName: '',
+  micDeskVolume: -1,
+  micHeadsetVolume: -1,
+  micDeskGateDb: -1,
+  micDeskAutoThreshold: false,
+  micHeadsetGateDb: -1,
+  micHeadsetAutoThreshold: false,
+  micDeskKrisp: 'default',
+  micHeadsetKrisp: 'default',
+  micDeskAgc: 'default',
+  micHeadsetAgc: 'default',
+  micDeskEcho: 'default',
+  micHeadsetEcho: 'default',
+  discordGateFollowMic: true,
+  discordClientId: '1238447097859145859',
+  discordClientSecret: 'xwmeOcXQP496dX5EYgXBFFcNyEUo30Z3',
+  discordRedirectUri: 'https://discord.com',
+  discordAccessToken: '',
+  discordRefreshToken: '',
+  discordTokenExpiresAt: 0,
+  timeoutAwayMs: 800,
+  timeoutDeskMs: 50,
+  userInputPresenceEnabled: true,
+  userInputPresenceHoldSec: 1,
+  petFilterEnabled: true,
+  switchMicOnAway: true,
+  switchMicOnDesk: true,
+  muteBehaviorOnAway: 'mute_inactive',
+  unmuteOnDesk: true,
+  discordIntegration: true,
+  signalrgbEnabled: false,
+  signalrgbPort: 16038,
+  signalrgbAwayAction: 'solid_color',
+  signalrgbAwayColor: '#f59e0b',
+  signalrgbAwayEffect: '',
+  signalrgbAwayBrightness: 0,
+  signalrgbDeskAction: 'effect',
+  signalrgbDeskEffect: 'Neon Shift',
+  signalrgbDeskColor: '',
+  signalrgbRestoreOnDesk: true,
+  screensaverOnAway: true,
+  screensaverDelayMs: 60000,
+  sleepMonitorsOnAway: false,
+  sleepMonitorsDelayMs: 600000,
+  wakeMonitorsOnDesk: true,
+  audioChime: true,
+  audioChimeOnDesk: true,
+  audioChimeOnAway: true,
+  audioChimeVolume: 0.2,
+  audioChimeStyle: 'harmonic',
+  audioFileDesk: '',
+  audioFileHeadset: '',
+  notifications: true,
+  autoStart: false,
+  globalShortcut: 'CommandOrControl+Shift+M',
+  githubRepo: 'Monratis/MicrophoneTool',
+  githubToken: '',
+  haEnabled: false,
+  haUrl: 'http://homeassistant.local:8123',
+  haToken: '',
+  haPresenceEntity: '',
+  haDistanceEntity: '',
+  haHeartRateEntity: '',
+  haBreathRateEntity: '',
+  haAutomationOnAway: '',
+  haAutomationOnDesk: '',
+  haButtonSnoozeEntity: '',
+  haButtonMuteEntity: '',
+  radarSmoothingMode: 'balanced',
+  sensorLedEnabled: true,
+  sensorLedBrightness: 25,
+  sensorLedDeskColor: '#22c55e',
+  sensorLedAwayColor: '#f59e0b',
+  sensorLedMuteColor: '#ef4444'
+};
+
+export interface DiscordStatus {
+  enabled: boolean;
+  connected: boolean;
+  ready: boolean;
+  authenticated: boolean;
+  user?: string;
+  error?: string;
+}
+
+export interface DiscordVoiceSettings {
+  thresholdDb?: number;
+  autoThreshold?: boolean;
+  krisp?: boolean;
+  agc?: boolean;
+  echo?: boolean;
+}
+
 export interface HomeAssistantStatus {
   enabled: boolean;
   connected: boolean;
@@ -179,7 +271,6 @@ export interface RadarTelemetry {
   breathRate?: number;
   illuminanceLux?: number;
   detectedPerson?: DetectedPerson;
-  autoTuning?: AutoTuningStatus;
   deviceInfo?: {
     fwVersion?: string;
     uptimeSec?: number;
@@ -195,6 +286,42 @@ export interface DiagRecordResult {
   summary: string;
   /** Pełne CSV: t_s,rodzaj,wartosc */
   csv: string;
+}
+
+export interface CalibrationSamples {
+  ambientDistances: number[];
+  ambientPresenceFrames: number;
+  ambientTotalFrames: number;
+  ambientLux: number[];
+  ambientHeartRates: number[];
+  ambientBreathRates: number[];
+  userDistances: number[];
+  userHeartRates: number[];
+  userBreathRates: number[];
+  userLux: number[];
+  userTotalFrames: number;
+}
+
+export interface CalibrationResults {
+  ambientCleanlinessPct: number;
+  ambientNoiseCm: number;
+  ambientFalsePresenceCount: number;
+  ambientAvgLux: number;
+  ambientGhostDetected: boolean;
+  ambientGhostDistanceCm: number;
+  userSeatedDistanceCm: number;
+  userMinDistanceCm: number;
+  userMaxDistanceCm: number;
+  userAvgHeartRate: number;
+  userAvgBreathRate: number;
+  userPostureSpreadCm: number;
+  recommendedGateMinCm: number;
+  recommendedGateMaxCm: number;
+  recommendedDeepAwayConfirmMs: number;
+  recommendedTimeoutAwayMs: number;
+  targetVariance: number;
+  stabilityScore: number;
+  reportSummary: string;
 }
 
 export interface SerialPortInfo {
@@ -229,6 +356,7 @@ export interface Snapshot {
     port: string;
   };
   ha?: HomeAssistantStatus;
+  discord?: DiscordStatus;
   telemetry: RadarTelemetry;
   config: AppConfig;
   /** Unix ms do kiedy trwa pauza automatyki (snooze); 0 = brak pauzy */
@@ -297,11 +425,32 @@ export interface SignalRGBTestResult {
   reason?: string;
 }
 
+export interface DiagSessionTimelineItem {
+  offsetMs: number;
+  timeStr: string;
+  category: string;
+  message: string;
+  data?: Record<string, unknown>;
+}
+
+export interface DiagSessionAnalysis {
+  exitLatencySec: number | null;
+  audioSwitchLatencyMs: number | null;
+  pathTaken: 'geometric_fast' | 'seat_abandoned' | 'standard_timeout' | 'dropout_protection' | 'input_held' | 'unknown';
+  pathDescription: string;
+  speedRating: 'ultra_fast' | 'fast' | 'moderate' | 'delayed';
+  bottlenecks: string[];
+  recommendations: string[];
+}
+
 /** Raport sesji diagnostycznej "Wyjście z pokoju" (diag:stop). */
 export interface DiagSessionReport {
   startedAt: number;
   endedAt: number;
+  durationSec?: number;
   count: number;
+  timeline?: DiagSessionTimelineItem[];
+  analysis?: DiagSessionAnalysis;
   text: string;
 }
 
@@ -315,17 +464,29 @@ export interface Api {
   detectDevices: () => Promise<DetectResult>;
   listDevices: () => Promise<AudioDeviceItem[]>;
   toggleMute: () => Promise<{ ok: boolean; isMuted?: boolean }>;
-  discordApplyVoice: (args: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }) => Promise<boolean>;
-  discordGetStatus: () => Promise<{ connected: boolean; ready: boolean; authenticated: boolean; user?: string }>;
-  discordGetVoiceSettings: () => Promise<{ thresholdDb?: number; autoThreshold?: boolean; krisp?: boolean; agc?: boolean; echo?: boolean } | null>;
-  discordAuthorize: () => Promise<boolean>;
+  discordApplyVoice: (args: { gateDb?: number; autoThreshold?: boolean; krisp?: boolean; agc?: boolean; echo?: boolean }) => Promise<boolean>;
+  discordGetStatus: () => Promise<DiscordStatus>;
+  discordGetVoiceSettings: () => Promise<{ ok: boolean; settings?: DiscordVoiceSettings; user?: string; error?: string }>;
+  discordAuthorize: () => Promise<{ ok: boolean; user?: string; error?: string }>;
   testDevice: (name: string) => Promise<Snapshot>;
   screensaverStart: () => Promise<boolean>;
   screensaverDismiss: () => void;
   openConfigDir: () => Promise<boolean>;
   resetConfig: () => Promise<Snapshot>;
-  resetAutoTuning: () => Promise<AutoTuningStatus | null>;
-  diagRecord: () => Promise<DiagRecordResult>;
+  resetAutoTuning: () => Promise<{ ok: boolean }>;
+  radarApplyCalibration: (data: {
+    centerCm: number;
+    varianceCm: number;
+    heartRate: number;
+    breathRate: number;
+    minGateCm: number;
+    maxGateCm: number;
+    deepAwayConfirmMs?: number;
+    timeoutAwayMs?: number;
+  }) => Promise<{ ok: boolean; snapshot: Snapshot }>;
+  diagRecord: (durationSec?: number) => Promise<DiagRecordResult>;
+  diagRecordStart: (durationSec?: number) => Promise<DiagRecordResult>;
+  diagRecordStop: () => Promise<DiagRecordResult>;
   closeWindow: () => void;
   minimizeWindow: () => void;
   maximizeWindow: () => void;
@@ -355,8 +516,10 @@ export interface Api {
   signalrgbTestDesk: () => Promise<SignalRGBTestResult>;
   /** Wykryty tier Local API: REST dostępny czy 403 (wymagany Pro) + treść odmowy */
   signalrgbGetStatus: () => Promise<{ restAvailable: boolean; proRequired: boolean; detail?: string }>;
-  /** Zainstalowane efekty z dysku VortxEngine (podpowiedzi do pickerów, bez Pro) */
+  /** Zainstalowane efekty z dysku VortxEngine/WhirlwindFX (podpowiedzi do pickerów, bez Pro) */
   signalrgbListEffects: () => Promise<string[]>;
+  /** Ręczny/testowy podgląd wybranego efektu z opcjonalnym kolorem */
+  signalrgbApplyEffect: (effectName: string, color?: string) => Promise<SignalRGBTestResult>;
 
   openExternal: (url: string) => Promise<boolean>;
   copyToClipboard: (text: string) => Promise<boolean>;

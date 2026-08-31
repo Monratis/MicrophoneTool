@@ -8,8 +8,7 @@ import { refreshDiscordRpcStatus, refreshSignalrgbEffectList, refreshSignalrgbSt
   HA_ENTITY_FIELDS, openHaPicker, closeHaPicker, applyHaCatalog, renderHaPickerChips, renderHaPickerList,
   type HaFieldId } from './integrationsPanels';
 import { applyLogFilter, refreshLogConsoleDOM } from './logsAbout';
-import { applyVadResults, applyWizardCalibration, closeCalibrationWizard, closeVadModal, openCalibrationWizard,
-  openVadModal, runVadStep1, runVadStep2, runWizardStep1, runWizardStep2, toggleDiagSession } from './modals';
+import { applyVadResults, closeVadModal, openVadModal, runVadStep1, runVadStep2, toggleDiagSession } from './modals';
 
   // ---------- EVENT BINDINGS ----------
 export function bindEvents(app: AppUI) {
@@ -100,7 +99,7 @@ export function bindEvents(app: AppUI) {
     });
 
     // Section Contextual Actions
-    byId('btn-home-detect-mics')?.addEventListener('click', async () => {
+    const handleAutoDetect = async () => {
       app.pushToast('Wykrywam mikrofony…');
       const r = await window.api.detectDevices();
       await app.loadAudioDevices();
@@ -112,16 +111,10 @@ export function bindEvents(app: AppUI) {
         void app.vuEngine.start(app.form?.micDeskName || '', app.form?.micHeadsetName || '');
         app.pushToast('Dopasowano optymalne mikrofony — zapisano automatycznie ✓');
       }
-    });
-    byId('btn-home-open-wizard')?.addEventListener('click', () => openCalibrationWizard(app));
-    byId('btn-reset-autotune')?.addEventListener('click', async () => {
-      if (confirm('Czy na pewno chcesz zresetować wyuczone parametry modelu AI?')) {
-        const status = await window.api.resetAutoTuning();
-        if (status) app.telemetry.autoTuning = status;
-        app.pushToast('Zresetowano model Auto-Tuningu ✓');
-        app.render();
-      }
-    });
+    };
+
+    byId('btn-home-detect-mics')?.addEventListener('click', handleAutoDetect);
+    byId('btn-banner-detect-mics')?.addEventListener('click', handleAutoDetect);
 
     // Mode segmented buttons
     document.querySelectorAll('[data-mode]').forEach((btn) => {
@@ -167,41 +160,49 @@ export function bindEvents(app: AppUI) {
     byId('btn-vad-calibrate-desk')?.addEventListener('click', () => openVadModal(app, 'desk'));
     byId('btn-vad-calibrate-headset')?.addEventListener('click', () => openVadModal(app, 'headset'));
 
-    byId('btn-vad-sync-desk')?.addEventListener('click', async () => {
-      const s = await window.api.discordGetVoiceSettings();
-      if (s) {
-        const patch: Partial<Snapshot['config']> = {};
-        if (typeof s.thresholdDb === 'number') {
-          patch.micDeskGateDb = s.thresholdDb;
-          app.vuEngine.deskGateDb = s.thresholdDb;
-        }
-        if (typeof s.krisp === 'boolean') patch.micDeskKrisp = s.krisp ? 'on' : 'off';
-        if (typeof s.agc === 'boolean') patch.micDeskAgc = s.agc ? 'on' : 'off';
-        if (typeof s.echo === 'boolean') patch.micDeskEcho = s.echo ? 'on' : 'off';
-        app.patchForm(patch, true);
-        app.pushToast(`Pobrano profil głosu z Discorda dla biurka ✓`);
-      } else {
-        app.pushToast('Nie udało się pobrać profilu z Discorda — upewnij się, że autoryzowano OAuth Discorda.', true);
-      }
-    });
+    const fetchDiscordVoiceProfile = async (target: 'desk' | 'headset' | 'active' | 'both') => {
+      app.pushToast('Pobieram profil głosu z Discorda…');
+      try {
+        const res = await window.api.discordGetVoiceSettings();
+        if (res?.ok && res.settings) {
+          const s = res.settings;
+          const patch: Partial<Snapshot['config']> = {};
+          const applyDesk = target === 'desk' || target === 'both' || (target === 'active' && isMicActive(app, 'desk'));
+          const applyHeadset = target === 'headset' || target === 'both' || (target === 'active' && !isMicActive(app, 'desk'));
 
-    byId('btn-vad-sync-headset')?.addEventListener('click', async () => {
-      const s = await window.api.discordGetVoiceSettings();
-      if (s) {
-        const patch: Partial<Snapshot['config']> = {};
-        if (typeof s.thresholdDb === 'number') {
-          patch.micHeadsetGateDb = s.thresholdDb;
-          app.vuEngine.headGateDb = s.thresholdDb;
+          if (applyDesk) {
+            if (typeof s.thresholdDb === 'number') {
+              patch.micDeskGateDb = s.thresholdDb;
+              app.vuEngine.deskGateDb = s.thresholdDb;
+            }
+            if (typeof s.krisp === 'boolean') patch.micDeskKrisp = s.krisp ? 'on' : 'off';
+            if (typeof s.agc === 'boolean') patch.micDeskAgc = s.agc ? 'on' : 'off';
+            if (typeof s.echo === 'boolean') patch.micDeskEcho = s.echo ? 'on' : 'off';
+          }
+          if (applyHeadset) {
+            if (typeof s.thresholdDb === 'number') {
+              patch.micHeadsetGateDb = s.thresholdDb;
+              app.vuEngine.headGateDb = s.thresholdDb;
+            }
+            if (typeof s.krisp === 'boolean') patch.micHeadsetKrisp = s.krisp ? 'on' : 'off';
+            if (typeof s.agc === 'boolean') patch.micHeadsetAgc = s.agc ? 'on' : 'off';
+            if (typeof s.echo === 'boolean') patch.micHeadsetEcho = s.echo ? 'on' : 'off';
+          }
+
+          app.patchForm(patch, true);
+          const targetName = applyDesk && applyHeadset ? 'obu mikrofonów' : applyDesk ? 'biurka' : 'słuchawek';
+          const info = typeof s.thresholdDb === 'number' ? ` (próg: ${s.thresholdDb} dB${typeof s.krisp === 'boolean' ? `, Krisp: ${s.krisp ? 'ON' : 'OFF'}` : ''})` : '';
+          app.pushToast(`Pobrano profil z Discorda dla ${targetName}${info} ✓`);
+        } else {
+          app.pushToast(res?.error || 'Nie udało się pobrać profilu z Discorda — upewnij się, że autoryzowano OAuth Discorda.', true);
         }
-        if (typeof s.krisp === 'boolean') patch.micHeadsetKrisp = s.krisp ? 'on' : 'off';
-        if (typeof s.agc === 'boolean') patch.micHeadsetAgc = s.agc ? 'on' : 'off';
-        if (typeof s.echo === 'boolean') patch.micHeadsetEcho = s.echo ? 'on' : 'off';
-        app.patchForm(patch, true);
-        app.pushToast(`Pobrano profil głosu z Discorda dla słuchawek ✓`);
-      } else {
-        app.pushToast('Nie udało się pobrać profilu z Discorda — upewnij się, że autoryzowano OAuth Discorda.', true);
+      } catch (err) {
+        app.pushToast(`Błąd pobierania profilu: ${(err as Error).message}`, true);
       }
-    });
+    };
+
+    byId('btn-vad-sync-desk')?.addEventListener('click', () => void fetchDiscordVoiceProfile('desk'));
+    byId('btn-vad-sync-headset')?.addEventListener('click', () => void fetchDiscordVoiceProfile('headset'));
 
     byId('btn-vad-close')?.addEventListener('click', () => closeVadModal(app));
     byId('btn-vad-cancel')?.addEventListener('click', () => closeVadModal(app));
@@ -218,47 +219,61 @@ export function bindEvents(app: AppUI) {
     byId('btn-vad-apply')?.addEventListener('click', () => applyVadResults(app));
 
     // Quick VAD Presets Desk
-    byId('preset-vad-desk-quiet')?.addEventListener('click', () => {
-      app.patchForm({ micDeskGateDb: -55 }, true);
+    byId('preset-vad-desk-auto')?.addEventListener('click', () => {
+      app.patchForm({ micDeskAutoThreshold: true, micDeskKrisp: 'on' }, true);
       if (isMicActive(app, 'desk') && app.form?.discordIntegration) {
-        void window.api.discordApplyVoice({ gateDb: -55 });
+        void window.api.discordApplyVoice({ autoThreshold: true, krisp: true });
+      }
+      app.pushToast('Włączono tryb Auto (Discord Voice Isolation & Krisp)');
+    });
+    byId('preset-vad-desk-quiet')?.addEventListener('click', () => {
+      app.patchForm({ micDeskGateDb: -55, micDeskAutoThreshold: false }, true);
+      if (isMicActive(app, 'desk') && app.form?.discordIntegration) {
+        void window.api.discordApplyVoice({ gateDb: -55, autoThreshold: false });
       }
       app.pushToast('Ustawiono próg VAD: -55 dB (Cichy pokój)');
     });
     byId('preset-vad-desk-std')?.addEventListener('click', () => {
-      app.patchForm({ micDeskGateDb: -45 }, true);
+      app.patchForm({ micDeskGateDb: -45, micDeskAutoThreshold: false }, true);
       if (isMicActive(app, 'desk') && app.form?.discordIntegration) {
-        void window.api.discordApplyVoice({ gateDb: -45 });
+        void window.api.discordApplyVoice({ gateDb: -45, autoThreshold: false });
       }
       app.pushToast('Ustawiono próg VAD: -45 dB (Zbalansowany)');
     });
     byId('preset-vad-desk-noisy')?.addEventListener('click', () => {
-      app.patchForm({ micDeskGateDb: -35 }, true);
+      app.patchForm({ micDeskGateDb: -35, micDeskAutoThreshold: false }, true);
       if (isMicActive(app, 'desk') && app.form?.discordIntegration) {
-        void window.api.discordApplyVoice({ gateDb: -35 });
+        void window.api.discordApplyVoice({ gateDb: -35, autoThreshold: false });
       }
       app.pushToast('Ustawiono próg VAD: -35 dB (Głośna klawiatura / Tło)');
     });
 
     // Quick VAD Presets Headset
-    byId('preset-vad-headset-quiet')?.addEventListener('click', () => {
-      app.patchForm({ micHeadsetGateDb: -55 }, true);
+    byId('preset-vad-headset-auto')?.addEventListener('click', () => {
+      app.patchForm({ micHeadsetAutoThreshold: true, micHeadsetKrisp: 'on' }, true);
       if (isMicActive(app, 'headset') && app.form?.discordIntegration) {
-        void window.api.discordApplyVoice({ gateDb: -55 });
+        void window.api.discordApplyVoice({ autoThreshold: true, krisp: true });
+      }
+      app.pushToast('Włączono tryb Auto (Discord Voice Isolation & Krisp)');
+    });
+    byId('preset-vad-headset-quiet')?.addEventListener('click', () => {
+      app.patchForm({ micHeadsetGateDb: -55, micHeadsetAutoThreshold: false }, true);
+      if (isMicActive(app, 'headset') && app.form?.discordIntegration) {
+        void window.api.discordApplyVoice({ gateDb: -55, autoThreshold: false });
       }
       app.pushToast('Ustawiono próg VAD: -55 dB (Ciche otoczenie)');
     });
     byId('preset-vad-headset-std')?.addEventListener('click', () => {
-      app.patchForm({ micHeadsetGateDb: -45 }, true);
+      app.patchForm({ micHeadsetGateDb: -45, micHeadsetAutoThreshold: false }, true);
       if (isMicActive(app, 'headset') && app.form?.discordIntegration) {
-        void window.api.discordApplyVoice({ gateDb: -45 });
+        void window.api.discordApplyVoice({ gateDb: -45, autoThreshold: false });
       }
       app.pushToast('Ustawiono próg VAD: -45 dB (Zbalansowany)');
     });
     byId('preset-vad-headset-noisy')?.addEventListener('click', () => {
-      app.patchForm({ micHeadsetGateDb: -35 }, true);
+      app.patchForm({ micHeadsetGateDb: -35, micHeadsetAutoThreshold: false }, true);
       if (isMicActive(app, 'headset') && app.form?.discordIntegration) {
-        void window.api.discordApplyVoice({ gateDb: -35 });
+        void window.api.discordApplyVoice({ gateDb: -35, autoThreshold: false });
       }
       app.pushToast('Ustawiono próg VAD: -35 dB (Głośne tło)');
     });
@@ -285,9 +300,12 @@ export function bindEvents(app: AppUI) {
     // Desk Voice Filters
     byId('rng-gate-desk')?.addEventListener('input', (e) => {
       const val = Math.max(-100, Math.min(0, Number((e.target as HTMLInputElement).value)));
-      app.patchForm({ micDeskGateDb: val });
+      app.patchForm({ micDeskGateDb: val, micDeskAutoThreshold: false });
       const el = byId('val-gate-desk');
-      if (el) el.textContent = `${val} dB`;
+      if (el) {
+        el.textContent = `${val} dB`;
+        el.style.color = '#fbbf24';
+      }
       app.vuEngine.deskGateDb = val;
       const marker = byId('vu-gate-desk');
       if (marker) {
@@ -299,7 +317,7 @@ export function bindEvents(app: AppUI) {
     byId('rng-gate-desk')?.addEventListener('change', (e) => {
       const val = Math.max(-100, Math.min(0, Number((e.target as HTMLInputElement).value)));
       if (isMicActive(app, 'desk') && app.form?.discordIntegration) {
-        void window.api.discordApplyVoice({ gateDb: val });
+        void window.api.discordApplyVoice({ gateDb: val, autoThreshold: false });
       }
     });
 
@@ -330,9 +348,12 @@ export function bindEvents(app: AppUI) {
     // Headset Voice Filters
     byId('rng-gate-headset')?.addEventListener('input', (e) => {
       const val = Math.max(-100, Math.min(0, Number((e.target as HTMLInputElement).value)));
-      app.patchForm({ micHeadsetGateDb: val });
+      app.patchForm({ micHeadsetGateDb: val, micHeadsetAutoThreshold: false });
       const el = byId('val-gate-headset');
-      if (el) el.textContent = `${val} dB`;
+      if (el) {
+        el.textContent = `${val} dB`;
+        el.style.color = '#fbbf24';
+      }
       app.vuEngine.headGateDb = val;
       const marker = byId('vu-gate-headset');
       if (marker) {
@@ -344,7 +365,7 @@ export function bindEvents(app: AppUI) {
     byId('rng-gate-headset')?.addEventListener('change', (e) => {
       const val = Math.max(-100, Math.min(0, Number((e.target as HTMLInputElement).value)));
       if (isMicActive(app, 'headset') && app.form?.discordIntegration) {
-        void window.api.discordApplyVoice({ gateDb: val });
+        void window.api.discordApplyVoice({ gateDb: val, autoThreshold: false });
       }
     });
 
@@ -435,13 +456,33 @@ export function bindEvents(app: AppUI) {
     });
 
     byId('btn-discord-auth')?.addEventListener('click', async () => {
-      const ok = await window.api.discordAuthorize();
-      if (ok) {
-        app.pushToast('Wysłano zapytanie o autoryzację OAuth — zatwierdź popup w Discordzie 🎮');
-      } else {
-        app.pushToast('Nie udało się uruchomić autoryzacji (czy Discord jest włączony?)', true);
+      const btn = byId('btn-discord-auth');
+      const originalText = btn?.textContent || '🔐 Autoryzuj Discord';
+      if (btn) {
+        btn.textContent = '⏳ Czekam na zgodę w Discordzie…';
+        (btn as HTMLButtonElement).disabled = true;
+      }
+      app.pushToast('Otwarto okno autoryzacji — zatwierdź uprawnienia w aplikacji Discord 🎮');
+      try {
+        const res = await window.api.discordAuthorize();
+        if (res?.ok) {
+          app.pushToast(`Pomyślnie autoryzowano OAuth Discord${res.user ? ` jako @${res.user}` : ''} ✓`);
+          void refreshDiscordRpcStatus(app);
+        } else {
+          app.pushToast(res?.error || 'Nie udało się autoryzować Discorda (upewnij się, że Discord jest uruchomiony)', true);
+        }
+      } catch (err) {
+        app.pushToast(`Błąd autoryzacji: ${(err as Error).message}`, true);
+      } finally {
+        const targetBtn = byId('btn-discord-auth');
+        if (targetBtn) {
+          targetBtn.textContent = originalText;
+          (targetBtn as HTMLButtonElement).disabled = false;
+        }
       }
     });
+
+    byId('btn-discord-fetch')?.addEventListener('click', () => void fetchDiscordVoiceProfile('both'));
 
     byId('btn-discord-sync')?.addEventListener('click', async () => {
       const isDesk = isMicActive(app, 'desk');
@@ -455,6 +496,7 @@ export function bindEvents(app: AppUI) {
       const echoMode = isDesk ? app.form?.micDeskEcho : app.form?.micHeadsetEcho;
       const tri = (v: string | undefined): boolean | undefined => (v === 'on' ? true : v === 'off' ? false : undefined);
 
+      app.pushToast('Wysyłam profil głosu do Discorda…');
       const ok = await window.api.discordApplyVoice({
         gateDb,
         krisp: tri(krispMode),
@@ -464,7 +506,7 @@ export function bindEvents(app: AppUI) {
       if (ok) {
         app.pushToast(`Zsynchronizowano profil głosu Discord (${isDesk ? 'Biurko' : 'Słuchawki'}) ✓`);
       } else {
-        app.pushToast('Discord nie przyjął zmian profilu (kliknij "Autoryzuj Discord")', true);
+        app.pushToast('Discord nie przyjął zmian profilu (upewnij się, że autoryzowano OAuth Discorda)', true);
       }
     });
 
@@ -530,21 +572,7 @@ export function bindEvents(app: AppUI) {
       }
     });
 
-    byId('sw-auto-tuning')?.addEventListener('click', () => {
-      const val = !(app.form?.radarAutoTuningEnabled ?? true);
-      app.patchForm({ radarAutoTuningEnabled: val }, false);
-      const btn = byId('sw-auto-tuning');
-      if (btn) {
-        btn.className = `fc-switch ${val ? 'active' : ''}`;
-        btn.setAttribute('aria-checked', String(val));
-      }
-    });
-    byId('sel-autotune-speed')?.addEventListener('change', (e) => {
-      const val = (e.target as HTMLSelectElement).value as 'balanced' | 'fast' | 'conservative';
-      app.patchForm({ radarAutoTuningSpeed: val }, false);
-      app.pushToast(`Tempo uczenia auto-tuningu: ${val === 'fast' ? 'szybki' : val === 'conservative' ? 'konserwatywny' : 'zbalansowany'}`);
-    });
-
+    // SignalRGB Integration Handlers
     byId('sw-signalrgb')?.addEventListener('click', () => {
       const val = !(app.form?.signalrgbEnabled ?? false);
       app.patchForm({ signalrgbEnabled: val }, false);
@@ -554,34 +582,101 @@ export function bindEvents(app: AppUI) {
         btn.setAttribute('aria-checked', String(val));
       }
     });
+
+    // Desk Action & Effect
+    byId('sel-signalrgb-desk-action')?.addEventListener('change', (e) => {
+      const val = (e.target as HTMLSelectElement).value as any;
+      app.patchForm({ signalrgbDeskAction: val, signalrgbRestoreOnDesk: val === 'restore' }, true);
+    });
+    byId('sel-signalrgb-desk-effect')?.addEventListener('change', (e) => {
+      const val = (e.target as HTMLSelectElement).value;
+      if (val === '__custom__') {
+        app.signalrgbCustomDesk = true;
+        app.render();
+      } else {
+        app.signalrgbCustomDesk = false;
+        app.patchForm({ signalrgbDeskEffect: val }, true);
+      }
+    });
+    byId('inp-signalrgb-desk-effect-custom')?.addEventListener('input', (e) => {
+      app.patchForm({ signalrgbDeskEffect: (e.target as HTMLInputElement).value });
+    });
+    byId('clr-signalrgb-desk')?.addEventListener('input', (e) => {
+      app.patchForm({ signalrgbDeskColor: (e.target as HTMLInputElement).value });
+    });
+    byId('btn-cancel-custom-desk')?.addEventListener('click', () => {
+      app.signalrgbCustomDesk = false;
+      app.render();
+    });
+    byId('btn-preview-signalrgb-desk')?.addEventListener('click', async () => {
+      const effectName = (app.form?.signalrgbDeskEffect || '').trim() || 'Neon Shift';
+      const color = app.form?.signalrgbDeskColor || '';
+      app.pushToast(`SignalRGB: podgląd efektu biurka "${effectName}"…`);
+      const res = await window.api.signalrgbApplyEffect(effectName, color || undefined);
+      if (res?.ok) {
+        app.pushToast(`Zastosowano efekt "${effectName}" w SignalRGB (${res.via === 'deeplink' ? 'deep-link' : 'REST'}) ✨`);
+      } else {
+        app.pushToast(`SignalRGB: błąd — ${res?.reason || 'nie udało się uruchomić'}`, true);
+      }
+    });
+
+    // Away Action & Effect
     byId('sel-signalrgb-away-action')?.addEventListener('change', (e) => {
-      // Re-render: kolor i przyciemnienie są warunkowe względem wybranej akcji
       app.patchForm({ signalrgbAwayAction: (e.target as HTMLSelectElement).value as any }, true);
     });
     byId('clr-signalrgb-away')?.addEventListener('input', (e) => {
       app.patchForm({ signalrgbAwayColor: (e.target as HTMLInputElement).value });
     });
-    byId('inp-signalrgb-away-effect')?.addEventListener('input', (e) => {
+    byId('sel-signalrgb-away-effect')?.addEventListener('change', (e) => {
+      const val = (e.target as HTMLSelectElement).value;
+      if (val === '__custom__') {
+        app.signalrgbCustomAway = true;
+        app.render();
+      } else {
+        app.signalrgbCustomAway = false;
+        app.patchForm({ signalrgbAwayEffect: val });
+      }
+    });
+    byId('inp-signalrgb-away-effect-custom')?.addEventListener('input', (e) => {
       app.patchForm({ signalrgbAwayEffect: (e.target as HTMLInputElement).value });
     });
+    byId('btn-cancel-custom-away')?.addEventListener('click', () => {
+      app.signalrgbCustomAway = false;
+      app.render();
+    });
+    byId('btn-preview-signalrgb-away')?.addEventListener('click', async () => {
+      const effectName = (app.form?.signalrgbAwayEffect || '').trim() || 'Solid Color';
+      const color = app.form?.signalrgbAwayColor || '#f59e0b';
+      app.pushToast(`SignalRGB: podgląd efektu odejścia "${effectName}"…`);
+      const res = await window.api.signalrgbApplyEffect(effectName, color);
+      if (res?.ok) {
+        app.pushToast(`Zastosowano efekt "${effectName}" w SignalRGB (${res.via === 'deeplink' ? 'deep-link' : 'REST'}) ✨`);
+      } else {
+        app.pushToast(`SignalRGB: błąd — ${res?.reason || 'nie udało się uruchomić'}`, true);
+      }
+    });
+
     byId('rng-signalrgb-bri')?.addEventListener('input', (e) => {
       const v = Number((e.target as HTMLInputElement).value);
       app.patchForm({ signalrgbAwayBrightness: v });
       const el = byId('val-signalrgb-bri');
       if (el) el.textContent = `${v}%`;
     });
-    byId('sw-signalrgb-restore')?.addEventListener('click', () => {
-      const val = !(app.form?.signalrgbRestoreOnDesk !== false);
-      app.patchForm({ signalrgbRestoreOnDesk: val }, false);
-      const btn = byId('sw-signalrgb-restore');
-      if (btn) {
-        btn.className = `fc-switch ${val ? 'active' : ''}`;
-        btn.setAttribute('aria-checked', String(val));
+
+    byId('btn-refresh-signalrgb-effects')?.addEventListener('click', async () => {
+      app.pushToast('Skanuję SignalRGB w poszukiwaniu zainstalowanych efektów…');
+      try {
+        const names = await window.api.signalrgbListEffects();
+        if (Array.isArray(names)) {
+          app.signalrgbEffects = names;
+          app.render();
+          app.pushToast(`Wykryto ${names.length} zainstalowanych efektów SignalRGB ✓`);
+        }
+      } catch (err: any) {
+        app.pushToast(`Błąd skanowania efektów: ${err?.message || err}`, true);
       }
     });
-    byId('inp-signalrgb-desk-effect')?.addEventListener('input', (e) => {
-      app.patchForm({ signalrgbDeskEffect: (e.target as HTMLInputElement).value });
-    });
+
     byId('btn-test-signalrgb-away')?.addEventListener('click', async () => {
       app.pushToast('Testuję oświetlenie SignalRGB: Odejście…');
       const res = await window.api.signalrgbTestAway();
@@ -810,49 +905,6 @@ export function bindEvents(app: AppUI) {
     bindHaServiceTest('btn-ha-test-away', 'haAutomationOnAway');
     bindHaServiceTest('btn-ha-test-desk', 'haAutomationOnDesk');
 
-    // Radar Gate Drag Handles (interaktywna regulacja strefy fotela na grafice)
-    const bindScopeHandleDrag = (handleId: string, which: 'min' | 'max') => {
-      const handle = byId(handleId);
-      const track = document.querySelector('.fc-scope-track') as HTMLElement | null;
-      if (!handle || !track) return;
-      handle.addEventListener('pointerdown', (e: PointerEvent) => {
-        e.preventDefault();
-        handle.setPointerCapture(e.pointerId);
-        track.classList.add('dragging');
-        const move = (ev: PointerEvent) => {
-          const rect = track.getBoundingClientRect();
-          const pct = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-          const cm = Math.max(10, Math.min(200, Math.round((pct * 200) / 5) * 5));
-          if (which === 'min') {
-            const max = (app.form?.radarMaxDistanceCm ?? 110) - 10;
-            const v = Math.max(10, Math.min(cm, max));
-            app.patchForm({ radarMinDistanceCm: v });
-          } else {
-            const min = (app.form?.radarMinDistanceCm ?? 40) + 10;
-            const v = Math.max(min, Math.min(cm, 200));
-            app.patchForm({ radarMaxDistanceCm: v });
-          }
-        };
-        const up = (ev: PointerEvent) => {
-          const el = ev.currentTarget as HTMLElement;
-          track.classList.remove('dragging');
-          el.removeEventListener('pointermove', move);
-          el.removeEventListener('pointerup', up);
-          el.removeEventListener('pointercancel', up);
-        };
-        handle.addEventListener('pointermove', move);
-        handle.addEventListener('pointerup', up);
-        handle.addEventListener('pointercancel', up);
-      });
-    };
-    bindScopeHandleDrag('scope-handle-min', 'min');
-    bindScopeHandleDrag('scope-handle-max', 'max');
-
-    byId('btn-scope-reset-gate')?.addEventListener('click', () => {
-      app.patchForm({ radarMinDistanceCm: 40, radarMaxDistanceCm: 110 });
-      app.pushToast('Przywrócono domyślną strefę fotela (40–110 cm)');
-    });
-
     // Radar port & timeouts
     byId('sel-port')?.addEventListener('change', (e) => {
       app.patchForm({ port: (e.target as HTMLSelectElement).value });
@@ -870,44 +922,14 @@ export function bindEvents(app: AppUI) {
       const v = Number((e.target as HTMLInputElement).value);
       if (!isNaN(v)) app.patchForm({ timeoutDeskMs: v });
     });
+    byId('inp-input-hold-sec')?.addEventListener('input', (e) => {
+      const v = Number((e.target as HTMLInputElement).value);
+      if (!isNaN(v) && v >= 1) app.patchForm({ userInputPresenceHoldSec: v });
+    });
     byId('sel-radar-smoothing')?.addEventListener('change', (e) => {
       const val = (e.target as HTMLSelectElement).value as 'ultra' | 'balanced' | 'raw';
       app.patchForm({ radarSmoothingMode: val }, false);
       app.pushToast(`Filtr DSP: ${val === 'ultra' ? 'Ultra-Stabilny 🛡️' : val === 'balanced' ? 'Zbalansowany' : 'Szybki'}`);
-    });
-    byId('sw-deep-away')?.addEventListener('click', () => {
-      const val = !(app.form?.radarDeepAwayConfirm !== false);
-      app.patchForm({ radarDeepAwayConfirm: val }, false);
-      const btn = byId('sw-deep-away');
-      if (btn) {
-        btn.classList.toggle('active', val);
-        btn.setAttribute('aria-checked', String(val));
-      }
-    });
-    byId('inp-deep-away-min')?.addEventListener('input', (e) => {
-      const v = Number((e.target as HTMLInputElement).value);
-      if (!isNaN(v) && v >= 1) app.patchForm({ radarDeepAwayMinMs: Math.round(v * 60000) });
-    });
-    byId('inp-deep-away-confirm')?.addEventListener('input', (e) => {
-      const v = Number((e.target as HTMLInputElement).value);
-      if (!isNaN(v) && v >= 1) app.patchForm({ radarDeepAwayConfirmMs: Math.round(v * 1000) });
-    });
-    byId('btn-diag-record')?.addEventListener('click', async () => {
-      const btn = byId('btn-diag-record');
-      try {
-        const res = await window.api.diagRecord();
-        if (res.active) {
-          if (btn) btn.textContent = `Stop (${Math.round(res.durationSec / 60)} min)`;
-          app.pushToast(`Nagrywam surowy strumień przez ${Math.round(res.durationSec / 60)} min — pracuj normalnie lub wykonaj testowany scenariusz`);
-          return;
-        }
-        if (btn) btn.textContent = 'Start';
-        await window.api.openTextInNotepad(`${res.summary}\n\n=== CSV ===\n${res.csv}`);
-        app.pushToast(`Pomiar gotowy: ${res.sampleCount} ramek — raport otwarty w Notatniku`);
-      } catch {
-        if (btn) btn.textContent = 'Start';
-        app.pushToast('Pomiar sensora nieudany — sprawdź logi');
-      }
     });
     byId('sel-mute-behavior')?.addEventListener('change', (e) => {
       app.patchForm({ muteBehaviorOnAway: (e.target as HTMLSelectElement).value as any });
@@ -1137,7 +1159,22 @@ export function bindEvents(app: AppUI) {
           continue;
         }
       }
-      const recentTelemetry = filteredTelemetry.slice(-200);
+      // Okno próbki: ostatnie 2 minuty — diagnostyka fuzji potrzebuje pełnych
+      // cykli zachowania radaru (rampy dystansu trwają po ~35 s), migawka z
+      // 200 linii łapała ledwo kilkanaście sekund. Gdy w oknie nic nie ma
+      // (cisza ramek), awaryjnie zostaje ostatnie 100 linii.
+      const RAW_WINDOW_MS = 120_000;
+      const nowTs = Date.now();
+      const ageMs = (l: string): number => {
+        const m = l.match(/^\[(\d{2}):(\d{2}):(\d{2})\]/);
+        if (!m) return 0;
+        const n = new Date();
+        const t = new Date(n.getFullYear(), n.getMonth(), n.getDate(), +m[1], +m[2], +m[3]).getTime();
+        return nowTs - t;
+      };
+      let windowStart = filteredTelemetry.findIndex((l) => ageMs(l) <= RAW_WINDOW_MS);
+      if (windowStart < 0) windowStart = Math.max(0, filteredTelemetry.length - 100);
+      const recentTelemetry = filteredTelemetry.slice(windowStart);
 
       const report = [
         `# Raport Diagnostyczny DeskSense (dla Agenta AI / Programisty)`,
@@ -1147,7 +1184,7 @@ export function bindEvents(app: AppUI) {
         `## 📡 Radar mmWave & Stan Obecności`,
         `- Aktywne źródło: ${snap?.ha?.activeSource === 'ha' ? 'Home Assistant OS' : 'USB COM Port'}`,
         `- Stan obecności (Presence): ${snap?.radar?.presence ? 'OBECNY PRZY BIURKU (true)' : 'POZA FOTELEM (false)'}`,
-        `- Dystans live: ${app.telemetry.distanceCm ?? '--'} cm (strefa: ${form?.radarMinDistanceCm ?? 40} - ${form?.radarMaxDistanceCm ?? 110} cm, bramka: ${form?.radarDistanceGateEnabled ? 'WŁ' : 'WYŁ'})${app.telemetry.distanceTrusted === false ? ' | CEL NIEPEWNY (kot?)' : ''} | Cele: ${app.telemetry.targetCount ?? '—'}`,
+        `- Dystans live: ${app.telemetry.distanceCm ?? '--'} cm${app.telemetry.distanceTrusted === false ? ' | CEL NIEPEWNY (kot?)' : ''} | Cele: ${app.telemetry.targetCount ?? '—'}`,
         `- Biometria live: Tętno: ${app.telemetry.heartRate ?? '--'} BPM | Oddech: ${app.telemetry.breathRate ?? '--'} RPM`,
         `- Oświetlenie: ${typeof app.telemetry.illuminanceLux === 'number' ? `${app.telemetry.illuminanceLux} lx` : '--'}`,
         `- Port USB: ${snap?.radar?.port || form?.port || 'auto'} (baud: ${form?.baudRate || 115200})`,
@@ -1171,7 +1208,7 @@ export function bindEvents(app: AppUI) {
         keyEvents.length > 0 ? keyEvents.join('\n') : 'Brak zarejestrowanych zdarzeń przełączania w buforze.',
         '```',
         ``,
-        `## 🌊 Ostatnia Próbka Strumienia Radaru (Ostatnie 200 ramek, bez szumu)`,
+        `## 🌊 Ostatnia Próbka Strumienia Radaru (ostatnie 2 minuty, ${recentTelemetry.length} wpisów, bez szumu)`,
         '```',
         recentTelemetry.length > 0 ? recentTelemetry.join('\n') : 'Brak ramek telemetrycznych.',
         '```'
@@ -1285,25 +1322,6 @@ export function bindEvents(app: AppUI) {
         app.render();
       }
     });
-
-    // Wizard Modals
-    byId('btn-wizard-close')?.addEventListener('click', () => closeCalibrationWizard(app));
-    byId('btn-wizard-cancel')?.addEventListener('click', () => closeCalibrationWizard(app));
-    byId('btn-wizard-back')?.addEventListener('click', () => {
-      if (app.wizardStep > 1) {
-        app.wizardStep--;
-        if (app.wizardInterval) clearInterval(app.wizardInterval);
-        app.wizardInterval = null;
-        app.wizardCountdown = 0;
-        app.render();
-      }
-    });
-    byId('wizard-overlay')?.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).id === 'wizard-overlay') closeCalibrationWizard(app);
-    });
-    byId('btn-run-step-1')?.addEventListener('click', () => runWizardStep1(app));
-    byId('btn-run-step-2')?.addEventListener('click', () => runWizardStep2(app));
-    byId('btn-wizard-apply')?.addEventListener('click', () => applyWizardCalibration(app));
 
     // Diagnostics Modal
     byId('btn-diag-close')?.addEventListener('click', () => { app.diagModalOpen = false; app.render(); });

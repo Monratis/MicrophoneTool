@@ -1,28 +1,40 @@
 /// <reference types="vite/client" />
-import type {
-  Api,
-  AudioDeviceItem,
-  DetectResult,
-  HomeAssistantStatus,
-  PushEvent,
-  RadarTelemetry,
-  SerialPortInfo,
-  Snapshot,
-  UpdateInfo,
-  UpdaterStatus
+import {
+  DEFAULT_CONFIG,
+  type Api,
+  type AudioDeviceItem,
+  type DetectResult,
+  type DiagSessionReport,
+  type DiagSessionTimelineItem,
+  type DiagSessionAnalysis,
+  type DiscordStatus,
+  type DiscordVoiceSettings,
+  type HomeAssistantStatus,
+  type PushEvent,
+  type RadarTelemetry,
+  type SerialPortInfo,
+  type Snapshot,
+  type UpdateInfo,
+  type UpdaterStatus
 } from '../../shared/types';
 
-export type {
-  Api,
-  AudioDeviceItem,
-  DetectResult,
-  HomeAssistantStatus,
-  PushEvent,
-  RadarTelemetry,
-  SerialPortInfo,
-  Snapshot,
-  UpdateInfo,
-  UpdaterStatus
+export {
+  DEFAULT_CONFIG,
+  type Api,
+  type AudioDeviceItem,
+  type DetectResult,
+  type DiagSessionReport,
+  type DiagSessionTimelineItem,
+  type DiagSessionAnalysis,
+  type DiscordStatus,
+  type DiscordVoiceSettings,
+  type HomeAssistantStatus,
+  type PushEvent,
+  type RadarTelemetry,
+  type SerialPortInfo,
+  type Snapshot,
+  type UpdateInfo,
+  type UpdaterStatus
 };
 
 declare global {

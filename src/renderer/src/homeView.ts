@@ -71,8 +71,11 @@ export function updateActiveMicCards(app: AppUI) {
       cardId: string,
       selectId: string,
       badgeId: string,
+      titleId: string,
+      subId: string,
       active: boolean,
-      idleLabel: string
+      idleLabel: string,
+      activeColor: string
     ) => {
       const card = document.getElementById(cardId);
       if (card) {
@@ -88,13 +91,63 @@ export function updateActiveMicCards(app: AppUI) {
         badge.className = `fc-badge ${active ? 'calibrated' : 'muted'}`;
         badge.textContent = active ? 'Domyślny ✓' : idleLabel;
       }
+      const titleEl = document.getElementById(titleId);
+      const subEl = document.getElementById(subId);
+      if (titleEl && subEl) {
+        if (active) {
+          if (app.isMuted) {
+            titleEl.style.color = '#f59e0b';
+            titleEl.textContent = 'Wyciszony 🔇';
+            subEl.textContent = 'Mikrofon jest wyciszony w systemie';
+          } else {
+            titleEl.style.color = activeColor;
+            titleEl.textContent = 'Aktywny 🎙️';
+            subEl.textContent = 'Dźwięk przekazywany do aplikacji';
+          }
+        } else {
+          titleEl.style.color = 'var(--fc-text-secondary)';
+          titleEl.textContent = idleLabel;
+          subEl.textContent = idleLabel === 'Gotowy' ? 'Mikrofon stacjonarny' : 'Mikrofon mobilny';
+        }
+      }
     };
 
-    apply('card-mic-desk', 'sel-mic-desk', 'badge-mic-desk', isDeskActive, 'Gotowy');
-    apply('card-mic-headset', 'sel-mic-headset', 'badge-mic-headset', isHeadsetActive, 'Rezerwa');
+    apply('card-mic-desk', 'sel-mic-desk', 'badge-mic-desk', 'status-title-desk', 'status-sub-desk', isDeskActive, 'Gotowy', 'var(--fc-accent-green)');
+    apply('card-mic-headset', 'sel-mic-headset', 'badge-mic-headset', 'status-title-headset', 'status-sub-headset', isHeadsetActive, 'Rezerwa', '#38bdf8');
   }
 
 export function updateTelemetryDOM(app: AppUI) {
+    const t = app.telemetry;
+
+    // Kafle na pulpicie głównym (Home)
+    const elHomeDist = document.getElementById('home-val-distance');
+    const elHomeHeart = document.getElementById('home-val-heart');
+    const elHomeBreath = document.getElementById('home-val-breath');
+    const elHomeLux = document.getElementById('home-val-lux');
+    const elHomePerson = document.getElementById('home-val-person');
+    const elHomeTargets = document.getElementById('home-val-targets');
+
+    if (elHomeDist) {
+      elHomeDist.textContent = t.distanceCm && t.distanceCm > 0 ? `${t.distanceCm} cm` : '—';
+    }
+    if (elHomeHeart) {
+      elHomeHeart.textContent = t.heartRate && t.heartRate > 0 ? `${t.heartRate} BPM` : '—';
+    }
+    if (elHomeBreath) {
+      elHomeBreath.textContent = t.breathRate && t.breathRate > 0 ? `${t.breathRate} RPM` : '—';
+    }
+    if (elHomeLux) {
+      elHomeLux.textContent = typeof t.illuminanceLux === 'number' ? `${t.illuminanceLux} lx` : '—';
+    }
+    if (elHomePerson) {
+      const p = t.detectedPerson || 'unknown';
+      elHomePerson.textContent = p === 'me' ? 'Człowiek ✓' : (p === 'pet' ? 'Zwierzę' : (t.presence ? 'Człowiek ✓' : 'Brak celu'));
+    }
+    if (elHomeTargets) {
+      elHomeTargets.textContent = t.presence ? `${t.targetCount ?? 1} cel w kadrze` : 'Brak celu';
+    }
+
+    // Elementy w zakładce Ustawienia (jeśli otwarta)
     const elDist = document.getElementById('card-val-distance');
     const elHeart = document.getElementById('card-val-heart');
     const elBreath = document.getElementById('card-val-breath');
@@ -102,25 +155,25 @@ export function updateTelemetryDOM(app: AppUI) {
     const elPerson = document.getElementById('card-badge-person');
 
     if (elDist) {
-      if (app.telemetry.distanceCm && app.telemetry.distanceCm > 0) {
+      if (t.distanceCm && t.distanceCm > 0) {
         elDist.textContent =
-          app.telemetry.distanceTrusted === false
-            ? `${app.telemetry.distanceCm} cm (niepewny)`
-            : `${app.telemetry.distanceCm} cm`;
-      } else if (app.telemetry.presence === false) {
+          t.distanceTrusted === false
+            ? `${t.distanceCm} cm (niepewny)`
+            : `${t.distanceCm} cm`;
+      } else if (t.presence === false) {
         elDist.textContent = '— (Brak celu)';
       } else {
         elDist.textContent = '—';
       }
     }
-    if (elHeart) elHeart.textContent = app.telemetry.heartRate ? `${app.telemetry.heartRate} BPM` : '—';
-    if (elBreath) elBreath.textContent = app.telemetry.breathRate ? `${app.telemetry.breathRate} RPM` : '—';
+    if (elHeart) elHeart.textContent = t.heartRate ? `${t.heartRate} BPM` : '—';
+    if (elBreath) elBreath.textContent = t.breathRate ? `${t.breathRate} RPM` : '—';
     if (elLux) {
-      elLux.textContent = typeof app.telemetry.illuminanceLux === 'number' ? `${app.telemetry.illuminanceLux} lx` : '—';
+      elLux.textContent = typeof t.illuminanceLux === 'number' ? `${t.illuminanceLux} lx` : '—';
     }
 
     if (elPerson) {
-      const p = app.telemetry.detectedPerson || 'unknown';
+      const p = t.detectedPerson || 'unknown';
       elPerson.className = `fc-badge ${p === 'me' ? 'calibrated' : (p === 'pet' ? 'amber' : 'blue')}`;
       if (p === 'me') {
         elPerson.textContent = '👤 Człowiek ✓';
@@ -131,110 +184,31 @@ export function updateTelemetryDOM(app: AppUI) {
       }
     }
 
-    // Update Live Radar Scope Visualizer
+    // Update Live Radar Presence Banner
     updateRadarScopeDOM(app);
-
-    const tun = app.telemetry.autoTuning;
-    if (tun) {
-      const elTunDist = document.getElementById('card-val-autotune-dist');
-      const elTunStability = document.getElementById('card-badge-autotune-stability');
-      const elTunZone = document.getElementById('card-val-autotune-zone');
-      const elTunBio = document.getElementById('card-val-autotune-bio');
-      if (elTunDist) elTunDist.textContent = tun.adaptedDistanceCenter ? `${tun.adaptedDistanceCenter} cm` : '—';
-      if (elTunZone) elTunZone.textContent = autoTuneZoneLabel(app);
-      if (elTunBio) elTunBio.textContent = autoTuneBioLabel(app);
-      if (elTunStability) elTunStability.textContent = autoTuneStabilityLabel(app, tun);
-    }
-  }
-
-  /** Wyuczona strefa fotela = adaptacyjna bramka górna (auto-tuning tylko poszerza config). */
-export function autoTuneZoneLabel(app: AppUI): string {
-    const tun = app.telemetry.autoTuning;
-    if (!tun?.adaptedDistanceCenter) return '—';
-    return `${tun.adaptedDistanceMin}–${tun.adaptedDistanceMax} cm`;
-  }
-
-  /** Wyuczone średnie tętno/oddech — dowód, że radar widzi użytkownika biologicznie. */
-export function autoTuneBioLabel(app: AppUI): string {
-    const tun = app.telemetry.autoTuning;
-    if (!tun?.adaptedHeartRateAvg && !tun?.adaptedBreathRateAvg) return '—';
-    const hr = tun?.adaptedHeartRateAvg ? `${tun.adaptedHeartRateAvg} BPM` : '—';
-    const br = tun?.adaptedBreathRateAvg ? `${tun.adaptedBreathRateAvg} RPM` : '—';
-    return `${hr} · ${br}`;
-  }
-
-export function autoTuneStabilityLabel(_app: AppUI, tun: { stabilityScore?: number; stabilityReady?: boolean } | undefined): string {
-    if (!tun?.stabilityReady) return 'Nauka…';
-    return `Stabilność: ${tun.stabilityScore ?? 0}% ✓`;
   }
 
 export function updateRadarScopeDOM(app: AppUI) {
-    if (!app.form) return;
-    const minGate = app.form.radarMinDistanceCm ?? 40;
-    const maxGate = app.form.radarMaxDistanceCm ?? 110;
-    const maxScale = 200;
+    const isPresent = Boolean(app.telemetry.presence || app.snap?.state === 'desk');
 
-    const deadPct = Math.max(0, Math.min(100, (minGate / maxScale) * 100));
-    const activeLeftPct = deadPct;
-    const activeWidthPct = Math.max(2, Math.min(100 - deadPct, ((maxGate - minGate) / maxScale) * 100));
-    const cutoffLeftPct = Math.min(100, (maxGate / maxScale) * 100);
+    const iconEl = document.getElementById('scope-presence-icon');
+    const labelEl = document.getElementById('scope-presence-label');
+    const badgeEl = document.getElementById('scope-live-badge');
 
-    const deadZone = document.getElementById('scope-dead-zone');
-    const activeZone = document.getElementById('scope-active-zone');
-    const cutoffZone = document.getElementById('scope-cutoff-zone');
-    const userPin = document.getElementById('scope-user-pin');
-    const userBadge = document.getElementById('scope-user-badge');
-    const userLine = document.getElementById('scope-user-line');
-    const liveStatusText = document.getElementById('scope-live-status-text');
-    const minHandle = document.getElementById('scope-handle-min');
-    const maxHandle = document.getElementById('scope-handle-max');
-
-    if (deadZone) deadZone.style.width = `${deadPct}%`;
-    if (activeZone) {
-      activeZone.style.left = `${activeLeftPct}%`;
-      activeZone.style.width = `${activeWidthPct}%`;
-      activeZone.innerHTML = `<span>STREFA FOTELA (${minGate}–${maxGate} cm)</span>`;
+    if (iconEl) {
+      iconEl.innerHTML = isPresent ? '👤' : '🚶';
+      iconEl.style.background = isPresent ? 'rgba(34, 197, 94, 0.15)' : 'rgba(245, 158, 11, 0.15)';
+      iconEl.style.borderColor = isPresent ? 'rgba(34, 197, 94, 0.4)' : 'rgba(245, 158, 11, 0.4)';
     }
-    if (cutoffZone) {
-      cutoffZone.style.left = `${cutoffLeftPct}%`;
-      cutoffZone.style.width = `${Math.max(0, 100 - cutoffLeftPct)}%`;
+
+    if (labelEl) {
+      labelEl.style.color = isPresent ? 'var(--fc-accent-green)' : '#f59e0b';
+      labelEl.innerHTML = `<span class="dot" style="width: 8px; height: 8px; border-radius: 50%; background: ${isPresent ? 'var(--fc-accent-green)' : '#f59e0b'}; display: inline-block;"></span> ${isPresent ? 'WYKRYTO OBECNOŚĆ (DESK)' : 'BRAK OBECNOŚCI (AWAY)'}`;
     }
-    if (minHandle) minHandle.style.left = `${deadPct}%`;
-    if (maxHandle) maxHandle.style.left = `${cutoffLeftPct}%`;
 
-    if (userPin && userBadge && userLine) {
-      const curDist = app.telemetry.distanceCm;
-      if (curDist && curDist > 0) {
-        const userPct = Math.max(0, Math.min(100, (curDist / maxScale) * 100));
-        const isInside = curDist >= minGate && curDist <= maxGate;
-
-        userPin.style.display = 'flex';
-        userPin.style.left = `${userPct}%`;
-
-        userBadge.className = `fc-scope-user-badge ${isInside ? '' : 'outside'}`;
-        userBadge.innerHTML =
-          app.telemetry.distanceTrusted === false
-            ? `⚠️ Cel niepewny: ${curDist} cm (kot?)`
-            : isInside
-              ? `● Ty: ${curDist} cm ✓`
-              : `⚠️ ${curDist} cm (Poza strefą)`;
-
-        userLine.className = `fc-scope-user-line ${isInside ? '' : 'outside'}`;
-
-        if (liveStatusText) {
-          liveStatusText.innerHTML =
-            app.telemetry.distanceTrusted === false
-              ? `<strong style="color: #f59e0b">⚠️ Cel niejednoznaczny: ${curDist} cm</strong> <span style="color: var(--fc-text-muted)">(kot? — bramka wstrzymana)</span>`
-              : isInside
-                ? `<strong style="color: var(--fc-accent-green)">● Obecność: ${curDist} cm</strong> <span style="color: var(--fc-text-secondary)">(W aktywnej strefie fotela ✓)</span>`
-                : `<strong style="color: #f59e0b">⚠️ Wykryto poza strefą: ${curDist} cm</strong> <span style="color: var(--fc-text-muted)">(Ignorowane tło)</span>`;
-        }
-      } else {
-        userPin.style.display = 'none';
-        if (liveStatusText) {
-          liveStatusText.innerHTML = `<span style="color: var(--fc-text-muted)">Brak wykrycia człowieka w kadrze radaru</span>`;
-        }
-      }
+    if (badgeEl) {
+      badgeEl.className = `fc-badge ${isPresent ? 'calibrated' : 'muted'}`;
+      badgeEl.textContent = isPresent ? 'Przy biurku ✓' : 'Poza biurkiem';
     }
   }
 
@@ -265,12 +239,6 @@ export function renderHomeTab(app: AppUI): string {
 
     const isDeskActive = isMicActive(app, 'desk');
     const isHeadsetActive = isMicActive(app, 'headset');
-
-    // Dynamic gate geometry
-    const minGate = form.radarMinDistanceCm ?? 40;
-    const maxGate = form.radarMaxDistanceCm ?? 110;
-    const curDist = app.telemetry.distanceCm;
-    const isInside = curDist ? (curDist >= minGate && curDist <= maxGate) : false;
 
     // VAD values (zgodne z zakresem Discorda: -100 dB do 0 dB)
     const deskGateVal = Math.max(-100, Math.min(0, form.micDeskGateDb ?? -45));
@@ -343,7 +311,7 @@ export function renderHomeTab(app: AppUI): string {
                   <div style="display: flex; justify-content: space-between; align-items: center">
                     <div class="fc-micro-label">
                       <span>🎮 Próg Discord:</span>
-                      <strong style="color: #fbbf24" id="val-gate-desk">${deskGateVal} dB</strong>
+                      <strong style="color: ${form.micDeskAutoThreshold ? '#a855f7' : '#fbbf24'}" id="val-gate-desk">${form.micDeskAutoThreshold ? 'Auto (Voice Isolation)' : `${deskGateVal} dB`}</strong>
                     </div>
                     <div style="display: flex; gap: 4px">
                       <button class="fc-preset-pill" id="btn-vad-sync-desk" style="color: #38bdf8; border-color: rgba(56, 189, 248, 0.4); padding: 2px 7px" title="Pobierz aktualny próg z Discorda">⬇️ Z Discorda</button>
@@ -353,10 +321,11 @@ export function renderHomeTab(app: AppUI): string {
                   <input type="range" class="fc-slider" id="rng-gate-desk" min="-100" max="0" step="1" value="${deskGateVal}" />
 
                   <!-- Quick VAD Presets -->
-                  <div style="display: flex; gap: 4px; margin-top: 3px">
-                    <button class="fc-preset-pill" id="preset-vad-desk-quiet" style="font-size: 9.5px; padding: 2px 5px">🤫 -55 dB</button>
-                    <button class="fc-preset-pill" id="preset-vad-desk-std" style="font-size: 9.5px; padding: 2px 5px">⚖️ -45 dB</button>
-                    <button class="fc-preset-pill" id="preset-vad-desk-noisy" style="font-size: 9.5px; padding: 2px 5px">⌨️ -35 dB</button>
+                  <div style="display: flex; gap: 4px; margin-top: 3px; flex-wrap: wrap">
+                    <button class="fc-preset-pill ${form.micDeskAutoThreshold ? 'active' : ''}" id="preset-vad-desk-auto" style="font-size: 9.5px; padding: 2px 6px; ${form.micDeskAutoThreshold ? 'background: rgba(168, 85, 247, 0.2); color: #c084fc; border-color: #a855f7;' : 'color: #c084fc; border-color: rgba(168, 85, 247, 0.4);'}" title="Automatyczna czułość wejścia Discorda (Voice Isolation / Auto VAD)">🤖 Auto (Voice Isolation)</button>
+                    <button class="fc-preset-pill ${!form.micDeskAutoThreshold && deskGateVal === -55 ? 'active' : ''}" id="preset-vad-desk-quiet" style="font-size: 9.5px; padding: 2px 5px">🤫 -55 dB</button>
+                    <button class="fc-preset-pill ${!form.micDeskAutoThreshold && deskGateVal === -45 ? 'active' : ''}" id="preset-vad-desk-std" style="font-size: 9.5px; padding: 2px 5px">⚖️ -45 dB</button>
+                    <button class="fc-preset-pill ${!form.micDeskAutoThreshold && deskGateVal === -35 ? 'active' : ''}" id="preset-vad-desk-noisy" style="font-size: 9.5px; padding: 2px 5px">⌨️ -35 dB</button>
                   </div>
 
                   <!-- Complete DSP Filters -->
@@ -391,8 +360,12 @@ export function renderHomeTab(app: AppUI): string {
 
               <div class="fc-card-footer">
                 <div>
-                  <div class="fc-metric-large">${form.micDeskVolume ?? 100} %</div>
-                  <div class="fc-metric-sub">Głośność profilu (aplikowana przy przełączeniu)</div>
+                  <div class="fc-metric-large" id="status-title-desk" style="color: ${isDeskActive ? (app.isMuted ? '#f59e0b' : 'var(--fc-accent-green)') : 'var(--fc-text-secondary)'}">
+                    ${isDeskActive ? (app.isMuted ? 'Wyciszony 🔇' : 'Aktywny 🎙️') : 'Gotowy'}
+                  </div>
+                  <div class="fc-metric-sub" id="status-sub-desk">
+                    ${isDeskActive ? (app.isMuted ? 'Mikrofon jest wyciszony w systemie' : 'Dźwięk przekazywany do aplikacji') : 'Mikrofon stacjonarny'}
+                  </div>
                 </div>
                 <span class="fc-badge ${isDeskActive ? 'calibrated' : 'muted'}" id="badge-mic-desk">${isDeskActive ? 'Domyślny ✓' : 'Gotowy'}</span>
               </div>
@@ -443,7 +416,7 @@ export function renderHomeTab(app: AppUI): string {
                   <div style="display: flex; justify-content: space-between; align-items: center">
                     <div class="fc-micro-label">
                       <span>🎮 Próg Discord:</span>
-                      <strong style="color: #fbbf24" id="val-gate-headset">${headGateVal} dB</strong>
+                      <strong style="color: ${form.micHeadsetAutoThreshold ? '#a855f7' : '#fbbf24'}" id="val-gate-headset">${form.micHeadsetAutoThreshold ? 'Auto (Voice Isolation)' : `${headGateVal} dB`}</strong>
                     </div>
                     <div style="display: flex; gap: 4px">
                       <button class="fc-preset-pill" id="btn-vad-sync-headset" style="color: #38bdf8; border-color: rgba(56, 189, 248, 0.4); padding: 2px 7px" title="Pobierz aktualny próg z Discorda">⬇️ Z Discorda</button>
@@ -453,10 +426,11 @@ export function renderHomeTab(app: AppUI): string {
                   <input type="range" class="fc-slider" id="rng-gate-headset" min="-100" max="0" step="1" value="${headGateVal}" />
 
                   <!-- Quick VAD Presets -->
-                  <div style="display: flex; gap: 4px; margin-top: 3px">
-                    <button class="fc-preset-pill" id="preset-vad-headset-quiet" style="font-size: 9.5px; padding: 2px 5px">🤫 -55 dB</button>
-                    <button class="fc-preset-pill" id="preset-vad-headset-std" style="font-size: 9.5px; padding: 2px 5px">⚖️ -45 dB</button>
-                    <button class="fc-preset-pill" id="preset-vad-headset-noisy" style="font-size: 9.5px; padding: 2px 5px">⌨️ -35 dB</button>
+                  <div style="display: flex; gap: 4px; margin-top: 3px; flex-wrap: wrap">
+                    <button class="fc-preset-pill ${form.micHeadsetAutoThreshold ? 'active' : ''}" id="preset-vad-headset-auto" style="font-size: 9.5px; padding: 2px 6px; ${form.micHeadsetAutoThreshold ? 'background: rgba(168, 85, 247, 0.2); color: #c084fc; border-color: #a855f7;' : 'color: #c084fc; border-color: rgba(168, 85, 247, 0.4);'}" title="Automatyczna czułość wejścia Discorda (Voice Isolation / Auto VAD)">🤖 Auto (Voice Isolation)</button>
+                    <button class="fc-preset-pill ${!form.micHeadsetAutoThreshold && headGateVal === -55 ? 'active' : ''}" id="preset-vad-headset-quiet" style="font-size: 9.5px; padding: 2px 5px">🤫 -55 dB</button>
+                    <button class="fc-preset-pill ${!form.micHeadsetAutoThreshold && headGateVal === -45 ? 'active' : ''}" id="preset-vad-headset-std" style="font-size: 9.5px; padding: 2px 5px">⚖️ -45 dB</button>
+                    <button class="fc-preset-pill ${!form.micHeadsetAutoThreshold && headGateVal === -35 ? 'active' : ''}" id="preset-vad-headset-noisy" style="font-size: 9.5px; padding: 2px 5px">⌨️ -35 dB</button>
                   </div>
 
                   <!-- Complete DSP Filters -->
@@ -491,8 +465,12 @@ export function renderHomeTab(app: AppUI): string {
 
               <div class="fc-card-footer">
                 <div>
-                  <div class="fc-metric-large">${form.micHeadsetVolume ?? 100} %</div>
-                  <div class="fc-metric-sub">Głośność profilu (aplikowana przy przełączeniu)</div>
+                  <div class="fc-metric-large" id="status-title-headset" style="color: ${isHeadsetActive ? (app.isMuted ? '#f59e0b' : '#38bdf8') : 'var(--fc-text-secondary)'}">
+                    ${isHeadsetActive ? (app.isMuted ? 'Wyciszony 🔇' : 'Aktywny 🎙️') : 'Rezerwa'}
+                  </div>
+                  <div class="fc-metric-sub" id="status-sub-headset">
+                    ${isHeadsetActive ? (app.isMuted ? 'Mikrofon jest wyciszony w systemie' : 'Dźwięk przekazywany do aplikacji') : 'Mikrofon mobilny'}
+                  </div>
                 </div>
                 <span class="fc-badge ${isHeadsetActive ? 'calibrated' : 'muted'}" id="badge-mic-headset">${isHeadsetActive ? 'Domyślny ✓' : 'Rezerwa'}</span>
               </div>
@@ -563,77 +541,101 @@ export function renderHomeTab(app: AppUI): string {
         </section>
 
 
-        <!-- ==================== SEKCJA 2: RADAR MMWAVE 60 GHZ & KORYTARZ ZASIĘGU NA ŻYWO ==================== -->
+        <!-- ==================== SEKCJA 2: TELEMETRIA SENSORÓW & STAN OBECNOŚCI ==================== -->
         <section class="fc-section">
           <div class="fc-section-header">
             <div class="fc-section-title-wrap">
               <span class="fc-section-title">
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--fc-accent-green)" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 4.24 4.24"/><path d="m14.83 9.17 4.24-4.24"/><path d="M12 2v6"/><path d="M12 18v4"/><path d="M4.93 19.07l4.24-4.24"/></svg>
-                Radar mmWave 60 GHz & Wizualny Korytarz Zasięgu
+                Telemetria Sensorów & Stan Obecności na Żywo
               </span>
-              <span class="fc-info-badge" title="Wizualizacja strefy fotela na żywo — przeciągnij uchwyty, aby zmienić granice; pozostałe ustawienia radaru znajdziesz w zakładce Ustawienia">?</span>
-            </div>
-            <div class="fc-section-actions">
-              <button class="btn btn-ghost btn-sm" id="btn-home-open-wizard" style="font-size: 11px; padding: 4px 9px">✨ Kreator Kalibracji</button>
             </div>
           </div>
 
-          <!-- FULL INTERACTIVE RADAR SCOPE CORRIDOR (0-200 CM) ON HOME DASHBOARD -->
-          <div class="fc-radar-scope-box">
-            <div class="fc-scope-header">
+          <!-- BANNER GŁÓWNY: STAN OBECNOŚCI -->
+          <div class="fc-radar-scope-box" style="padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; gap: 16px; border-radius: 12px; background: rgba(13, 17, 23, 0.7); border: 1px solid var(--fc-card-border); margin-bottom: 10px;">
+            <div style="display: flex; align-items: center; gap: 14px;">
+              <div id="scope-presence-icon" style="width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 22px; background: ${snap.state === 'desk' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(245, 158, 11, 0.15)'}; border: 1px solid ${snap.state === 'desk' ? 'rgba(34, 197, 94, 0.4)' : 'rgba(245, 158, 11, 0.4)'}; transition: all 0.3s ease;">
+                ${snap.state === 'desk' ? '👤' : '🚶'}
+              </div>
               <div>
-                <strong style="font-size: 13px; color: #fff; display: flex; align-items: center; gap: 6px">
-                  <span>📡</span> Korytarz Zasięgu Radaru na Żywo (0–200 cm)
-                </strong>
-                <div style="font-size: 11px; margin-top: 2px" id="scope-live-status-text">
-                  ${curDist && curDist > 0 ? (
-                    isInside
-                      ? `<strong style="color: var(--fc-accent-green)">● Obecność: ${curDist} cm</strong> <span style="color: var(--fc-text-secondary)">(W aktywnej strefie fotela ✓)</span>`
-                      : `<strong style="color: #f59e0b">⚠️ Wykryto poza strefą: ${curDist} cm</strong> <span style="color: var(--fc-text-muted)">(Ignorowane tło)</span>`
-                  ) : `<span style="color: var(--fc-text-muted)">Brak wykrycia człowieka w kadrze radaru</span>`}
+                <div id="scope-presence-label" style="font-size: 15px; font-weight: 700; color: ${snap.state === 'desk' ? 'var(--fc-accent-green)' : '#f59e0b'}; display: flex; align-items: center; gap: 8px;">
+                  <span class="dot" style="width: 8px; height: 8px; border-radius: 50%; background: ${snap.state === 'desk' ? 'var(--fc-accent-green)' : '#f59e0b'}; display: inline-block;"></span>
+                  ${snap.state === 'desk' ? 'WYKRYTO OBECNOŚĆ (DESK)' : 'BRAK OBECNOŚCI (AWAY)'}
+                </div>
+                <div style="font-size: 11.5px; color: var(--fc-text-secondary); margin-top: 2px;">
+                  Fuzja radaru mmWave 60 GHz + czujników biometrycznych
                 </div>
               </div>
-              <span class="fc-badge ${form.radarDistanceGateEnabled !== false ? 'calibrated' : 'muted'}">
-                ${form.radarDistanceGateEnabled !== false ? 'Bramka Dystansu Aktywna ✓' : 'Bramka Wyłączona'}
+            </div>
+
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <span id="scope-live-badge" class="fc-badge ${snap.state === 'desk' ? 'calibrated' : 'muted'}" style="font-size: 11.5px; padding: 4px 12px; font-weight: 600;">
+                ${snap.state === 'desk' ? 'Przy biurku ✓' : 'Poza biurkiem'}
               </span>
             </div>
+          </div>
 
-            <div class="fc-scope-track-container">
-              <div class="fc-scope-track">
-                <div class="fc-scope-grid-lines"></div>
-                <div class="fc-scope-dead-zone" id="scope-dead-zone" style="width: ${(minGate / 200) * 100}%">
-                  <span>Martwa strefa</span>
-                </div>
-                <div class="fc-scope-active-zone" id="scope-active-zone" style="left: ${(minGate / 200) * 100}%; width: ${((maxGate - minGate) / 200) * 100}%">
-                  <span>STREFA FOTELA (${minGate}–${maxGate} cm)</span>
-                </div>
-                <div class="fc-scope-cutoff-zone" id="scope-cutoff-zone" style="left: ${(maxGate / 200) * 100}%; width: ${Math.max(0, 100 - (maxGate / 200) * 100)}%">
-                  <span>Ignorowane tło</span>
-                </div>
-                <div class="fc-scope-handle min" id="scope-handle-min" style="left: ${(minGate / 200) * 100}%" title="Przeciągnij, aby ustawić początek strefy fotela"></div>
-                <div class="fc-scope-handle max" id="scope-handle-max" style="left: ${(maxGate / 200) * 100}%" title="Przeciągnij, aby ustawić koniec strefy fotela"></div>
+          <!-- KAFLE TELEMETRII (5 METRYK NA ŻYWO) -->
+          <div class="fc-subgrid-5">
+            <!-- Kafel 1: Dystans -->
+            <div class="fc-telemetry-tile">
+              <div class="fc-telemetry-tile-header">
+                <span style="font-size: 13px;">📏</span>
+                <span class="fc-telemetry-tile-title">Dystans</span>
               </div>
-
-              <div class="fc-scope-user-pin" id="scope-user-pin" style="left: ${curDist ? (curDist / 200) * 100 : 0}%; display: ${curDist && curDist > 0 ? 'flex' : 'none'}">
-                <div class="fc-scope-user-badge ${isInside ? '' : 'outside'}" id="scope-user-badge">
-                  ${isInside ? `● Ty: ${curDist} cm ✓` : `⚠️ ${curDist} cm (Poza strefą)`}
-                </div>
-                <div class="fc-scope-user-line ${isInside ? '' : 'outside'}" id="scope-user-line"></div>
+              <div class="fc-telemetry-tile-val" id="home-val-distance">
+                ${app.telemetry.distanceCm && app.telemetry.distanceCm > 0 ? `${app.telemetry.distanceCm} cm` : '—'}
               </div>
-
-              <div class="fc-scope-ticks">
-                <span>0 cm (Sensor)</span>
-                <span>50 cm</span>
-                <span>100 cm</span>
-                <span>150 cm</span>
-                <span>200 cm (Maks)</span>
-              </div>
+              <div class="fc-telemetry-tile-sub">Odległość do radaru</div>
             </div>
 
-            <!-- Interaktywna regulacja strefy fotela (drag handles) -->
-            <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--fc-card-border); padding-top: 8px; margin-top: 4px">
-              <span style="font-size: 11px; color: var(--fc-text-secondary)">Przeciągnij uchwyty na grafice, aby dopasować strefę fotela (zakres: ${minGate}–${maxGate} cm)</span>
-              <button class="btn btn-ghost btn-sm" id="btn-scope-reset-gate" style="font-size: 10.5px; padding: 3px 8px" title="Przywróć domyślną strefę fotela 40–110 cm">↺ Reset (40–110 cm)</button>
+            <!-- Kafel 2: Tętno -->
+            <div class="fc-telemetry-tile">
+              <div class="fc-telemetry-tile-header">
+                <span style="font-size: 13px;">❤️</span>
+                <span class="fc-telemetry-tile-title">Tętno</span>
+              </div>
+              <div class="fc-telemetry-tile-val" id="home-val-heart" style="color: #f87171;">
+                ${app.telemetry.heartRate && app.telemetry.heartRate > 0 ? `${app.telemetry.heartRate} BPM` : '—'}
+              </div>
+              <div class="fc-telemetry-tile-sub">Biometria 60 GHz</div>
+            </div>
+
+            <!-- Kafel 3: Oddech -->
+            <div class="fc-telemetry-tile">
+              <div class="fc-telemetry-tile-header">
+                <span style="font-size: 13px;">🫁</span>
+                <span class="fc-telemetry-tile-title">Oddech</span>
+              </div>
+              <div class="fc-telemetry-tile-val" id="home-val-breath" style="color: #38bdf8;">
+                ${app.telemetry.breathRate && app.telemetry.breathRate > 0 ? `${app.telemetry.breathRate} RPM` : '—'}
+              </div>
+              <div class="fc-telemetry-tile-sub">Częstotliwość oddechu</div>
+            </div>
+
+            <!-- Kafel 4: Oświetlenie -->
+            <div class="fc-telemetry-tile">
+              <div class="fc-telemetry-tile-header">
+                <span style="font-size: 13px;">💡</span>
+                <span class="fc-telemetry-tile-title">Oświetlenie</span>
+              </div>
+              <div class="fc-telemetry-tile-val" id="home-val-lux" style="color: #fbbf24;">
+                ${typeof app.telemetry.illuminanceLux === 'number' ? `${app.telemetry.illuminanceLux} lx` : '—'}
+              </div>
+              <div class="fc-telemetry-tile-sub">Czujnik BH1750</div>
+            </div>
+
+            <!-- Kafel 5: Cel / Obiekt -->
+            <div class="fc-telemetry-tile">
+              <div class="fc-telemetry-tile-header">
+                <span style="font-size: 13px;">🎯</span>
+                <span class="fc-telemetry-tile-title">Klasyfikacja</span>
+              </div>
+              <div class="fc-telemetry-tile-val" id="home-val-person" style="font-size: 16px; color: #c084fc;">
+                ${app.telemetry.detectedPerson === 'me' ? 'Człowiek ✓' : (app.telemetry.detectedPerson === 'pet' ? 'Zwierzę' : (snap.state === 'desk' ? 'Człowiek ✓' : 'Brak celu'))}
+              </div>
+              <div class="fc-telemetry-tile-sub" id="home-val-targets">${snap.state === 'desk' ? `${app.telemetry.targetCount ?? 1} cel w kadrze` : 'Brak celu'}</div>
             </div>
           </div>
         </section>

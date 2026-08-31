@@ -1,100 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AppConfig } from '../shared/types';
+import { DEFAULT_CONFIG, type AppConfig } from '../shared/types';
 
-export const DEFAULTS: AppConfig = {
-  port: 'auto',
-  baudRate: 115200,
-  micDeskName: '',
-  micHeadsetName: '',
-  micDeskVolume: -1,
-  micHeadsetVolume: -1,
-  micDeskGateDb: -1,
-  micHeadsetGateDb: -1,
-  micDeskKrisp: 'default',
-  micHeadsetKrisp: 'default',
-  micDeskAgc: 'default',
-  micHeadsetAgc: 'default',
-  micDeskEcho: 'default',
-  micHeadsetEcho: 'default',
-  discordGateFollowMic: true,
-  /** Application ID apki DeskSense (Discord Developer Portal); override: DISCORD_CLIENT_ID */
-  discordClientId: process.env.DISCORD_CLIENT_ID || '1238447097859145859',
-  /**
-   * Client Secret osadzony w apkce na stałe (decyzja właściciela — apka
-   * dystrybuowana prywatnie, scope'y ograniczone do rpc.voice.*).
-   * Nadpisywalne przez config.json użytkownika lub DISCORD_CLIENT_SECRET.
-   */
-  discordClientSecret: process.env.DISCORD_CLIENT_SECRET || 'xwmeOcXQP496dX5EYgXBFFcNyEUo30Z3',
-  discordRedirectUri: 'https://discord.com',
-  discordAccessToken: '',
-  discordRefreshToken: '',
-  /** Unix ms — kiedy wygasa access token (proaktywny refresh z 24 h zapasem). */
-  discordTokenExpiresAt: 0,
-  timeoutAwayMs: 1500,
-  timeoutDeskMs: 200,
-  userInputPresenceEnabled: true,
-  radarDistanceGateEnabled: true,
-  radarMinDistanceCm: 40,
-  radarMaxDistanceCm: 110,
-  radarDeepAwayConfirm: true,
-  radarDeepAwayMinMs: 600000,
-  radarDeepAwayConfirmMs: 3000,
-  petFilterEnabled: true,
-  radarAutoTuningEnabled: true,
-  radarAutoTuningSpeed: 'balanced',
-  radarLearnedDistanceCenter: 0,
-  radarLearnedDistanceVariance: 0,
-  radarLearnedHeartRate: 0,
-  radarLearnedBreathRate: 0,
-  switchMicOnAway: true,
-  switchMicOnDesk: true,
-  muteBehaviorOnAway: 'mute_inactive',
-  unmuteOnDesk: true,
-  discordIntegration: true,
-  signalrgbEnabled: false,
-  signalrgbPort: 16038,
-  signalrgbAwayAction: 'solid_color',
-  signalrgbAwayColor: '#f59e0b',
-  signalrgbAwayEffect: '',
-  signalrgbAwayBrightness: 0,
-  signalrgbRestoreOnDesk: true,
-  signalrgbDeskEffect: '',
-  screensaverOnAway: true,
-  screensaverDelayMs: 60000,
-  sleepMonitorsOnAway: false,
-  sleepMonitorsDelayMs: 600000,
-  wakeMonitorsOnDesk: true,
-  audioChime: true,
-  audioChimeOnDesk: true,
-  audioChimeOnAway: true,
-  audioChimeVolume: 0.2,
-  audioChimeStyle: 'harmonic',
-  audioFileDesk: '',
-  audioFileHeadset: '',
-  notifications: true,
-  autoStart: false,
-  globalShortcut: 'CommandOrControl+Shift+M',
-  githubRepo: 'Monratis/MicrophoneTool',
-  githubToken: process.env.GITHUB_TOKEN || '',
-  haEnabled: false,
-  haUrl: 'http://homeassistant.local:8123',
-  haToken: '',
-  haPresenceEntity: '',
-  haDistanceEntity: '',
-  haHeartRateEntity: '',
-  haBreathRateEntity: '',
-  haAutomationOnAway: '',
-  haAutomationOnDesk: '',
-  haButtonSnoozeEntity: '',
-  haButtonMuteEntity: '',
-  radarSmoothingMode: 'balanced',
-  sensorLedEnabled: true,
-  sensorLedBrightness: 25,
-  sensorLedDeskColor: '#22c55e',
-  sensorLedAwayColor: '#f59e0b',
-  sensorLedMuteColor: '#ef4444'
-};
+export const DEFAULTS: AppConfig = DEFAULT_CONFIG;
 
 export default class Config {
   readonly filePath: string;
@@ -110,8 +18,22 @@ export default class Config {
     try {
       if (fs.existsSync(this.filePath)) {
         const raw = fs.readFileSync(this.filePath, 'utf8');
-        const parsed = JSON.parse(raw) as Partial<AppConfig>;
-        this.data = { ...DEFAULTS, ...parsed };
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        const sanitized: Partial<AppConfig> = {};
+        for (const k of Object.keys(DEFAULTS) as (keyof AppConfig)[]) {
+          if (k in parsed && parsed[k] !== undefined) {
+            sanitized[k] = parsed[k] as any;
+          }
+        }
+        // Zabezpieczenie przed ekstremalnie niskimi wartościami z przeszłości (np. 25 ms):
+        if (typeof sanitized.timeoutAwayMs === 'number' && sanitized.timeoutAwayMs < 200) {
+          sanitized.timeoutAwayMs = DEFAULTS.timeoutAwayMs;
+        }
+        if (typeof sanitized.timeoutDeskMs === 'number' && sanitized.timeoutDeskMs < 0) {
+          sanitized.timeoutDeskMs = DEFAULTS.timeoutDeskMs;
+        }
+        this.data = { ...DEFAULTS, ...sanitized };
+        this.save(); // natychmiast czyści stary plik z usuniętych pól
       } else {
         this.save();
       }

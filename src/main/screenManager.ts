@@ -166,8 +166,13 @@ export default class ScreenManager extends EventEmitter {
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;width:100vw;height:100vh;background:#000000;overflow:hidden;cursor:none;user-select:none;}</style></head><body><script>
 (function () {
   var sent = false;
+  // Chromium syntezuje mousemove, gdy tworzone okno pojawia sie pod
+  // nieruchomym kursorem — bez grace period wygaszacz gaslby sie sam
+  // w chwili aktywacji. Prawdziwe wejście w tym oknie i tak lapie poll
+  // idle w main (powerMonitor.getSystemIdleTime, 200 ms).
+  var armedAt = Date.now() + 2000;
   var dismiss = function () {
-    if (sent) return;
+    if (sent || Date.now() < armedAt) return;
     sent = true;
     try { window.api.screensaverDismiss(); } catch (e) {}
   };

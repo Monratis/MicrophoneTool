@@ -9,7 +9,7 @@ const api = {
   detectDevices: () => ipcRenderer.invoke('devices:detect'),
   listDevices: () => ipcRenderer.invoke('devices:list'),
   toggleMute: () => ipcRenderer.invoke('audio:toggleMute'),
-  discordApplyVoice: (args: { gateDb?: number; krisp?: boolean; agc?: boolean; echo?: boolean }) =>
+  discordApplyVoice: (args: { gateDb?: number; autoThreshold?: boolean; krisp?: boolean; agc?: boolean; echo?: boolean }) =>
     ipcRenderer.invoke('discord:applyVoice', args),
   discordGetStatus: () => ipcRenderer.invoke('discord:getStatus'),
   discordGetVoiceSettings: () => ipcRenderer.invoke('discord:getVoiceSettings'),
@@ -26,11 +26,15 @@ const api = {
   maximizeWindow: () => ipcRenderer.send('window:maximize'),
   isWindowMaximized: () => ipcRenderer.invoke('window:isMaximized'),
   toggleDevTools: () => ipcRenderer.send('window:toggleDevTools'),
-  // Radar Auto-Tuning
+  // Radar Auto-Tuning & Calibration
   resetAutoTuning: () => ipcRenderer.invoke('radar:resetAutoTuning'),
+  radarApplyCalibration: (data: Record<string, unknown>) =>
+    ipcRenderer.invoke('radar:applyCalibration', data),
 
   // Rejestrator surowego strumienia radaru (kalibracja progów fuzji)
-  diagRecord: () => ipcRenderer.invoke('diag:record'),
+  diagRecord: (durationSec?: number) => ipcRenderer.invoke('diag:record', durationSec),
+  diagRecordStart: (durationSec?: number) => ipcRenderer.invoke('diag:recordStart', durationSec),
+  diagRecordStop: () => ipcRenderer.invoke('diag:recordStop'),
 
   // Home Assistant (HAOS) Integration
   haTestConnection: (opts?: { url?: string; token?: string }) =>
@@ -44,6 +48,8 @@ const api = {
   signalrgbTestDesk: () => ipcRenderer.invoke('signalrgb:testDesk'),
   signalrgbGetStatus: () => ipcRenderer.invoke('signalrgb:getStatus'),
   signalrgbListEffects: () => ipcRenderer.invoke('signalrgb:listEffects'),
+  signalrgbApplyEffect: (effectName: string, color?: string) =>
+    ipcRenderer.invoke('signalrgb:applyEffect', effectName, color),
 
   // GitHub Auto Updater & Token
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),

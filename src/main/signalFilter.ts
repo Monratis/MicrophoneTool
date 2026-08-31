@@ -46,34 +46,24 @@ export class MedianFilter {
 export class DistanceFilter {
   private median: MedianFilter;
   private alpha: number;
-  private deadband: number;
-  private maxStep: number;
   private ema = 0;
   private output = 0;
 
-  constructor(size = 5) {
+  constructor(size = 3) {
     this.median = new MedianFilter(size);
-    this.alpha = 0.2;
-    this.deadband = 5;
-    this.maxStep = 8;
+    this.alpha = 0.85;
   }
 
   setMode(mode: 'ultra' | 'balanced' | 'raw'): void {
     if (mode === 'raw') {
       this.median.setSize(1);
-      this.alpha = 1;
-      this.deadband = 0;
-      this.maxStep = 999;
+      this.alpha = 1.0;
     } else if (mode === 'balanced') {
-      this.median.setSize(5);
-      this.alpha = 0.2;
-      this.deadband = 5;
-      this.maxStep = 8;
+      this.median.setSize(3);
+      this.alpha = 0.85;
     } else {
       this.median.setSize(5);
-      this.alpha = 0.1;
-      this.deadband = 6;
-      this.maxStep = 4;
+      this.alpha = 0.6;
     }
   }
 
@@ -82,13 +72,7 @@ export class DistanceFilter {
     const m = this.median.push(valCm);
     if (m <= 0) return Math.round(this.output);
     this.ema = this.ema === 0 ? m : this.ema + this.alpha * (m - this.ema);
-    const candidate = Math.round(this.ema);
-    if (this.output === 0) {
-      this.output = candidate;
-    } else if (Math.abs(candidate - this.output) >= this.deadband) {
-      const diff = candidate - this.output;
-      this.output += Math.sign(diff) * Math.min(Math.abs(diff), this.maxStep);
-    }
+    this.output = Math.round(this.ema);
     return this.output;
   }
 
@@ -100,37 +84,29 @@ export class DistanceFilter {
 }
 
 /**
- * Filtr biometryczny (tętno/oddech): mediana + EMA + limit tempa zmian.
- * Estymator radaru potrafi monotonicznie "uciec" (rampa tętna +40 BPM w kilkanaście
- * sekund przy siedzącym użytkowniku); limit szybkiej zmiany sprawia, że wyświetlana
- * wartość płynie zamiast skakać, a po przerwie pomiarów startuje od nowego odczytu.
+ * Filtr biometryczny (tętno/oddech): szybka mediana 3-próbkowa bez sztucznego laga.
  */
 export class BiometricFilter {
   private median: MedianFilter;
   private alpha: number;
-  private maxStep: number;
   private ema = 0;
   private output = 0;
 
-  constructor(size = 3, alpha = 0.35, maxStep = 3) {
+  constructor(size = 3, alpha = 0.85) {
     this.median = new MedianFilter(size);
     this.alpha = alpha;
-    this.maxStep = maxStep;
   }
 
   setMode(mode: 'ultra' | 'balanced' | 'raw'): void {
     if (mode === 'raw') {
       this.median.setSize(1);
       this.alpha = 1;
-      this.maxStep = 999;
     } else if (mode === 'balanced') {
       this.median.setSize(3);
-      this.alpha = 0.35;
-      this.maxStep = 3;
+      this.alpha = 0.85;
     } else {
       this.median.setSize(5);
-      this.alpha = 0.2;
-      this.maxStep = 2;
+      this.alpha = 0.6;
     }
   }
 
@@ -139,15 +115,7 @@ export class BiometricFilter {
     const m = this.median.push(val);
     if (m <= 0) return this.output;
     this.ema = this.ema === 0 ? m : this.ema + this.alpha * (m - this.ema);
-    const candidate = Math.round(this.ema);
-    if (this.output === 0) {
-      this.output = candidate;
-    } else {
-      const diff = candidate - this.output;
-      if (Math.abs(diff) > this.maxStep) {
-        this.output += Math.sign(diff) * this.maxStep;
-      }
-    }
+    this.output = Math.round(this.ema);
     return this.output;
   }
 

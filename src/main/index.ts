@@ -69,6 +69,10 @@ let snapshotPushTimer: ReturnType<typeof setTimeout> | null = null;
 function buildSnapshot() {
   if (!ctx) throw new Error('ctx not ready');
   const radarConnected = Boolean(ctx.radar.port && ctx.radar.port.isOpen);
+  // Tokeny OAuth Discorda nie trafiają do renderera — zarządza nimi wyłącznie
+  // discordIntegration.ts, a ich obecność w formularzu powodowała nadpisywanie
+  // świeżo odświeżonych tokenów starymi kopiami przy zapisie ustawień.
+  const { discordAccessToken: _a, discordRefreshToken: _r, discordTokenExpiresAt: _e, ...safeConfig } = ctx.config.data;
   return {
     version: app.getVersion(),
     mode: ctx.controller.mode,
@@ -87,8 +91,9 @@ function buildSnapshot() {
       port: ctx.config.get('port')
     },
     ha: ctx.ha.getStatus(),
+    discord: ctx.controller.discord ? ctx.controller.discord.getStatus() : undefined,
     telemetry: ctx.radar.telemetry,
-    config: { ...ctx.config.data },
+    config: safeConfig as typeof ctx.config.data,
     snoozeUntil: ctx.controller.getSnoozeUntil()
   };
 }
@@ -196,6 +201,8 @@ app.whenReady().then(() => {
   audio.on('toolStatus', (msg: string) => pushEvent('toast', { message: msg }));
   radar.on('telemetry', (tel) => pushEvent('telemetry', tel));
   ha.on('status', () => refreshSnapshot());
+  discord.on('status', () => refreshSnapshot());
+  discord.on('authenticated', () => refreshSnapshot());
 
   controller.on('switch', (ev) => {
     if (ev.device) {

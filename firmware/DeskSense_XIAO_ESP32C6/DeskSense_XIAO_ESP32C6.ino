@@ -1,5 +1,5 @@
 /*
- * DeskSense Native OS (v1.5.1) for Seeed XIAO ESP32-C6 + MR60BHA2 Kit
+ * DeskSense Native OS (v1.6.0) for Seeed XIAO ESP32-C6 + MR60BHA2 Kit
  *
  * Funkcjonalność:
  * 1. Natywny dekoder ramek binarnych MR60BHA2 (ESPHome/Seeed protocol).
@@ -7,9 +7,9 @@
  * 3. Bezpośrednie sterowanie diodą WS2812 RGB (GPIO1) przez komendy SET:LED=R,G,B,BRI.
  * 4. Obsługa czujnika oświetlenia BH1750 na I2C (SDA=22, SCL=23).
  * 5. Zerowy narzut sieciowy, brak Wi-Fi, błyskawiczna latencja, zero zakłóceń.
- * 6. Fuzja obecnosci: gdy biometria (tetno+oddech) zamilknie, a dystans zamarza
- *    na jednej wartosci mimo ON z modulu — wymuszamy 'Person Information' OFF
- *    (kompensacja zaczepienia radaru o fotel/krzeslo po wyjsciu uzytkownika).
+ * 6. Fuzja obecnosci (dwukierunkowa):
+ *    - rawPresence=ON + brak bio -> wymuszamy OFF (kompensacja zaczepienia radaru o fotel),
+ *    - rawPresence=OFF + bio zyje -> BLOKUJEMY OFF (ochrona migotania sprzętowego modulu).
  * 7. Heartbeat 'DeskSense Device FW=... UPTIME=...s TEMP=...C' — apka pokazuje
  *    realna wersje firmware i telemetrie ukladu.
  */
@@ -19,7 +19,7 @@
 #include <Wire.h>
 #include <Adafruit_NeoPixel.h>
 
-#define FIRMWARE_VERSION "1.5.1"
+#define FIRMWARE_VERSION "1.8.0"
 
 // --- Piny i konfiguracja sprzętowa ---
 #define RADAR_RX_PIN    17
@@ -41,31 +41,22 @@ Adafruit_NeoPixel strip(NUM_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 uint8_t rxRing[RX_RING_SIZE];
 size_t rxHead = 0;
 
-// Bufor komend z PC (DeskSense)
-String pcCmd = "";
+// Bufor komend z PC (DeskSense) — statyczny, bez alokacji heap
+#define PC_CMD_MAX 128
+char pcCmdBuf[PC_CMD_MAX];
+uint8_t pcCmdLen = 0;
 
-// --- Fuzja obecnosci (v1.5.0) ---
-// Modul MR60BHA2 potrafi "przykleic sie" do statycznego odbicia (fotel/krzeslo)
-// i trzymac People Exist=ON po wyjsciu uzytkownika. Dowody zywotnosci celu:
-// (a) wiarygodna biometria — >=2 ramki tetna/oddechu w oknie 10 s (halucynacje
-//     bio na odbiciu wypadaja sporadycznie i nie licza sie jako dowod zycia),
-// (b) netto przemieszczenie dystansu >= FUSION_DIST_NET_CM w oknie FUSION_GAP_MS
-//     (drgajace odbicie ±2 cm nie udaje juz ruchu; czlowiek wstajacy/odchodzacy
-//     robi net kilka-kilkanascie cm).
-#define FUSION_GAP_MS          3000UL  // okno ruchu dystansu (odbicie zamarza szybciej)
-// Pomiar 2026-08-29 (5 min czytania): dystans jest kwantyzowany do binow po
-// 5,74 cm (63.14/68.88/.../114.80), |delta| to ZAWSZE 0 lub 5.74 cm.Prog netto
-// 8 cm wymaga przeskoku o 2 biny — pojedynczy flicker odbicia (1 bin = 5.74 cm)
-// juz nie udaje ruchu; siedzacy czlowiek robi >=8 cm netto w 56% okien 3 s,
-// a w pozostalych dowodem zycia jest bio.
-// Korekta 2026-08-29 (sesja totalnie nieruchomo): przy pelnym bezruchu bio
-// zamilka na 6-24 s (log: "bio bez dowodu 24s"), a wtedy FUSION_GAP_MS=3 s
-// wygasal zywego czlowieka. Bio dostaje wlasne, duzo dluzsze okno — chair-ghost
-// i tak nie ma bio NIGDY, wiec czyszczenie zamlga do ~FUSION_BIO_GAP_MS.
-#define FUSION_DIST_NET_CM     8.0f    // netto max-min dystansu w oknie = ruch
-#define FUSION_BIO_MIN_FRAMES  2       // ile ramek bio w oknie dowodzi zycia
-#define FUSION_BIO_WINDOW_MS   10000UL // okno wiarygodnosci bio
-#define FUSION_BIO_GAP_MS      45000UL // cisza bio przez tyle = cel martwy (zycy bezruch: do 24 s)
+// --- Fuzja obecnosci (v1.8.0 — Lightning-Fast Departure & Solid Seated Protection) ---
+#define FUSION_BIO_MIN_FRAMES  1       // ile ramek bio w oknie dowodzi zycia
+#define FUSION_BIO_WINDOW_MS   1500UL  // okno wiarygodnosci bio (1.5 s)
+#define FUSION_BIO_GAP_MS      2000UL  // podtrzymanie obecnosci przy bezruchu przez 2.0 s
+
+// --- Bramki fizjologiczne człowieka ---
+#define BIO_HR_MIN            38.0f   // minimalne ludzkie tętno
+#define BIO_HR_MAX           210.0f   // maksymalne ludzkie tętno
+#define BIO_RPM_MIN            3.0f   // minimalny aktywny oddech (spokojny oddech podczas czytania to 4-8 RPM)
+#define BIO_RPM_MAX           45.0f   // maksymalny oddech
+
 bool rawPresence = false;              // surowy bit obecności z modulu radaru
 unsigned long lastBioEvidenceMs = 0;   // ostatnio potwierdzona wiarygodna bio
 bool fusedOff = false;                 // fuzja aktualnie wymusza OFF mimo raw=ON
@@ -73,11 +64,6 @@ bool fusedOff = false;                 // fuzja aktualnie wymusza OFF mimo raw=O
 // Pierscienie probek dla dowodow zywotnosci
 unsigned long bioFrameTimes[8];
 uint8_t bioFrameIdx = 0;
-#define DIST_WIN 32
-float distWinVal[DIST_WIN];
-unsigned long distWinMs[DIST_WIN];
-uint8_t distWinIdx = 0;
-uint8_t distWinCount = 0;
 
 // Ostatnio wyemitowane stany (do dedup i optymalizacji strumienia)
 bool effPresence = false;
@@ -89,6 +75,7 @@ uint32_t lastTargets = 999;
 float lastLux = -1.0f;
 
 unsigned long lastPresenceEmit = 0;
+unsigned long lastPresenceEval = 0;
 unsigned long lastDistanceEmit = 0;
 unsigned long lastHeartEmit = 0;
 unsigned long lastBreathEmit = 0;
@@ -114,47 +101,38 @@ void applyLed(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness) {
   strip.show();
 }
 
-void handlePcCommand(const String& cmd) {
-  String trimmed = cmd;
-  trimmed.trim();
-  if (trimmed.length() == 0) return;
+void handlePcCommand(const char *cmd, uint8_t len) {
+  if (len == 0) return;
 
-  if (trimmed.startsWith("SET:LED=")) {
-    String params = trimmed.substring(8);
+  // SET:LED=R,G,B,BRI — sterowanie dioda WS2812
+  if (len > 8 && strncmp(cmd, "SET:LED=", 8) == 0) {
     int r = 0, g = 0, b = 0, bri = 25;
-    int c1 = params.indexOf(',');
-    int c2 = params.indexOf(',', c1 + 1);
-    int c3 = params.indexOf(',', c2 + 1);
-
-    if (c1 > 0 && c2 > c1) {
-      r = params.substring(0, c1).toInt();
-      g = params.substring(c1 + 1, c2).toInt();
-      if (c3 > c2) {
-        b = params.substring(c2 + 1, c3).toInt();
-        bri = params.substring(c3 + 1).toInt();
-      } else {
-        b = params.substring(c2 + 1).toInt();
-      }
-      applyLed((uint8_t)constrain(r, 0, 255),
-               (uint8_t)constrain(g, 0, 255),
-               (uint8_t)constrain(b, 0, 255),
-               (uint8_t)constrain(bri, 0, 100));
-    }
+    // Parsowanie wartosci CSV recznie (bez String::substring)
+    const char *p = cmd + 8;
+    r = atoi(p);
+    p = strchr(p, ',');
+    if (p) { g = atoi(++p); p = strchr(p, ','); }
+    if (p) { b = atoi(++p); p = strchr(p, ','); }
+    if (p) { bri = atoi(++p); }
+    applyLed((uint8_t)constrain(r, 0, 255),
+             (uint8_t)constrain(g, 0, 255),
+             (uint8_t)constrain(b, 0, 255),
+             (uint8_t)constrain(bri, 0, 100));
     return;
   }
 
-  if (trimmed.equalsIgnoreCase("CMD:REBOOT")) {
+  if (len == 10 && strncasecmp(cmd, "CMD:REBOOT", 10) == 0) {
     delay(50);
     ESP.restart();
     return;
   }
 
   // Przekazanie komendy konfiguracyjnej do radaru
-  mmWaveSerial.println(trimmed);
+  mmWaveSerial.write((const uint8_t *)cmd, len);
+  mmWaveSerial.write('\n');
 }
 
-// --- Dowody zywotnosci (v1.5.0) ---
-// Bio: zapisujemy czas ramki do pierscienia; dowod zycia = >=2 ramki w oknie 10 s.
+// --- Dowody zywotnosci (v1.8.0) ---
 void noteBioFrame(unsigned long now) {
   bioFrameTimes[bioFrameIdx] = now;
   bioFrameIdx = (bioFrameIdx + 1) & 7;
@@ -167,47 +145,28 @@ void noteBioFrame(unsigned long now) {
   }
 }
 
-// Dystans: probka do okna przechylowego FUSION_GAP_MS; zwroci netto max-min
-// w oknie (drgania sie uśredniają, realne przemieszczenie zostaje).
-void noteDistanceSample(unsigned long now, float dist) {
-  distWinVal[distWinIdx] = dist;
-  distWinMs[distWinIdx] = now;
-  distWinIdx = (distWinIdx + 1) % DIST_WIN;
-  if (distWinCount < DIST_WIN) distWinCount++;
-}
-
-float distanceWindowRange(unsigned long now) {
-  float mn = 1000000.0f, mx = -1000000.0f;
-  bool any = false;
-  for (uint8_t i = 0; i < distWinCount; i++) {
-    if (now - distWinMs[i] > FUSION_GAP_MS) continue; // stara probka — poza oknem
-    if (distWinVal[i] < mn) mn = distWinVal[i];
-    if (distWinVal[i] > mx) mx = distWinVal[i];
-    any = true;
-  }
-  return any ? (mx - mn) : 0.0f;
-}
+unsigned long lastRadarPacketMs = 0;
 
 // --- Fuzja obecnosci: jedyny punkt emisji 'Person Information' ---
 // rawPresence = to, co mowi modul radaru; effPresence = to, co wysylamy do PC.
-// Przy zaczepieniu na fotelu raw zostaje ON, ale fuzja zwraca OFF; powrot
-// nastepuje sam, gdy tylko wiarygodna bio albo netto ruch dystansu ozyje.
+// Fuzja ochronna (v1.8.0):
+//   rawPresence=ON -> ZAWSZE obecny (zero sztucznego gaszenia po 1.5s bezruchu)
+//   rawPresence=OFF + bio zyje -> blokujemy fałszywy OFF (ochrona przy spokojnym oglądaniu/siedzeniu)
 void updatePresenceOutput(unsigned long now) {
-  bool bioAlive = (now - lastBioEvidenceMs) < FUSION_BIO_GAP_MS;
-  bool distAlive = distanceWindowRange(now) >= FUSION_DIST_NET_CM;
-  bool wantFusedOff = rawPresence && !bioAlive && !distAlive;
-  if (wantFusedOff != fusedOff) {
-    fusedOff = wantFusedOff;
-    if (fusedOff) {
-      Serial.printf("[DeskSense] Fuzja obecnosci -> OFF (bio bez dowodu %lus, netto dystansu %.1f cm)\r\n",
-                    (unsigned long)((now - lastBioEvidenceMs) / 1000UL),
-                    distanceWindowRange(now));
-    } else if (rawPresence) {
-      Serial.println("[DeskSense] Fuzja obecnosci -> ON (cel zyje: bio lub netto ruch dystansu)");
-    }
+  // Awaryjny watchdog: jesli przez ponad 8 sekund brak jakiegokolwiek pakietu UART z sensora
+  if (lastRadarPacketMs > 0 && (now - lastRadarPacketMs > 8000)) {
+    rawPresence = false;
   }
+  bool eff = rawPresence;
 
-  bool eff = rawPresence && !fusedOff;
+  bool bioAlive = (lastBioEvidenceMs > 0) && (now - lastBioEvidenceMs <= FUSION_BIO_GAP_MS);
+
+  // Ochrona obecności: jeśli radar sprzętowo gubi klatkę, ale biometria jeszcze żyje
+  if (!eff && bioAlive) {
+    eff = true;
+  }
+  fusedOff = false;
+
   if (!effInitialized || eff != effPresence || (now - lastPresenceEmit >= 2000)) {
     effPresence = eff;
     effInitialized = true;
@@ -219,6 +178,7 @@ void updatePresenceOutput(unsigned long now) {
 // --- Dekoder ramek binarnych MR60BHA2 ---
 void processRadarPayload(uint16_t type, const uint8_t *payload, size_t len) {
   unsigned long now = millis();
+  lastRadarPacketMs = now;
 
   switch (type) {
     case 0x0F09: { // Obecność człowieka (People Exist)
@@ -236,14 +196,16 @@ void processRadarPayload(uint16_t type, const uint8_t *payload, size_t len) {
         if (flag != 0) {
           float dist = 0.0f;
           memcpy(&dist, &payload[4], sizeof(float));
-          if (dist > 0.0f && dist < 1000.0f) {
-            // Probka do okna zywotnosci (netto liczone w updatePresenceOutput)
-            noteDistanceSample(now, dist);
-            if (fabs(dist - lastDistance) >= 0.5f || (now - lastDistanceEmit >= 1000)) {
+          if (dist > 0.0f && dist <= 200.0f) {
+            if (fabs(dist - lastDistance) >= 0.5f || (now - lastDistanceEmit >= 100)) {
               lastDistance = dist;
               lastDistanceEmit = now;
               Serial.printf("'Distance to detection object' >> %.2f cm\r\n", dist);
             }
+          } else if (lastDistance > 0.0f) {
+            lastDistance = 0.0f;
+            lastDistanceEmit = now;
+            Serial.println("'Distance to detection object' >> 0.00 cm");
           }
         }
       }
@@ -255,8 +217,8 @@ void processRadarPayload(uint16_t type, const uint8_t *payload, size_t len) {
       if (len >= 4) {
         float bpm = 0.0f;
         memcpy(&bpm, payload, sizeof(float));
-        if (bpm >= 30.0f && bpm <= 240.0f) {
-          noteBioFrame(now); // poprawna ramka bio — wiarygodnosc liczy okno
+        if (bpm >= BIO_HR_MIN && bpm <= BIO_HR_MAX) {
+          noteBioFrame(now);
           if (fabs(bpm - lastHeartRate) >= 1.0f || (now - lastHeartEmit >= 1000)) {
             lastHeartRate = bpm;
             lastHeartEmit = now;
@@ -272,8 +234,8 @@ void processRadarPayload(uint16_t type, const uint8_t *payload, size_t len) {
       if (len >= 4) {
         float rpm = 0.0f;
         memcpy(&rpm, payload, sizeof(float));
-        if (rpm >= 2.0f && rpm <= 70.0f) {
-          noteBioFrame(now); // poprawna ramka bio — wiarygodnosc liczy okno
+        if (rpm >= BIO_RPM_MIN && rpm <= BIO_RPM_MAX) {
+          noteBioFrame(now);
           if (fabs(rpm - lastBreathRate) >= 1.0f || (now - lastBreathEmit >= 1000)) {
             lastBreathRate = rpm;
             lastBreathEmit = now;
@@ -411,9 +373,10 @@ void loop() {
     if (rxHead < RX_RING_SIZE) {
       rxRing[rxHead++] = (uint8_t)mmWaveSerial.read();
     } else {
-      // Zabezpieczenie przed overflow bufora
-      rxHead = 0;
-      break;
+      // Overflow: zachowaj nowsza polowe bufora (tam moze byc poczatek ramki)
+      size_t keep = RX_RING_SIZE / 2;
+      memmove(rxRing, &rxRing[RX_RING_SIZE - keep], keep);
+      rxHead = keep;
     }
   }
 
@@ -424,14 +387,15 @@ void loop() {
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {
-      if (pcCmd.length() > 0) {
-        handlePcCommand(pcCmd);
-        pcCmd = "";
+      if (pcCmdLen > 0) {
+        // Trim trailing spaces
+        while (pcCmdLen > 0 && pcCmdBuf[pcCmdLen - 1] == ' ') pcCmdLen--;
+        pcCmdBuf[pcCmdLen] = '\0';
+        handlePcCommand(pcCmdBuf, pcCmdLen);
+        pcCmdLen = 0;
       }
-    } else {
-      if (pcCmd.length() < 128) {
-        pcCmd += c;
-      }
+    } else if (pcCmdLen < PC_CMD_MAX - 1) {
+      pcCmdBuf[pcCmdLen++] = c;
     }
   }
 
@@ -442,11 +406,22 @@ void loop() {
     readAndSendBH1750();
   }
 
-  // 5. Heartbeat telemetrii ukladu co 5 s (apka parsuje FW/UPTIME/TEMP)
+  // 5. Heartbeat telemetrii ukladu co 5 s (apka parsuje FW/UPTIME/TEMP/LUX)
   if (now - lastDevInfoEmit >= 5000) {
     lastDevInfoEmit = now;
-    Serial.printf("[DeskSense] DeskSense Device FW=%s UPTIME=%lus TEMP=%.1fC\r\n",
-                  FIRMWARE_VERSION, (unsigned long)(now / 1000UL), temperatureRead());
+    if (bh1750Available && lastLux >= 0.0f) {
+      Serial.printf("[DeskSense] DeskSense Device FW=%s UPTIME=%lus TEMP=%.1fC LUX=%.1f\r\n",
+                    FIRMWARE_VERSION, (unsigned long)(now / 1000UL), temperatureRead(), lastLux);
+    } else {
+      Serial.printf("[DeskSense] DeskSense Device FW=%s UPTIME=%lus TEMP=%.1fC\r\n",
+                    FIRMWARE_VERSION, (unsigned long)(now / 1000UL), temperatureRead());
+    }
+  }
+
+  // 6. Regularna ewaluacja fuzji obecności co 50 ms (nawet gdy radar milczy po odejściu człowieka)
+  if (now - lastPresenceEval >= 50) {
+    lastPresenceEval = now;
+    updatePresenceOutput(now);
   }
 
   delay(1);

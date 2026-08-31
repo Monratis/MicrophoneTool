@@ -122,13 +122,13 @@ function stop(): DiagRecordResult {
   return result;
 }
 
-/**
- * Przełącznik nagrywania: pierwsze wywołanie startuje (domyślnie 5 min,
- * auto-stop), kolejne zatrzymuje i zwraca wynik.
- */
-export function toggleRecording(durationSecArg = 300): DiagRecordResult {
+export function stopRecording(): DiagRecordResult {
+  return stop();
+}
+
+export function startRecording(durationSecArg = 300): DiagRecordResult {
   if (active) {
-    return stop();
+    stop();
   }
   samples = [];
   durationSec = Math.max(30, Math.min(1800, Math.round(durationSecArg)));
@@ -139,4 +139,15 @@ export function toggleRecording(durationSecArg = 300): DiagRecordResult {
     active = false;
   }, durationSec * 1000);
   return { active: true, durationSec, sampleCount: 0, summary: '', csv: '' };
+}
+
+/**
+ * Przełącznik nagrywania: pierwsze wywołanie startuje (domyślnie 5 min,
+ * auto-stop), kolejne zatrzymuje i zwraca wynik.
+ */
+export function toggleRecording(durationSecArg = 300): DiagRecordResult {
+  if (active) {
+    return stop();
+  }
+  return startRecording(durationSecArg);
 }

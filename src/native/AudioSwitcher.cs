@@ -184,7 +184,7 @@ namespace AudioSwitcher
         [PreserveSig] int SetLevelAllChannels(float[] aLevelsDB, uint cChannels, ref Guid pguidEventContext);
     }
 
-    [ComImport, Guid("DF45A04A-2548-498D-9B15-4B35C0BFBB39"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [ComImport, Guid("DF45AEEA-B74A-4B6B-AFAD-2366B6AA012E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IAudioMute
     {
         [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid pguidEventContext);
@@ -215,7 +215,7 @@ namespace AudioSwitcher
         private static readonly Guid IID_IAudioEndpointVolume = new Guid("5BC644DE-035A-46E0-B884-219C03C28731");
         private static readonly Guid IID_IDeviceTopology = new Guid("2A07407E-6497-4A18-9787-32F79BD0D98F");
         private static readonly Guid IID_IAudioVolumeLevel = new Guid("7FB7B48F-531D-44A2-BCB3-5AD5A134B3DC");
-        private static readonly Guid IID_IAudioMute = new Guid("DF45A04A-2548-498D-9B15-4B35C0BFBB39");
+        private static readonly Guid IID_IAudioMute = new Guid("DF45AEEA-B74A-4B6B-AFAD-2366B6AA012E");
         // Klasyczne GUID-y węzłów KS (ksmedia.h) — dokładnie te zwraca
         // IPart::GetSubType w Device Topology.
         private static readonly Guid KSNODETYPE_VOLUME = new Guid("3A5ACC00-C557-11D0-8A2B-00A0C9255AC1");
@@ -1056,13 +1056,25 @@ namespace AudioSwitcher
             try
             {
                 Guid ctx = Guid.Empty;
-                return ks.Mute.SetMute(mute, ref ctx) == 0;
+                bool ok = ks.Mute.SetMute(mute, ref ctx) == 0;
+                if (ok && !mute && ks.Volume != null)
+                {
+                    float curDb;
+                    if (ks.Volume.GetLevel(0, out curDb) == 0 && curDb <= ks.MinDb + 0.5f)
+                    {
+                        int dummy;
+                        KsSetVolume(ks, 1.0f, out dummy);
+                    }
+                }
+                return ok;
             }
             catch
             {
                 return false;
             }
         }
+
+        private static readonly Dictionary<string, float> PreMuteVolumeCache = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
 
         private static int SetMute(string target, bool mute)
         {
@@ -1084,12 +1096,33 @@ namespace AudioSwitcher
                 IAudioEndpointVolume epv = ActivateEndpointVolume(dev.Id, out hrAct);
                 if (epv != null)
                 {
+                    if (mute)
+                    {
+                        float curScalar;
+                        if (epv.GetMasterVolumeLevelScalar(out curScalar) == 0 && curScalar > 0.001f)
+                        {
+                            PreMuteVolumeCache[dev.Id] = curScalar;
+                        }
+                    }
+
                     Guid ctx = Guid.Empty;
                     int hrMute = epv.SetMute(mute, ref ctx);
                     if (hrMute != 0)
                     {
                         Console.Error.WriteLine("{\"ok\":false,\"error\":\"SetMute failed hr=0x" + hrMute.ToString("X8") + "\"}");
                         return 1;
+                    }
+                    if (!mute)
+                    {
+                        float curScalar;
+                        if (epv.GetMasterVolumeLevelScalar(out curScalar) == 0 && curScalar <= 0.001f)
+                        {
+                            float restoreScalar;
+                            if (PreMuteVolumeCache.TryGetValue(dev.Id, out restoreScalar) && restoreScalar > 0.001f)
+                            {
+                                epv.SetMasterVolumeLevelScalar(restoreScalar, ref ctx);
+                            }
+                        }
                     }
                     Console.WriteLine("{\"ok\":true,\"isMuted\":" + (mute ? "true" : "false") + ",\"id\":" + EscapeJson(dev.Id) + "}");
                     return 0;
