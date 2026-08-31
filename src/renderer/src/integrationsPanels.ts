@@ -457,81 +457,7 @@ export function renderChimePanel(app: AppUI): string {
     `;
   }
 
-// ---------- HAOS: specyfikacja pól z encjami + wyszukiwarka (picker) ----------
-
-export interface HaFieldSpec {
-  /** Klucz pola w AppConfig */
-  key: string;
-  /** Etykieta pola w panelu */
-  label: string;
-  /** Tytuł okna pickera */
-  title: string;
-  /** Domeny encji dozwolone dla tego pola (filtry w pickercie) */
-  domains: string[];
-  /** Placeholder pustego pola */
-  placeholder: string;
-}
-
-export const HA_ENTITY_FIELDS = {
-  presence: {
-    key: 'haPresenceEntity',
-    label: 'Encja Obecności',
-    title: 'Wybierz encję obecności (binary_sensor)',
-    domains: ['binary_sensor'],
-    placeholder: 'Kliknij i wybierz binary_sensor obecności…'
-  },
-  distance: {
-    key: 'haDistanceEntity',
-    label: 'Encja Dystansu fotela (opcjonalna)',
-    title: 'Wybierz encję dystansu (sensor)',
-    domains: ['sensor'],
-    placeholder: 'Kliknij i wybierz sensor dystansu…'
-  },
-  heart: {
-    key: 'haHeartRateEntity',
-    label: 'Encja Tętna BPM (opcjonalna)',
-    title: 'Wybierz encję tętna (sensor)',
-    domains: ['sensor'],
-    placeholder: 'Kliknij i wybierz sensor tętna…'
-  },
-  breath: {
-    key: 'haBreathRateEntity',
-    label: 'Encja Oddechu RPM (opcjonalna)',
-    title: 'Wybierz encję oddechu (sensor)',
-    domains: ['sensor'],
-    placeholder: 'Kliknij i wybierz sensor oddechu…'
-  },
-  autoAway: {
-    key: 'haAutomationOnAway',
-    label: 'Wołaj przy odejściu (AWAY)',
-    title: 'Wybierz automatyzację/skrypt/przycisk wywoływany przy odejściu',
-    domains: ['automation', 'script', 'button', 'scene', 'input_boolean', 'switch'],
-    placeholder: 'Kliknij i wybierz automatyzację AWAY…'
-  },
-  autoDesk: {
-    key: 'haAutomationOnDesk',
-    label: 'Wołaj przy powrocie (DESK)',
-    title: 'Wybierz automatyzację/skrypt/przycisk wywoływany przy powrocie',
-    domains: ['automation', 'script', 'button', 'scene', 'input_boolean', 'switch'],
-    placeholder: 'Kliknij i wybierz automatyzację DESK…'
-  },
-  btnSnooze: {
-    key: 'haButtonSnoozeEntity',
-    label: 'Przycisk HAOS -> Pauza automatyki (snooze 15 min / wznow)',
-    title: 'Wybierz przycisk HAOS przełączający pauzę automatyki',
-    domains: ['button', 'input_boolean', 'switch'],
-    placeholder: 'Kliknij i wybierz przycisk snooze…'
-  },
-  btnMute: {
-    key: 'haButtonMuteEntity',
-    label: 'Przycisk HAOS -> Wyciszenie mikrofonu (toggle)',
-    title: 'Wybierz przycisk HAOS przełączający wyciszenie mikrofonu',
-    domains: ['button', 'input_boolean', 'switch'],
-    placeholder: 'Kliknij i wybierz przycisk mute…'
-  }
-} satisfies Record<string, HaFieldSpec>;
-
-export type HaFieldId = keyof typeof HA_ENTITY_FIELDS;
+// ---------- HAOS: Badge domeny encji + wyszukiwarka (picker) ----------
 
 /** Klasa badge wg domeny encji — szybki wizualny rozróżniacz w liście. */
 export function haDomainBadge(domain: string): string {
@@ -543,48 +469,6 @@ export function haDomainBadge(domain: string): string {
   if (domain === 'media_player') return 'purple';
   if (domain === 'climate') return 'rose';
   return 'amber';
-}
-
-/**
- * Pojedyncze pole encji HAOS: klikalny wiersz otwierający wyszukiwarkę
- * (zamiast wklejania entity_id) + krzyżyk czyszczący. testButton = opcjonalny
- * HTML dodatkowego przycisku obok (np. "▶" test usługi).
- */
-export function renderHaEntityField(app: AppUI, fieldId: HaFieldId, testButton = ''): string {
-  const spec = HA_ENTITY_FIELDS[fieldId];
-  const raw = String((app.form as unknown as Record<string, unknown>)?.[spec.key] || '');
-  const found = raw ? app.haCatalog.find((e) => e.entity_id === raw) : null;
-  const inner = raw
-    ? `<span style="display:flex; align-items:center; gap:6px; min-width:0">
-         <span class="fc-badge ${haDomainBadge(found?.domain || raw.split('.')[0])}">${esc(found?.domain || raw.split('.')[0])}</span>
-         <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(found?.name || raw)}</span>
-       </span>
-       <span style="color:var(--fc-text-muted)">▾</span>`
-    : `<span style="color:var(--fc-text-muted)">${esc(spec.placeholder)}</span><span style="color:var(--fc-text-muted)">▾</span>`;
-  return `
-    <div>
-      <label class="fc-micro-label">${esc(spec.label)}:</label>
-      <div style="display:flex; gap:6px">
-        <button class="fc-input" id="row-ha-${fieldId}" data-ha-field="${fieldId}" title="${esc(spec.title)}"
-          style="flex:1; display:flex; align-items:center; justify-content:space-between; gap:8px; text-align:left; cursor:pointer; height:28px; font-size:11px; padding:0 8px; background:var(--fc-card-bg)">
-          ${inner}
-        </button>
-        ${raw ? `<button class="btn btn-ghost btn-sm" id="clr-ha-${fieldId}" title="Wyczyść encję" style="font-size:10.5px; padding:4px 8px">✕</button>` : ''}
-        ${testButton}
-      </div>
-    </div>
-  `;
-}
-
-export function openHaPicker(app: AppUI, fieldId: HaFieldId): void {
-  const spec = HA_ENTITY_FIELDS[fieldId];
-  app.haPicker = { key: spec.key, title: spec.title, domains: [...spec.domains] };
-  app.haPickerSearch = '';
-  app.haPickerDomain = '';
-  app.haPickerArea = '';
-  app.haPickerDevice = '';
-  app.render();
-  void ensureHaCatalog(app);
 }
 
 export function openHaPickerForRule(app: AppUI, ruleIndex: number): void {
@@ -875,7 +759,7 @@ export function renderHaPickerList(app: AppUI): string {
   return shown.map((e) => haEntityRow(app, e)).join('') + more;
 }
 
-/** Modal-wyszukiwarka encji HAOS (otwierany z pól renderHaEntityField). */
+/** Modal-wyszukiwarka encji HAOS (otwierany z pickerów komend głosowych). */
 export function renderHaPickerModal(app: AppUI): string {
   const spec = app.haPicker!;
   return `
@@ -900,72 +784,78 @@ export function renderHaPickerModal(app: AppUI): string {
 }
 
 export function renderHaosPanel(app: AppUI): string {
-    const form = app.form!;
-    const snap = app.snap!;
-    return `
-      <div class="fc-settings-panel">
-        <div class="fc-settings-group ${form.haEnabled ? 'highlight' : ''}">
-          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--fc-card-border); padding-bottom: 8px">
-            <div class="fc-settings-group-title" style="border: none; padding: 0">🏠 Home Assistant OS (HAOS)</div>
-            <div style="display: flex; gap: 8px; align-items: center">
-              <span class="fc-badge ${snap.ha?.connected ? 'calibrated' : (form.haEnabled ? 'amber' : 'muted')}" id="badge-ha-status">
-                ${snap.ha?.connected ? `● Połączono (HAOS${snap.ha.version ? ` v${snap.ha.version}` : ''}) ✓` : (form.haEnabled ? (snap.ha?.error || 'Łączenie z HAOS…') : 'Wyłączony')}
-              </span>
-              <button class="fc-switch ${form.haEnabled ? 'active' : ''}" id="sw-ha-enabled" aria-checked="${form.haEnabled ?? false}" role="switch" title="Włącz pobieranie danych obecności z Home Assistant"></button>
-            </div>
-          </div>
+  const form = app.form!;
+  const snap = app.snap!;
 
-          <div style="font-size: 11px; color: var(--fc-text-secondary)">
-            Pobieraj stan obecności, dystans, tętno i oddech z sensora mmWave / ESPHome podłączonego bezpośrednio do Home Assistanta (przez Wi-Fi/LAN).
-          </div>
+  const areasCount = new Set(app.haCatalog.map((e) => e.areaName).filter(Boolean)).size;
+  const devicesCount = new Set(app.haCatalog.map((e) => e.deviceName).filter(Boolean)).size;
+  const actionEntitiesCount = app.haCatalog.filter((e) => e.domain !== 'sensor' && e.domain !== 'binary_sensor').length;
 
-          <div class="fc-subgrid-2" style="gap: 10px">
-            <div>
-              <label class="fc-micro-label">Adres URL Home Assistant:</label>
-              <input type="text" class="fc-input" id="inp-ha-url" placeholder="http://homeassistant.local:8123" value="${esc(form.haUrl || 'http://homeassistant.local:8123')}" style="height: 30px; font-size: 11.5px" />
-            </div>
-            <div>
-              <div style="display: flex; justify-content: space-between; align-items: center">
-                <label class="fc-micro-label">Długoterminowy Token Dostępu (Bearer):</label>
-                <button class="text-btn" id="btn-toggle-ha-token" style="font-size: 10px; color: var(--fc-accent-blue)">${app.haShowToken ? 'Ukryj 👁️' : 'Pokaż 👁️'}</button>
-              </div>
-              <input type="${app.haShowToken ? 'text' : 'password'}" class="fc-input" id="inp-ha-token" placeholder="Wklej Long-Lived Access Token z profilu HA…" value="${esc(form.haToken || '')}" style="height: 30px; font-size: 11.5px" />
-            </div>
-          </div>
-
-          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
-            <button class="btn btn-ghost btn-sm" id="btn-ha-test" style="font-size: 11px; padding: 4px 10px" ${app.haTesting ? 'disabled' : ''}>
-              ${app.haTesting ? '⏳ Testuję połączenie…' : '🧪 Testuj połączenie'}
-            </button>
-            <button class="btn btn-primary btn-sm" id="btn-ha-fetch-entities" style="font-size: 11px; padding: 4px 10px" ${app.haFetchingEntities ? 'disabled' : ''}>
-              ${app.haFetchingEntities ? '⏳ Pobieram encje…' : '🔍 Wykryj & Pobierz encje z HAOS'}
-            </button>
-            <div id="ha-test-feedback" style="font-size: 11px; margin-left: 6px; color: ${app.haTestResult ? (app.haTestResult.ok ? 'var(--fc-accent-green)' : '#ef4444') : 'var(--fc-text-muted)'}">
-              ${app.haTestResult ? esc(app.haTestResult.message || app.haTestResult.error || '') : ''}
-            </div>
-          </div>
-
-          <div class="fc-subgrid-2" style="gap: 10px; padding-top: 8px; border-top: 1px solid var(--fc-card-border)">
-            ${renderHaEntityField(app, 'presence')}
-            ${renderHaEntityField(app, 'distance')}
-            ${renderHaEntityField(app, 'heart')}
-            ${renderHaEntityField(app, 'breath')}
-          </div>
-
-          <div style="padding-top: 10px; border-top: 1px solid var(--fc-card-border)">
-            <div class="fc-micro-label" style="margin-bottom: 6px">Automatyzacje & Przyciski (sterowanie w obie strony):</div>
-            <div style="font-size: 11px; color: var(--fc-text-secondary); margin-bottom: 8px">
-              DeskSense woła automatyzację/skrypt/przycisk przy zmianie obecności (usługę dobiera wg domeny), a wciśnięcie przycisku w HAOS steruje apką.
-              Kliknij pole, aby wyszukać encję.
-            </div>
-            <div class="fc-subgrid-2" style="gap: 10px">
-              ${renderHaEntityField(app, 'autoAway', `<button class="btn btn-ghost btn-sm" id="btn-ha-test-away" title="Wywołaj teraz usługę na tej encji" style="font-size:10.5px; padding:4px 8px">▶</button>`)}
-              ${renderHaEntityField(app, 'autoDesk', `<button class="btn btn-ghost btn-sm" id="btn-ha-test-desk" title="Wywołaj teraz usługę na tej encji" style="font-size:10.5px; padding:4px 8px">▶</button>`)}
-              ${renderHaEntityField(app, 'btnSnooze')}
-              ${renderHaEntityField(app, 'btnMute')}
-            </div>
-          </div>
+  const catalogStatusInfo = app.haCatalog.length > 0
+    ? `
+      <div style="margin-top: 14px; padding: 10px 14px; border-radius: var(--fc-radius-sm); background: rgba(34, 197, 94, 0.05); border: 1px solid rgba(34, 197, 94, 0.2); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px">
+        <div style="font-size: 11.5px; color: var(--fc-text)">
+          <span style="color: var(--fc-accent-green); font-weight: 600">✓ Katalog urządzeń zsynchronizowany:</span>
+          ${areasCount > 0 ? `<strong>${areasCount}</strong> ${areasCount === 1 ? 'pokój' : 'pokojów'} · ` : ''}
+          <strong>${devicesCount > 0 ? devicesCount : app.haCatalog.length}</strong> ${devicesCount === 1 ? 'urządzenie' : 'urządzeń'}
+          (${actionEntitiesCount} encji wykonawczych)
+        </div>
+        <div style="font-size: 10.5px; color: var(--fc-text-muted)">
+          Dostępne w pickerze komend głosowych
         </div>
       </div>
+    `
+    : `
+      <div style="margin-top: 14px; padding: 10px 14px; border-radius: var(--fc-radius-sm); background: rgba(255, 255, 255, 0.02); border: 1px solid var(--fc-card-border); font-size: 11px; color: var(--fc-text-muted); line-height: 1.5">
+        ℹ️ Po wpisaniu adresu i tokena kliknij <strong>„Pobierz katalog urządzeń z HAOS”</strong>, aby pobrać listę świateł, przełączników i urządzeń. Będą one natychmiast dostępne do wyboru w zakładce <strong>Komendy głosowe</strong>.
+      </div>
     `;
-  }
+
+  return `
+    <div class="fc-settings-panel">
+      <div class="fc-settings-group ${form.haEnabled ? 'highlight' : ''}">
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--fc-card-border); padding-bottom: 8px">
+          <div class="fc-settings-group-title" style="border: none; padding: 0">🏠 Home Assistant OS (HAOS)</div>
+          <div style="display: flex; gap: 8px; align-items: center">
+            <span class="fc-badge ${snap.ha?.connected ? 'calibrated' : (form.haEnabled ? 'amber' : 'muted')}" id="badge-ha-status">
+              ${snap.ha?.connected ? `● Połączono (HAOS${snap.ha.version ? ` v${snap.ha.version}` : ''}) ✓` : (form.haEnabled ? (snap.ha?.error || 'Łączenie z HAOS…') : 'Wyłączony')}
+            </span>
+            <button class="fc-switch ${form.haEnabled ? 'active' : ''}" id="sw-ha-enabled" aria-checked="${form.haEnabled ?? false}" role="switch" title="Włącz integrację z Home Assistant"></button>
+          </div>
+        </div>
+
+        <div style="font-size: 11px; color: var(--fc-text-secondary); line-height: 1.5">
+          Połącz DeskSense z lokalną instancją Home Assistant, aby sterować światłem, scenami, klimatyzacją i urządzeniami domowymi za pomocą komend głosowych oraz automatyzacji.
+        </div>
+
+        <div class="fc-subgrid-2" style="gap: 10px; margin-top: 4px">
+          <div>
+            <label class="fc-micro-label">Adres URL Home Assistant:</label>
+            <input type="text" class="fc-input" id="inp-ha-url" placeholder="http://homeassistant.local:8123" value="${esc(form.haUrl || 'http://homeassistant.local:8123')}" style="height: 30px; font-size: 11.5px" />
+          </div>
+          <div>
+            <div style="display: flex; justify-content: space-between; align-items: center">
+              <label class="fc-micro-label">Długoterminowy Token Dostępu (Bearer):</label>
+              <button class="text-btn" id="btn-toggle-ha-token" style="font-size: 10px; color: var(--fc-accent-blue)">${app.haShowToken ? 'Ukryj 👁️' : 'Pokaż 👁️'}</button>
+            </div>
+            <input type="${app.haShowToken ? 'text' : 'password'}" class="fc-input" id="inp-ha-token" placeholder="Wklej Long-Lived Access Token z profilu HA…" value="${esc(form.haToken || '')}" style="height: 30px; font-size: 11.5px" />
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px">
+          <button class="btn btn-ghost btn-sm" id="btn-ha-test" style="font-size: 11px; padding: 5px 12px" ${app.haTesting ? 'disabled' : ''}>
+            ${app.haTesting ? '⏳ Testuję połączenie…' : '🧪 Testuj połączenie'}
+          </button>
+          <button class="btn btn-primary btn-sm" id="btn-ha-fetch-entities" style="font-size: 11px; padding: 5px 12px" ${app.haFetchingEntities ? 'disabled' : ''}>
+            ${app.haFetchingEntities ? '⏳ Pobieram katalog…' : '🔄 Pobierz katalog urządzeń z HAOS'}
+          </button>
+          <div id="ha-test-feedback" style="font-size: 11px; margin-left: 6px; color: ${app.haTestResult ? (app.haTestResult.ok ? 'var(--fc-accent-green)' : '#ef4444') : 'var(--fc-text-muted)'}">
+            ${app.haTestResult ? esc(app.haTestResult.message || app.haTestResult.error || '') : ''}
+          </div>
+        </div>
+
+        ${catalogStatusInfo}
+      </div>
+    </div>
+  `;
+}

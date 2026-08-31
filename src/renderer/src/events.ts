@@ -5,8 +5,7 @@ import { playChime, playCustomAudioFile, type ChimeStyle, type SettingsTab, type
 import type { Snapshot } from './global';
 import { isMicActive, triggerOsdHud, updateHeaderAndLiveDOM } from './homeView';
 import { refreshDiscordRpcStatus, refreshSignalrgbEffectList, refreshSignalrgbStatus,
-  HA_ENTITY_FIELDS, openHaPicker, openHaPickerForRule, closeHaPicker, applyHaCatalog, renderHaPickerChips, renderHaPickerList,
-  type HaFieldId } from './integrationsPanels';
+  openHaPickerForRule, closeHaPicker, applyHaCatalog, renderHaPickerChips, renderHaPickerList } from './integrationsPanels';
 import { applyLogFilter, refreshLogConsoleDOM } from './logsAbout';
 import { applyVadResults, closeVadModal, openVadModal, runVadStep1, runVadStep2, toggleDiagSession } from './modals';
 import { renderBackendHint, renderVoiceDownloadSection, isSelectedVoiceModelReady, parseVoiceHaPayload, stringifyVoiceHaPayload } from './voicePanel';
@@ -799,15 +798,6 @@ export function bindEvents(app: AppUI) {
       }
     });
 
-    // Pola encji HAOS: klik w wiersz otwiera wyszukiwarkę, krzyżyk czyści pole
-    for (const fieldId of Object.keys(HA_ENTITY_FIELDS)) {
-      byId(`row-ha-${fieldId}`)?.addEventListener('click', () => openHaPicker(app, fieldId as HaFieldId));
-      byId(`clr-ha-${fieldId}`)?.addEventListener('click', () => {
-        const key = HA_ENTITY_FIELDS[fieldId as HaFieldId].key;
-        app.patchForm({ [key]: '' } as Partial<Snapshot['config']>, true);
-      });
-    }
-
     // Modal-wyszukiwarka encji: filtr listy bez pełnego re-renderu (input nie traci fokusu)
     byId('inp-ha-picker-search')?.addEventListener('input', (e) => {
       app.haPickerSearch = (e.target as HTMLInputElement).value;
@@ -949,21 +939,6 @@ export function bindEvents(app: AppUI) {
       if ((e.target as HTMLElement).id === 'ha-picker-overlay') closeHaPicker(app);
     });
     if (app.haPicker) (byId('inp-ha-picker-search') as HTMLInputElement | null)?.focus();
-
-    // Test wywołania usługi HAOS na wybranej encji (bez czekania na zmianę obecności)
-    const bindHaServiceTest = (btnId: string, key: 'haAutomationOnAway' | 'haAutomationOnDesk'): void => {
-      byId(btnId)?.addEventListener('click', async () => {
-        const entityId = app.form?.[key] || '';
-        if (!entityId.trim()) {
-          app.pushToast('Najpierw wybierz encję automatyzacji/przycisku', true);
-          return;
-        }
-        const res = await window.api.haCallService(entityId);
-        app.pushToast(res.ok ? `HAOS ✓ ${res.message}` : `HAOS: ${res.error}`, !res.ok);
-      });
-    };
-    bindHaServiceTest('btn-ha-test-away', 'haAutomationOnAway');
-    bindHaServiceTest('btn-ha-test-desk', 'haAutomationOnDesk');
 
     // Radar port & timeouts
     byId('sel-port')?.addEventListener('change', (e) => {
