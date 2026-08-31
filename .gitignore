@@ -6,3 +6,4 @@ config.json.user
 # release binaries go to GitHub Releases, not git (>100MB)
 releases/*.exe
 releases/*.blockmap
+.opencode/

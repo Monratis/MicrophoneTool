@@ -128,8 +128,14 @@ export default class SignalRGBIntegration {
    * 3. Dokumentach użytkownika / WhirlwindFX / Effects
    * Nazwa pliku / tytuł odpowiada nazwie w deep-linku signalrgb://effect/apply/<Nazwa>.
    */
+  private cachedEffects: { list: string[]; timestamp: number } | null = null;
+
   listLocalEffects(): string[] {
-    appendLog('SIGNALRGB', 'Skanowanie dysku w poszukiwaniu zainstalowanych efektów SignalRGB…');
+    const now = Date.now();
+    if (this.cachedEffects && (now - this.cachedEffects.timestamp) < 60000) {
+      return this.cachedEffects.list;
+    }
+
     const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
     const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
     const userProfile = process.env.USERPROFILE || os.homedir();
@@ -221,7 +227,10 @@ export default class SignalRGBIntegration {
     }
 
     const sorted = Array.from(names).sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' }));
-    appendLog('SIGNALRGB', `Znaleziono ${sorted.length} zainstalowanych efektów SignalRGB`);
+    if (!this.cachedEffects || this.cachedEffects.list.length !== sorted.length) {
+      appendLog('SIGNALRGB', `Zaindeksowano ${sorted.length} zainstalowanych efektów SignalRGB`);
+    }
+    this.cachedEffects = { list: sorted, timestamp: now };
     return sorted;
   }
 

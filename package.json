@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",
-    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"if (Test-Path 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe') { & 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe' /nologo /optimize /out:bin\\AudioSwitcher.exe src\\native\\AudioSwitcher.cs } else { csc /nologo /optimize /out:bin\\AudioSwitcher.exe src\\native\\AudioSwitcher.cs }\"",
+    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$csc = if (Test-Path 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe') { 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe' } else { 'csc' }; & $csc /nologo /optimize /out:bin\\AudioSwitcher.exe src\\native\\AudioSwitcher.cs; & $csc /nologo /optimize /platform:x64 /out:bin\\VoiceListener.exe src\\native\\VoiceListener.cs\"",
     "build": "npm run build:native && electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit",

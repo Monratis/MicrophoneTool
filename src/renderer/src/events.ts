@@ -5,10 +5,11 @@ import { playChime, playCustomAudioFile, type ChimeStyle, type SettingsTab, type
 import type { Snapshot } from './global';
 import { isMicActive, triggerOsdHud, updateHeaderAndLiveDOM } from './homeView';
 import { refreshDiscordRpcStatus, refreshSignalrgbEffectList, refreshSignalrgbStatus,
-  HA_ENTITY_FIELDS, openHaPicker, closeHaPicker, applyHaCatalog, renderHaPickerChips, renderHaPickerList,
+  HA_ENTITY_FIELDS, openHaPicker, openHaPickerForRule, closeHaPicker, applyHaCatalog, renderHaPickerChips, renderHaPickerList,
   type HaFieldId } from './integrationsPanels';
 import { applyLogFilter, refreshLogConsoleDOM } from './logsAbout';
 import { applyVadResults, closeVadModal, openVadModal, runVadStep1, runVadStep2, toggleDiagSession } from './modals';
+import { renderBackendHint, renderVoiceDownloadSection, isSelectedVoiceModelReady, parseVoiceHaPayload, stringifyVoiceHaPayload } from './voicePanel';
 
   // ---------- EVENT BINDINGS ----------
 export function bindEvents(app: AppUI) {
@@ -827,7 +828,10 @@ export function bindEvents(app: AppUI) {
         if (device) device.click();
       } else if (e.key === 'Escape') {
         e.stopPropagation();
-        if (app.haPickerMode === 'devices' && app.haPickerDevice) {
+        if (app.haPickerMode === 'areas' && app.haPickerArea) {
+          app.haPickerArea = '';
+          list.innerHTML = renderHaPickerList(app);
+        } else if (app.haPickerMode === 'devices' && app.haPickerDevice) {
           app.haPickerDevice = '';
           list.innerHTML = renderHaPickerList(app);
         } else {
@@ -840,7 +844,9 @@ export function bindEvents(app: AppUI) {
       const chip = target.closest('[data-ha-picker-domain]') as HTMLElement | null;
       const viewChip = target.closest('[data-ha-picker-view]') as HTMLElement | null;
       if (viewChip) {
-        app.haPickerMode = viewChip.getAttribute('data-ha-picker-view') === 'entities' ? 'entities' : 'devices';
+        const viewMode = viewChip.getAttribute('data-ha-picker-view');
+        app.haPickerMode = (viewMode === 'entities' || viewMode === 'devices' || viewMode === 'areas') ? viewMode : 'areas';
+        app.haPickerArea = '';
         app.haPickerDevice = '';
         const chips = byId('ha-picker-chips');
         if (chips) chips.innerHTML = renderHaPickerChips(app);
@@ -862,11 +868,64 @@ export function bindEvents(app: AppUI) {
       const item = target.closest('[data-ha-entity]') as HTMLElement | null;
       if (item && app.haPicker) {
         const entityId = item.getAttribute('data-ha-entity') || '';
-        app.patchForm({ [app.haPicker.key]: entityId } as Partial<Snapshot['config']>);
-        app.pushToast(`Wybrano encję: ${entityId}`);
-        closeHaPicker(app);
+        if (app.haPicker.ruleIndex !== undefined) {
+          const idx = app.haPicker.ruleIndex;
+          const rules = [...(app.form?.voiceRules || [])];
+          if (rules[idx]) {
+            const domain = entityId.split('.')[0];
+            const defaultService = domain === 'light' ? 'turn_on'
+              : (domain === 'scene' || domain === 'script') ? 'turn_on'
+              : (domain === 'automation') ? 'trigger'
+              : (domain === 'button' || domain === 'input_button') ? 'press'
+              : (domain === 'media_player') ? 'media_play_pause'
+              : (domain === 'climate') ? 'set_temperature'
+              : (domain === 'cover') ? 'toggle'
+              : 'toggle';
+
+            const currentCfg = parseVoiceHaPayload(rules[idx].actionPayload);
+            const newCfg = {
+              entity_id: entityId,
+              service: defaultService,
+              color: domain === 'light' ? (currentCfg.color || '#ffffff') : undefined,
+              brightness: domain === 'light' ? (currentCfg.brightness !== undefined ? currentCfg.brightness : 100) : undefined,
+              temperature: domain === 'climate' ? (currentCfg.temperature ?? 21) : undefined
+            };
+            rules[idx].actionPayload = stringifyVoiceHaPayload(newCfg);
+            app.patchForm({ voiceRules: rules }, true);
+            app.pushToast(`Wybrano: ${entityId}`);
+          }
+          closeHaPicker(app);
+          return;
+        }
+
+        if (app.haPicker.key) {
+          app.patchForm({ [app.haPicker.key]: entityId } as Partial<Snapshot['config']>, true);
+          app.pushToast(`Wybrano encję: ${entityId}`);
+          closeHaPicker(app);
+          return;
+        }
+      }
+
+      // Pokoje / Obszary
+      const area = target.closest('[data-ha-area]') as HTMLElement | null;
+      if (area) {
+        app.haPickerArea = area.getAttribute('data-ha-area') || '';
+        const list = byId('ha-picker-list');
+        if (list) {
+          list.innerHTML = renderHaPickerList(app);
+          list.scrollTop = 0;
+        }
         return;
       }
+      const backArea = target.closest('[data-ha-picker-back-area]');
+      if (backArea) {
+        app.haPickerArea = '';
+        const list = byId('ha-picker-list');
+        if (list) list.innerHTML = renderHaPickerList(app);
+        return;
+      }
+
+      // Urządzenia
       const device = target.closest('[data-ha-device]') as HTMLElement | null;
       if (device) {
         app.haPickerDevice = device.getAttribute('data-ha-device') || '';
@@ -882,6 +941,7 @@ export function bindEvents(app: AppUI) {
         app.haPickerDevice = '';
         const list = byId('ha-picker-list');
         if (list) list.innerHTML = renderHaPickerList(app);
+        return;
       }
     });
     byId('btn-ha-picker-close')?.addEventListener('click', () => closeHaPicker(app));
@@ -1110,6 +1170,7 @@ export function bindEvents(app: AppUI) {
       const filterNames: Record<string, string> = {
         all: 'Wszystkie',
         radar: 'Radar & DSP',
+        voice: 'Mowa & Vosk',
         haos: 'HAOS',
         audio: 'Audio & VU',
         discord: 'Discord & RGB',
@@ -1345,4 +1406,549 @@ export function bindEvents(app: AppUI) {
       const ok = await window.api.openTextInNotepad(app.diagSessionText);
       app.pushToast(ok ? 'Otwarto raport w Notatniku 📝' : 'Nie udało się uruchomić Notatnika', !ok);
     });
+
+    // Voice Control Events
+    bindVoiceEvents(app);
   }
+
+function bindVoiceEvents(app: AppUI): void {
+  const byId = (id: string) => document.getElementById(id);
+
+  // Master switch
+  byId('sw-voice-enabled')?.addEventListener('click', async () => {
+    const next = !(app.form?.voiceEnabled ?? false);
+    byId('sw-voice-enabled')?.classList.toggle('active', next);
+    byId('sw-voice-enabled')?.setAttribute('aria-checked', String(next));
+    app.patchForm({ voiceEnabled: next }, false);
+    void app.save();
+    if (app.currentTab === 'settings' && app.settingsTab === 'voice') {
+      app.render();
+    }
+    app.pushToast(next ? 'Włączono sterowanie głosem 🎙️' : 'Wyłączono sterowanie głosem ⏸️');
+
+    if (next && !isSelectedVoiceModelReady(app)) {
+      const engine = app.form?.voiceEngine || 'whisper';
+      const isWhisper = engine === 'whisper';
+      const promptText = isWhisper
+        ? 'Sterowanie głosem OpenAI Whisper wymaga jednorazowego pobrania silnika AI (~150 MB).\n\nCzy chcesz pobrać go teraz automatycznie w tle?'
+        : 'Silnik mowy Vosk wymaga pobrania pakietu (~45 MB).\n\nCzy chcesz pobrać go teraz automatycznie w tle?';
+
+      if (window.confirm(promptText)) {
+        app.pushToast(`Rozpoczynam pobieranie komponentów (${engine.toUpperCase()})… ⏳`);
+        const targetModel = isWhisper ? app.form?.voiceWhisperModel : app.form?.voiceModel;
+        const targetBackend = app.form?.voiceWhisperBackend || 'auto';
+        try {
+          const res = await window.api.voiceStartDownload(engine, targetModel as any, targetBackend as any);
+          if (res && res.ok) {
+            app.pushToast('Komponenty mowy zainstalowane pomyślnie! Silnik aktywny ✓');
+            if (app.currentTab === 'settings' && app.settingsTab === 'voice') {
+              app.render();
+            }
+          } else if (res && !res.ok) {
+            app.pushToast(`Błąd pobierania: ${res.message || 'Nieznany błąd'}`, true);
+          }
+        } catch (err: any) {
+          app.pushToast(`Błąd: ${err.message}`, true);
+        }
+      }
+    }
+  });
+
+  // Wymóg słowa wywołania (Wake word switch)
+  byId('sw-voice-require-wake')?.addEventListener('click', () => {
+    const next = !(app.form?.voiceRequireWakeWord ?? true);
+    byId('sw-voice-require-wake')?.classList.toggle('active', next);
+    byId('sw-voice-require-wake')?.setAttribute('aria-checked', String(next));
+    const rowWake = byId('row-voice-wake-word');
+    if (rowWake) rowWake.style.display = next ? 'flex' : 'none';
+    app.patchForm({ voiceRequireWakeWord: next }, false);
+    void app.save();
+    if (app.currentTab === 'settings' && app.settingsTab === 'voice') {
+      app.render();
+    }
+    app.pushToast(next ? 'Włączono wymóg słowa wywołania (Wake Word) 🛡️' : 'Komendy działają bezpośrednio bez słowa wywołania ⚡');
+  });
+
+  // Wake word input
+  byId('inp-voice-wake-word')?.addEventListener('change', (e) => {
+    const val = ((e.target as HTMLInputElement).value || '').trim();
+    if (!val) {
+      app.pushToast('Słowo wywołujące nie może być puste', true);
+      (e.target as HTMLInputElement).value = app.form?.voiceWakeWord || 'ok';
+      return;
+    }
+    app.patchForm({ voiceWakeWord: val.toLowerCase() }, false);
+    void app.save();
+    if (app.currentTab === 'settings' && app.settingsTab === 'voice') {
+      app.render();
+    }
+  });
+
+  // Dynamic sections (odświeżane przez voice:status / voice:downloadProgress)
+  bindVoiceDynamic(app);
+
+  // Engine select cards
+  byId('btn-engine-whisper')?.addEventListener('click', () => {
+    byId('btn-engine-whisper')?.classList.add('selected');
+    byId('btn-engine-vosk')?.classList.remove('selected');
+    const rowWhisper = byId('row-whisper-model');
+    const rowVosk = byId('row-vosk-model');
+    const customRow = byId('row-vosk-custom-path');
+    if (rowWhisper) rowWhisper.style.display = 'block';
+    if (rowVosk) rowVosk.style.display = 'none';
+    if (customRow) customRow.style.display = 'none';
+    app.patchForm({ voiceEngine: 'whisper' }, false);
+    void app.save();
+    const dlSec = byId('voice-download-section');
+    if (dlSec) {
+      dlSec.innerHTML = renderVoiceDownloadSection(app);
+      bindVoiceDynamic(app);
+    }
+    app.pushToast('Przełączono na silnik: OpenAI Whisper AI 🧠');
+  });
+
+  byId('btn-engine-vosk')?.addEventListener('click', () => {
+    byId('btn-engine-vosk')?.classList.add('selected');
+    byId('btn-engine-whisper')?.classList.remove('selected');
+    const rowWhisper = byId('row-whisper-model');
+    const rowVosk = byId('row-vosk-model');
+    const customRow = byId('row-vosk-custom-path');
+    if (rowWhisper) rowWhisper.style.display = 'none';
+    if (rowVosk) rowVosk.style.display = 'block';
+    if (customRow) customRow.style.display = app.form?.voiceModel === 'custom' ? 'block' : 'none';
+    app.patchForm({ voiceEngine: 'vosk' }, false);
+    void app.save();
+    const dlSec = byId('voice-download-section');
+    if (dlSec) {
+      dlSec.innerHTML = renderVoiceDownloadSection(app);
+      bindVoiceDynamic(app);
+    }
+    app.pushToast('Przełączono na silnik: Vosk Fast 🚀');
+  });
+
+  // Whisper model select
+  byId('sel-whisper-model')?.addEventListener('change', (e) => {
+    const val = (e.target as HTMLSelectElement).value;
+    app.patchForm({ voiceWhisperModel: val as any }, false);
+    void app.save();
+    const dlSec = byId('voice-download-section');
+    if (dlSec) {
+      dlSec.innerHTML = renderVoiceDownloadSection(app);
+      bindVoiceDynamic(app);
+    }
+  });
+
+  // Whisper backend select (GPU / CPU)
+  byId('sel-whisper-backend')?.addEventListener('change', (e) => {
+    const val = (e.target as HTMLSelectElement).value;
+    app.patchForm({ voiceWhisperBackend: val as any }, false);
+    const hintEl = byId('voice-backend-hint');
+    if (hintEl) hintEl.innerHTML = renderBackendHint(val as any, app.snap?.voice);
+    void app.save();
+    const dlSec = byId('voice-download-section');
+    if (dlSec) {
+      dlSec.innerHTML = renderVoiceDownloadSection(app);
+      bindVoiceDynamic(app);
+    }
+  });
+
+  // Usuń pakiet backendu
+  byId('btn-delete-voice-backend')?.addEventListener('click', async () => {
+    const key = app.form?.voiceWhisperBackend || 'auto';
+    if (key === 'auto') return;
+    if (!window.confirm(`Usunąć pakiet backendu „${key}” z dysku?`)) return;
+    const res = await window.api.voiceDeleteAsset('backend', key);
+    app.pushToast(res?.message || (res?.ok ? 'Usunięto backend' : 'Błąd usuwania'), !res?.ok);
+    if (app.currentTab === 'settings' && app.settingsTab === 'voice') app.render();
+  });
+
+  // Idle unload minutes (na żywo — bez restartu silnika)
+  byId('inp-voice-idle-min')?.addEventListener('change', (e) => {
+    const v = Math.max(0, Math.min(60, Number((e.target as HTMLInputElement).value) || 0));
+    (e.target as HTMLInputElement).value = String(v);
+    app.patchForm({ voiceIdleUnloadMin: v }, false);
+  });
+
+  // Vosk Model select
+  byId('sel-voice-model')?.addEventListener('change', (e) => {
+    const val = (e.target as HTMLSelectElement).value;
+    const customRow = byId('row-vosk-custom-path');
+    if (customRow) customRow.style.display = val === 'custom' ? 'block' : 'none';
+    app.patchForm({ voiceModel: val as any }, false);
+    void app.save();
+    const dlSec = byId('voice-download-section');
+    if (dlSec) {
+      dlSec.innerHTML = renderVoiceDownloadSection(app);
+      bindVoiceDynamic(app);
+    }
+  });
+
+  // Custom model path input
+  byId('inp-voice-custom-path')?.addEventListener('change', (e) => {
+    const val = (e.target as HTMLInputElement).value;
+    app.patchForm({ voiceCustomModelPath: val });
+  });
+
+  // Pick custom model folder button
+  byId('btn-pick-custom-model')?.addEventListener('click', async () => {
+    const folder = await window.api.voicePickCustomModel();
+    if (folder) {
+      app.patchForm({ voiceCustomModelPath: folder }, false);
+      const inp = byId('inp-voice-custom-path') as HTMLInputElement | null;
+      if (inp) inp.value = folder;
+      app.pushToast(`Wybrano folder modelu: ${folder}`);
+    }
+  });
+
+  // Wake word & safety switches
+  byId('sw-voice-only-desk')?.addEventListener('click', () => {
+    const next = !(app.form?.voiceOnlyAtDesk ?? true);
+    byId('sw-voice-only-desk')?.classList.toggle('active', next);
+    byId('sw-voice-only-desk')?.setAttribute('aria-checked', String(next));
+    app.patchForm({ voiceOnlyAtDesk: next }, false);
+    void app.save();
+  });
+
+  byId('sw-voice-chime')?.addEventListener('click', () => {
+    const next = !(app.form?.voiceChimeFeedback ?? true);
+    byId('sw-voice-chime')?.classList.toggle('active', next);
+    byId('sw-voice-chime')?.setAttribute('aria-checked', String(next));
+    app.patchForm({ voiceChimeFeedback: next }, false);
+    void app.save();
+  });
+
+  // Add rule button
+  byId('btn-add-voice-rule')?.addEventListener('click', () => {
+    const rules = [...(app.form?.voiceRules || [])];
+    const newId = `rule_${Date.now()}`;
+    rules.push({
+      id: newId,
+      name: `Nowa komenda #${rules.length + 1}`,
+      phrase: '',
+      actionType: 'switch_desk',
+      enabled: true
+    });
+    app.patchForm({ voiceRules: rules }, true);
+    app.pushToast('Dodano nową regułę komendy głosowej');
+  });
+
+  // Rule enable switch
+  document.querySelectorAll<HTMLElement>('.rule-enable-switch').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      const idx = Number((e.currentTarget as HTMLElement).getAttribute('data-index'));
+      const rules = [...(app.form?.voiceRules || [])];
+      if (rules[idx]) {
+        rules[idx].enabled = !rules[idx].enabled;
+        app.patchForm({ voiceRules: rules }, true);
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLInputElement>('.rule-name-input').forEach((el) => {
+    el.addEventListener('change', (e) => {
+      const idx = Number((e.target as HTMLElement).getAttribute('data-index'));
+      const rules = [...(app.form?.voiceRules || [])];
+      if (rules[idx]) {
+        rules[idx].name = (e.target as HTMLInputElement).value;
+        app.patchForm({ voiceRules: rules });
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLInputElement>('.rule-phrase-input').forEach((el) => {
+    el.addEventListener('change', (e) => {
+      const idx = Number((e.target as HTMLElement).getAttribute('data-index'));
+      const rules = [...(app.form?.voiceRules || [])];
+      if (rules[idx]) {
+        rules[idx].phrase = (e.target as HTMLInputElement).value;
+        app.patchForm({ voiceRules: rules });
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLSelectElement>('.rule-action-select').forEach((el) => {
+    el.addEventListener('change', (e) => {
+      const idx = Number((e.target as HTMLElement).getAttribute('data-index'));
+      const rules = [...(app.form?.voiceRules || [])];
+      if (rules[idx]) {
+        rules[idx].actionType = (e.target as HTMLSelectElement).value as any;
+        app.patchForm({ voiceRules: rules }, true);
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLInputElement>('.rule-payload-input').forEach((el) => {
+    el.addEventListener('change', (e) => {
+      const idx = Number((e.target as HTMLElement).getAttribute('data-index'));
+      const rules = [...(app.form?.voiceRules || [])];
+      if (rules[idx]) {
+        rules[idx].actionPayload = (e.target as HTMLInputElement).value;
+        app.patchForm({ voiceRules: rules });
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('.btn-pick-rule-app').forEach((el) => {
+    el.addEventListener('click', async (e) => {
+      const idx = Number((e.currentTarget as HTMLElement).getAttribute('data-index'));
+      const filePath = await window.api.voicePickAppPath();
+      if (filePath) {
+        const rules = [...(app.form?.voiceRules || [])];
+        if (rules[idx]) {
+          rules[idx].actionPayload = filePath;
+          app.patchForm({ voiceRules: rules }, true);
+          app.pushToast(`Wybrano plik programu: ${filePath}`);
+        }
+      }
+    });
+  });
+
+  // Home Assistant (HAOS) — Picker urządzeń/encji w regułach głosowych
+  document.querySelectorAll<HTMLButtonElement>('.btn-open-ha-rule-picker').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      const idx = Number((e.currentTarget as HTMLElement).getAttribute('data-index'));
+      openHaPickerForRule(app, idx);
+    });
+  });
+
+  // Home Assistant (HAOS) — Czyszczenie wybranego urządzenia/encji
+  document.querySelectorAll<HTMLButtonElement>('.btn-clear-ha-rule').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      const idx = Number((e.currentTarget as HTMLElement).getAttribute('data-index'));
+      const rules = [...(app.form?.voiceRules || [])];
+      if (rules[idx]) {
+        rules[idx].actionPayload = '';
+        app.patchForm({ voiceRules: rules }, true);
+      }
+    });
+  });
+
+  // Home Assistant (HAOS) — Wybór usługi (Włącz / Wyłącz / Przełącz itp.)
+  document.querySelectorAll<HTMLSelectElement>('.sel-ha-rule-service').forEach((el) => {
+    el.addEventListener('change', (e) => {
+      const idx = Number((e.target as HTMLElement).getAttribute('data-index'));
+      const service = (e.target as HTMLSelectElement).value;
+      const rules = [...(app.form?.voiceRules || [])];
+      if (rules[idx]) {
+        const currentCfg = parseVoiceHaPayload(rules[idx].actionPayload);
+        currentCfg.service = service;
+        rules[idx].actionPayload = stringifyVoiceHaPayload(currentCfg);
+        app.patchForm({ voiceRules: rules }, true);
+      }
+    });
+  });
+
+  // Home Assistant (HAOS) — Suwak jasności światła
+  document.querySelectorAll<HTMLInputElement>('.fc-rule-ha-brightness-slider').forEach((el) => {
+    el.addEventListener('input', (e) => {
+      const idx = Number((e.target as HTMLElement).getAttribute('data-index'));
+      const briVal = Number((e.target as HTMLInputElement).value);
+      const valEl = document.getElementById(`ha-rule-bri-val-${idx}`);
+      if (valEl) valEl.textContent = `${briVal}%`;
+    });
+    el.addEventListener('change', (e) => {
+      const idx = Number((e.target as HTMLElement).getAttribute('data-index'));
+      const briVal = Number((e.target as HTMLInputElement).value);
+      const rules = [...(app.form?.voiceRules || [])];
+      if (rules[idx]) {
+        const currentCfg = parseVoiceHaPayload(rules[idx].actionPayload);
+        currentCfg.brightness = briVal;
+        rules[idx].actionPayload = stringifyVoiceHaPayload(currentCfg);
+        app.patchForm({ voiceRules: rules }, true);
+      }
+    });
+  });
+
+  // Home Assistant (HAOS) — Szybkie przyciski jasności (25%, 50%, 100%, Auto)
+  document.querySelectorAll<HTMLButtonElement>('.btn-ha-rule-bri').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      const idx = Number((e.currentTarget as HTMLElement).getAttribute('data-index'));
+      const briAttr = (e.currentTarget as HTMLElement).getAttribute('data-bri');
+      const rules = [...(app.form?.voiceRules || [])];
+      if (rules[idx]) {
+        const currentCfg = parseVoiceHaPayload(rules[idx].actionPayload);
+        if (briAttr === 'none') {
+          delete currentCfg.brightness;
+        } else {
+          currentCfg.brightness = Number(briAttr);
+        }
+        rules[idx].actionPayload = stringifyVoiceHaPayload(currentCfg);
+        app.patchForm({ voiceRules: rules }, true);
+      }
+    });
+  });
+
+  // Home Assistant (HAOS) — Szybka paleta kolorów
+  document.querySelectorAll<HTMLButtonElement>('.btn-ha-rule-color').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      const idx = Number((e.currentTarget as HTMLElement).getAttribute('data-index'));
+      const color = (e.currentTarget as HTMLElement).getAttribute('data-color') || '';
+      const rules = [...(app.form?.voiceRules || [])];
+      if (rules[idx]) {
+        const currentCfg = parseVoiceHaPayload(rules[idx].actionPayload);
+        currentCfg.color = color === 'none' ? undefined : color;
+        rules[idx].actionPayload = stringifyVoiceHaPayload(currentCfg);
+        app.patchForm({ voiceRules: rules }, true);
+      }
+    });
+  });
+
+  // Home Assistant (HAOS) — Color Picker HTML
+  document.querySelectorAll<HTMLInputElement>('.fc-rule-ha-color-input').forEach((el) => {
+    el.addEventListener('change', (e) => {
+      const idx = Number((e.target as HTMLElement).getAttribute('data-index'));
+      const color = (e.target as HTMLInputElement).value;
+      const rules = [...(app.form?.voiceRules || [])];
+      if (rules[idx]) {
+        const currentCfg = parseVoiceHaPayload(rules[idx].actionPayload);
+        currentCfg.color = color;
+        rules[idx].actionPayload = stringifyVoiceHaPayload(currentCfg);
+        app.patchForm({ voiceRules: rules }, true);
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('.btn-test-voice-rule').forEach((el) => {
+    el.addEventListener('click', async (e) => {
+      const idx = Number((e.currentTarget as HTMLElement).getAttribute('data-index'));
+      const rules = app.form?.voiceRules || [];
+      const rule = rules[idx];
+      if (rule) {
+        app.pushToast(`Testuję akcję: [${rule.name}]…`);
+        const res = await window.api.voiceTestAction(rule);
+        if (res && res.ok) {
+          app.pushToast(`✓ ${res.message || 'Akcja wykonana pomyślnie'}`);
+        } else {
+          app.pushToast(`Błąd wykonania: ${res?.message || 'Niepowodzenie'}`, true);
+        }
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('.btn-delete-voice-rule').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      const idx = Number((e.currentTarget as HTMLElement).getAttribute('data-index'));
+      const rules = [...(app.form?.voiceRules || [])];
+      const removed = rules.splice(idx, 1);
+      app.patchForm({ voiceRules: rules }, true);
+      app.pushToast(`Usunięto regułę: ${removed[0]?.name || ''}`);
+    });
+  });
+
+  // Calibration Wizard modal
+  byId('btn-open-voice-calibrator')?.addEventListener('click', async () => {
+    if (!isSelectedVoiceModelReady(app)) {
+      const engine = app.form?.voiceEngine || 'whisper';
+      const promptText = engine === 'whisper'
+        ? 'Kalibrator wymowy wymaga pobranego modelu OpenAI Whisper (~150 MB).\n\nCzy chcesz pobrać go teraz automatycznie w tle?'
+        : 'Kalibrator wymowy wymaga pobranego modelu Vosk (~45 MB).\n\nCzy chcesz pobrać go teraz automatycznie w tle?';
+
+      if (window.confirm(promptText)) {
+        app.pushToast(`Rozpoczynam pobieranie modelu (${engine.toUpperCase()})… ⏳`);
+        const targetModel = engine === 'whisper' ? app.form?.voiceWhisperModel : app.form?.voiceModel;
+        const targetBackend = app.form?.voiceWhisperBackend || 'auto';
+        try {
+          const res = await window.api.voiceStartDownload(engine, targetModel as any, targetBackend as any);
+          if (res && res.ok) {
+            app.pushToast('Model pobrany! Otwieram kalibrator… ✓');
+            app.voiceCalibratorOpen = true;
+            app.render();
+            try {
+              await window.api.voiceStartLiveTest();
+            } catch (_) {}
+          } else if (res && !res.ok) {
+            app.pushToast(`Błąd pobierania: ${res.message || 'Nieznany błąd'}`, true);
+          }
+        } catch (err: any) {
+          app.pushToast(`Błąd: ${err.message}`, true);
+        }
+      }
+      return;
+    }
+
+    app.voiceCalibratorOpen = true;
+    app.render();
+    try {
+      await window.api.voiceStartLiveTest();
+    } catch (_) {}
+  });
+
+  const closeCalibrator = async () => {
+    app.voiceCalibratorOpen = false;
+    app.render();
+    try {
+      await window.api.voiceStopLiveTest();
+    } catch (_) {}
+  };
+
+  byId('btn-close-voice-calibrator')?.addEventListener('click', () => void closeCalibrator());
+  byId('btn-close-voice-calibrator-2')?.addEventListener('click', () => void closeCalibrator());
+  byId('modal-voice-calibrator')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'modal-voice-calibrator') {
+      void closeCalibrator();
+    }
+  });
+
+  byId('btn-use-recognized-phrase')?.addEventListener('click', async () => {
+    if (!app.voiceLastRecognized) return;
+    const wakeWord = (app.form?.voiceWakeWord || 'ok').trim().toLowerCase();
+    const regex = new RegExp(`^(?:${wakeWord}|ok|okej|okey|desksense|desk-sense)\\s+`, 'i');
+    let phraseClean = app.voiceLastRecognized.replace(regex, '').trim();
+    if (!phraseClean) phraseClean = app.voiceLastRecognized.trim();
+    const rules = [...(app.form?.voiceRules || [])];
+    rules.push({
+      id: `rule_${Date.now()}`,
+      name: `Komenda: ${phraseClean.substring(0, 20)}`,
+      phrase: phraseClean,
+      actionType: 'switch_desk',
+      enabled: true
+    });
+    app.patchForm({ voiceRules: rules }, true);
+    app.pushToast(`Utworzono komendę dla frazy: „${phraseClean}” ✓`);
+    await closeCalibrator();
+  });
+}
+
+/** Wiąże przyciski dynamicznych sekcji karty głosowej (pobieranie / anuluj) —
+ *  wywoływane po każdym podmianie innerHTML przez voice:status. */
+export function bindVoiceDynamic(app: AppUI): void {
+  const byId = (id: string) => document.getElementById(id);
+
+  byId('btn-download-voice-model')?.addEventListener('click', async () => {
+    const engine = app.form?.voiceEngine || 'whisper';
+    const targetModel = engine === 'whisper' ? app.form?.voiceWhisperModel : app.form?.voiceModel;
+    const targetBackend = app.form?.voiceWhisperBackend || 'auto';
+    app.pushToast(`Rozpoczynam pobieranie wybranych komponentów (${engine.toUpperCase()})… ⏳`);
+    try {
+      const res = await window.api.voiceStartDownload(engine, targetModel as any, targetBackend as any);
+      if (res && res.ok) {
+        app.pushToast('Wybrane komponenty mowy zainstalowane pomyślnie ✓');
+        if (app.currentTab === 'settings' && app.settingsTab === 'voice') {
+          app.render();
+        }
+      } else if (res && !res.ok) {
+        app.pushToast(`Błąd pobierania: ${res.message || 'Nieznany błąd'}`, true);
+      }
+    } catch (err: any) {
+      app.pushToast(`Błąd: ${err.message}`, true);
+    }
+  });
+
+  byId('btn-cancel-voice-download')?.addEventListener('click', async () => {
+    try {
+      await window.api.voiceCancelDownload();
+      app.pushToast('Pobieranie anulowane');
+    } catch (err: any) {
+      app.pushToast(`Błąd anulowania: ${err.message}`, true);
+    }
+  });
+
+  byId('btn-delete-voice-model')?.addEventListener('click', async () => {
+    const engine = app.form?.voiceEngine || 'whisper';
+    const key = engine === 'whisper' ? (app.form?.voiceWhisperModel || 'whisper-base') : (app.form?.voiceModel || 'pl-small');
+    if (!window.confirm(`Usunąć pobrany model „${key}” z dysku?`)) return;
+    const res = await window.api.voiceDeleteAsset('model', key);
+    app.pushToast(res?.message || (res?.ok ? 'Usunięto model' : 'Błąd usuwania'), !res?.ok);
+    if (app.currentTab === 'settings' && app.settingsTab === 'voice') app.render();
+  });
+}

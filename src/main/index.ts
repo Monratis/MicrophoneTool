@@ -10,6 +10,8 @@ import AppUpdater from './updater';
 import DiscordIntegration from './discordIntegration';
 import SignalRGBIntegration from './signalrgbIntegration';
 import HomeAssistantIntegration from './haIntegration';
+import { VoiceManager } from './voiceManager';
+import { closeVoiceOsd } from './voiceOsd';
 import DeviceWatcher from './deviceWatcher';
 import ActivityWatcher from './activityWatcher';
 import ScreenManager from './screenManager';
@@ -92,6 +94,7 @@ function buildSnapshot() {
     },
     ha: ctx.ha.getStatus(),
     discord: ctx.controller.discord ? ctx.controller.discord.getStatus() : undefined,
+    voice: ctx.voice ? ctx.voice.getStatus() : undefined,
     telemetry: ctx.radar.telemetry,
     config: safeConfig as typeof ctx.config.data,
     snoozeUntil: ctx.controller.getSnoozeUntil()
@@ -100,9 +103,9 @@ function buildSnapshot() {
 
 function pushEvent(type: string, payload: Record<string, unknown> = {}): void {
   for (const win of BrowserWindow.getAllWindows()) {
-    // Apka w tray: ukryte okno dostaje WYŁĄCZNIE 'switch' (chime gra w rendererze).
+    // Apka w tray: ukryte okno dostaje dźwięki 'switch' oraz 'voice:playChime' (chime gra w rendererze przez Web Audio).
     // Toasty/telemetria/updater bez widocznego okna to czysty odpad IPC.
-    if (!win.isDestroyed() && (win.isVisible() || type === 'switch')) {
+    if (!win.isDestroyed() && (win.isVisible() || type === 'switch' || type === 'voice:playChime')) {
       win.webContents.send('push:event', { type, ...payload });
     }
   }
@@ -236,6 +239,7 @@ app.whenReady().then(() => {
     updater,
     signalrgb,
     ha,
+    voice: undefined,
     appDataDir,
     settingsWindow: null,
     buildSnapshot,
@@ -246,6 +250,11 @@ app.whenReady().then(() => {
     showWindowsNotification,
     applyAutoStart
   };
+
+  // VoiceManager potrzebuje pełnego kontekstu DI — budujemy go po utworzeniu ctx
+  const voice = new VoiceManager(ctx);
+  ctx.voice = voice;
+  void voice.init();
 
   controller.on('switch', ({ state, device, unconfigured }) => {
     if (unconfigured) {
@@ -430,6 +439,7 @@ app.on('before-quit', (e) => {
   const cleanupTasks: Promise<unknown>[] = [];
   if (ctx) {
     ctx.activityWatcher.stop();
+    ctx.voice?.stop();
     cleanupTasks.push(
       ctx.controller.stop().catch(() => {}),
       ctx.ha.stop().catch(() => {})
@@ -438,6 +448,7 @@ app.on('before-quit', (e) => {
   }
   deviceWatcher?.stop();
   cleanupStaleUpdateFiles();
+  closeVoiceOsd();
 
   void Promise.all(cleanupTasks).finally(() => {
     isCleanedUp = true;
@@ -450,6 +461,7 @@ const forceCleanup = () => {
     try {
       ctx.screen.stop();
       ctx.audio.shutdown();
+      ctx.voice?.stop();
       if (ctx.radar.port) {
         ctx.radar.port.removeAllListeners();
         // Odbiorca dla porzuconych zapisów — bez tego abort portu przy wyjściu

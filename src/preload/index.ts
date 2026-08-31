@@ -41,7 +41,7 @@ const api = {
     ipcRenderer.invoke('ha:testConnection', opts),
   haFetchEntities: (opts?: { url?: string; token?: string }) =>
     ipcRenderer.invoke('ha:fetchEntities', opts),
-  haCallService: (entityId: string) => ipcRenderer.invoke('ha:callService', entityId),
+  haCallService: (target: string | Record<string, unknown>) => ipcRenderer.invoke('ha:callService', target),
 
   // SignalRGB Integration
   signalrgbTestAway: () => ipcRenderer.invoke('signalrgb:testAway'),
@@ -73,6 +73,18 @@ const api = {
   diagStatus: () => ipcRenderer.invoke('diag:status'),
   diagStop: () => ipcRenderer.invoke('diag:stop'),
   openTextInNotepad: (text: string) => ipcRenderer.invoke('app:openTextInNotepad', text),
+
+  // Voice Control API
+  setSnooze: (minutes: number) => ipcRenderer.invoke('snooze:set', minutes),
+  voiceGetStatus: () => ipcRenderer.invoke('voice:getStatus'),
+  voiceStartDownload: (engine?: any, modelType?: any, backend?: any) => ipcRenderer.invoke('voice:startDownload', engine, modelType, backend),
+  voiceCancelDownload: () => ipcRenderer.invoke('voice:cancelDownload'),
+  voiceDeleteAsset: (kind: 'model' | 'backend', key: string) => ipcRenderer.invoke('voice:deleteAsset', kind, key),
+  voiceTestAction: (rule: unknown) => ipcRenderer.invoke('voice:testAction', rule),
+  voiceStartLiveTest: () => ipcRenderer.invoke('voice:startLiveTest'),
+  voiceStopLiveTest: () => ipcRenderer.invoke('voice:stopLiveTest'),
+  voicePickCustomModel: () => ipcRenderer.invoke('voice:pickCustomModel'),
+  voicePickAppPath: () => ipcRenderer.invoke('voice:pickAppPath'),
 
   onEvent: (cb: (e: unknown) => void) => {
     const listener = (_e: IpcRendererEvent, payload: unknown): void => cb(payload);

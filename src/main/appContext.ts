@@ -12,6 +12,7 @@ import type SignalRGBIntegration from './signalrgbIntegration';
 import type HomeAssistantIntegration from './haIntegration';
 import type ActivityWatcher from './activityWatcher';
 import type ScreenManager from './screenManager';
+import type { VoiceManager } from './voiceManager';
 import type { PushEvent, Snapshot } from '../shared/types';
 
 /**
@@ -28,6 +29,7 @@ export interface AppContext {
   updater: AppUpdater;
   signalrgb: SignalRGBIntegration | null;
   ha: HomeAssistantIntegration;
+  voice?: VoiceManager;
 
   appDataDir: string;
   settingsWindow: BrowserWindow | null;

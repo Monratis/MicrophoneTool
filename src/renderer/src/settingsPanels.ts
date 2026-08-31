@@ -1,6 +1,7 @@
 import type { AppUI } from './app';
 import { esc, type SettingsTab } from './ui';
 import { renderChimePanel, renderDiscordPanel, renderHaosPanel, renderSignalrgbPanel } from './integrationsPanels';
+import { renderVoiceTab } from './voicePanel';
 import { DEFAULT_CONFIG } from '../../shared/types';
 
   // ---------- SETTINGS TAB (LEWY PANEL USTAWIEŃ) ----------
@@ -8,6 +9,7 @@ export function renderSettingsTab(app: AppUI): string {
     const tabs: { id: SettingsTab; icon: string; label: string }[] = [
       { id: 'port', icon: '🔌', label: 'Port USB COM' },
       { id: 'timeouts', icon: '⏱️', label: 'Czasy Reakcji' },
+      { id: 'voice', icon: '🎙️', label: 'Komendy Głosowe' },
       { id: 'biometrics', icon: '🐾', label: 'Zwierzęta & Biometria' },
       { id: 'discord', icon: '🎮', label: 'Discord Voice RPC' },
       { id: 'signalrgb', icon: '🌈', label: 'SignalRGB' },
@@ -36,6 +38,7 @@ export function renderSettingsPanel(app: AppUI): string {
     switch (app.settingsTab) {
       case 'port': return renderPortPanel(app);
       case 'timeouts': return renderTimeoutsPanel(app);
+      case 'voice': return renderVoiceTab(app);
       case 'biometrics': return renderBiometricsPanel(app);
       case 'discord': return renderDiscordPanel(app);
       case 'signalrgb': return renderSignalrgbPanel(app);

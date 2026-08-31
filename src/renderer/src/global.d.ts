@@ -15,7 +15,14 @@ import {
   type SerialPortInfo,
   type Snapshot,
   type UpdateInfo,
-  type UpdaterStatus
+  type UpdaterStatus,
+  type VoiceRule,
+  type VoiceActionType,
+  type VoiceEngineType,
+  type VoiceWhisperModel,
+  type VoiceWhisperBackend,
+  type VoiceModelType,
+  type VoiceStatus
 } from '../../shared/types';
 
 export {
@@ -34,7 +41,14 @@ export {
   type SerialPortInfo,
   type Snapshot,
   type UpdateInfo,
-  type UpdaterStatus
+  type UpdaterStatus,
+  type VoiceRule,
+  type VoiceActionType,
+  type VoiceEngineType,
+  type VoiceWhisperModel,
+  type VoiceWhisperBackend,
+  type VoiceModelType,
+  type VoiceStatus
 };
 
 declare global {

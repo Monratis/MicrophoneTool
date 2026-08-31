@@ -99,6 +99,19 @@ export function registerIpc(ctx: AppContext): void {
         'sensorLedAwayColor' in patch ||
         'sensorLedMuteColor' in patch);
 
+    const voiceNeedsUpdate =
+      Boolean(patch) &&
+      ('voiceEnabled' in patch ||
+        'voiceEngine' in patch ||
+        'voiceWhisperModel' in patch ||
+        'voiceWhisperBackend' in patch ||
+        'voiceModel' in patch ||
+        'voiceCustomModelPath' in patch ||
+        'voiceWakeWord' in patch ||
+        'voiceRequireWakeWord' in patch ||
+        'voiceIdleUnloadMin' in patch ||
+        'voiceRules' in patch);
+
     if (radarNeedsRestart) {
       void ctx.restartRadar();
     }
@@ -110,6 +123,33 @@ export function registerIpc(ctx: AppContext): void {
     }
     if (ledNeedsUpdate && !radarNeedsRestart) {
       ctx.radar.updateLed();
+    }
+    if (voiceNeedsUpdate && ctx.voice && !ctx.voice.isDownloading()) {
+      // Użytkownik jawnie wybrał backend GPU — wyczyść wymuszony fallback CPU,
+      // żeby mógł ponownie spróbować CUDA (inaczej auto zostałby na CPU na stałe).
+      const explicitBackend = (patch?.voiceWhisperBackend as string);
+      if (explicitBackend === 'cuda12' || explicitBackend === 'cuda11') {
+        ctx.voice.resetCpuFallback();
+      }
+      if (typeof patch?.voiceEnabled === 'boolean') {
+        if (patch.voiceEnabled) {
+          void ctx.voice.start();
+        } else {
+          ctx.voice.stop();
+        }
+      } else if (typeof patch?.voiceIdleUnloadMin === 'number') {
+        ctx.voice.setVoiceIdleUnload(patch.voiceIdleUnloadMin);
+      } else if ('voiceEngine' in (patch || {}) || 'voiceWhisperModel' in (patch || {}) || 'voiceWhisperBackend' in (patch || {}) || 'voiceModel' in (patch || {}) || 'voiceCustomModelPath' in (patch || {})) {
+        const eng = (patch?.voiceEngine as string) || ctx.config.get('voiceEngine') || 'whisper';
+        const mdl = eng === 'whisper'
+          ? (patch?.voiceWhisperModel as string) || ctx.config.get('voiceWhisperModel') || 'whisper-base'
+          : (patch?.voiceModel as string) || ctx.config.get('voiceModel') || 'pl-small';
+        const bck = (patch?.voiceWhisperBackend as string) || ctx.config.get('voiceWhisperBackend') || 'auto';
+        // Restart tylko gdy nowa konfiguracja jest gotowa — inaczej nie ubijamy działającego silnika
+        if (ctx.voice.isModelReady(eng as never, mdl as never, bck as never)) {
+          void ctx.voice.restart();
+        }
+      }
     }
     if (!radarNeedsRestart) {
       ctx.refreshSnapshot();
@@ -197,8 +237,8 @@ export function registerIpc(ctx: AppContext): void {
   ipcMain.handle('ha:fetchEntities', async (_e, opts?: { url?: string; token?: string }) =>
     ctx.ha.fetchEntities(opts)
   );
-  // Test wywołania usługi HAOS z panelu (automation/script/button/scene/...)
-  ipcMain.handle('ha:callService', async (_e, entityId: string) => ctx.ha.callService(String(entityId || '')));
+  // Test wywołania usługi HAOS z panelu (automation/script/button/scene/light/...)
+  ipcMain.handle('ha:callService', async (_e, target: string | Record<string, unknown>) => ctx.ha.callService(target));
 
   // SignalRGB IPC — zwracają realny wynik akcji (rest/deeplink/none + powód)
   ipcMain.handle('signalrgb:testAway', async () =>
@@ -356,6 +396,51 @@ export function registerIpc(ctx: AppContext): void {
   ipcMain.handle('led:refresh', () => {
     ctx.radar.updateLed();
     return true;
+  });
+
+  // Voice Control IPC
+  ipcMain.handle('voice:getStatus', () => ctx.voice ? ctx.voice.getStatus() : null);
+  ipcMain.handle('voice:startDownload', (_e, engine?: any, modelType?: any, backend?: any) => ctx.voice ? ctx.voice.startDownload(engine, modelType, backend) : { ok: false, message: 'Moduł mowy niedostępny' });
+  ipcMain.handle('voice:cancelDownload', () => ctx.voice ? ctx.voice.cancelDownload() : false);
+  ipcMain.handle('voice:deleteAsset', (_e, kind: any, key: any) => ctx.voice ? ctx.voice.deleteAsset(kind, key) : { ok: false, message: 'Moduł mowy niedostępny' });
+  ipcMain.handle('voice:testAction', (_e, rule: any) => ctx.voice ? ctx.voice.executeAction(rule) : { ok: false, message: 'Moduł mowy niedostępny' });
+  ipcMain.handle('voice:startLiveTest', () => {
+    if (ctx.voice) {
+      ctx.voice.setLiveTestMode(true);
+      return true;
+    }
+    return false;
+  });
+  ipcMain.handle('voice:stopLiveTest', () => {
+    if (ctx.voice) {
+      ctx.voice.setLiveTestMode(false);
+      return true;
+    }
+    return false;
+  });
+  ipcMain.handle('voice:pickCustomModel', async () => {
+    const { dialog } = await import('electron');
+    const win = getSettingsWindow() ?? undefined;
+    const result = await dialog.showOpenDialog(win as Electron.BaseWindow, {
+      title: 'Wybierz folder z modelem Vosk',
+      properties: ['openDirectory']
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
+  ipcMain.handle('voice:pickAppPath', async () => {
+    const { dialog } = await import('electron');
+    const win = getSettingsWindow() ?? undefined;
+    const result = await dialog.showOpenDialog(win as Electron.BaseWindow, {
+      title: 'Wybierz aplikację lub skrypt do uruchomienia',
+      filters: [
+        { name: 'Programy i skrypty (*.exe, *.bat, *.cmd, *.lnk, *.ps1)', extensions: ['exe', 'bat', 'cmd', 'lnk', 'ps1', 'vbs'] },
+        { name: 'Wszystkie pliki (*.*)', extensions: ['*'] }
+      ],
+      properties: ['openFile']
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
   });
 
   ipcMain.on('window:close', () => {

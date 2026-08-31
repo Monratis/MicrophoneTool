@@ -534,10 +534,14 @@ export const HA_ENTITY_FIELDS = {
 export type HaFieldId = keyof typeof HA_ENTITY_FIELDS;
 
 /** Klasa badge wg domeny encji — szybki wizualny rozróżniacz w liście. */
-function haDomainBadge(domain: string): string {
+export function haDomainBadge(domain: string): string {
   if (domain === 'binary_sensor') return 'calibrated';
   if (domain === 'sensor') return 'blue';
-  if (domain === 'automation' || domain === 'script' || domain === 'scene') return 'blue';
+  if (domain === 'light') return 'amber';
+  if (domain === 'switch' || domain === 'input_boolean') return 'calibrated';
+  if (domain === 'scene' || domain === 'script' || domain === 'automation') return 'blue';
+  if (domain === 'media_player') return 'purple';
+  if (domain === 'climate') return 'rose';
   return 'amber';
 }
 
@@ -577,6 +581,36 @@ export function openHaPicker(app: AppUI, fieldId: HaFieldId): void {
   app.haPicker = { key: spec.key, title: spec.title, domains: [...spec.domains] };
   app.haPickerSearch = '';
   app.haPickerDomain = '';
+  app.haPickerArea = '';
+  app.haPickerDevice = '';
+  app.render();
+  void ensureHaCatalog(app);
+}
+
+export function openHaPickerForRule(app: AppUI, ruleIndex: number): void {
+  app.haPicker = {
+    ruleIndex,
+    title: 'Wybierz urządzenie lub encję Home Assistant',
+    domains: [
+      'light',
+      'switch',
+      'scene',
+      'script',
+      'automation',
+      'button',
+      'input_button',
+      'input_boolean',
+      'media_player',
+      'cover',
+      'climate',
+      'fan',
+      'lock',
+      'vacuum'
+    ]
+  };
+  app.haPickerSearch = '';
+  app.haPickerDomain = '';
+  app.haPickerArea = '';
   app.haPickerDevice = '';
   app.render();
   void ensureHaCatalog(app);
@@ -601,9 +635,9 @@ function haNorm(text: string): string {
  */
 export function applyHaCatalog(app: AppUI, res: Awaited<ReturnType<typeof window.api.haFetchEntities>>): void {
   app.haCatalog = [
-    ...(res.binarySensors || []).map((s) => ({ entity_id: s.entity_id, name: s.name, domain: 'binary_sensor', deviceName: s.deviceName, state: s.state })),
-    ...(res.sensors || []).map((s) => ({ entity_id: s.entity_id, name: s.name, domain: 'sensor', deviceName: s.deviceName, state: s.state, unit: s.unit })),
-    ...(res.actions || []).map((a) => ({ entity_id: a.entity_id, name: a.name, domain: a.domain, deviceName: a.deviceName }))
+    ...(res.binarySensors || []).map((s) => ({ entity_id: s.entity_id, name: s.name, domain: 'binary_sensor', deviceName: s.deviceName, areaName: s.areaName, state: s.state })),
+    ...(res.sensors || []).map((s) => ({ entity_id: s.entity_id, name: s.name, domain: 'sensor', deviceName: s.deviceName, areaName: s.areaName, state: s.state, unit: s.unit })),
+    ...(res.actions || []).map((a) => ({ entity_id: a.entity_id, name: a.name, domain: a.domain, deviceName: a.deviceName, areaName: a.areaName }))
   ];
   try {
     localStorage.setItem(CATALOG_CACHE_KEY, JSON.stringify(app.haCatalog));
@@ -635,10 +669,11 @@ export async function ensureHaCatalog(app: AppUI): Promise<void> {
   app.render();
 }
 
-/** Chipki trybu (Encje/Urządzenia) + filtry domen w pickercie. */
+/** Chipki trybu (Pokoje/Urządzenia/Encje) + filtry domen w pickercie. */
 export function renderHaPickerChips(app: AppUI): string {
   const viewChips = `
     <div style="display:flex; gap:6px; flex-wrap:wrap">
+      <button class="fc-log-chip ${app.haPickerMode === 'areas' ? 'active' : ''}" data-ha-picker-view="areas">🏷️ Pokoje / Obszary</button>
       <button class="fc-log-chip ${app.haPickerMode === 'devices' ? 'active' : ''}" data-ha-picker-view="devices">📦 Urządzenia</button>
       <button class="fc-log-chip ${app.haPickerMode === 'entities' ? 'active' : ''}" data-ha-picker-view="entities">🔤 Wszystkie encje</button>
     </div>`;
@@ -650,21 +685,42 @@ export function renderHaPickerChips(app: AppUI): string {
   return viewChips + domainChips;
 }
 
-/** Wiersz pojedynczej encji w liście (wspólny dla widoku płaskiego i urządzenia). */
-function haEntityRow(app: AppUI, e: { entity_id: string; name: string; domain: string; state?: string; unit?: string }): string {
-  const currentValue = String((app.form as unknown as Record<string, unknown>)?.[app.haPicker!.key] || '');
+/** Wiersz pojedynczej encji w liście (wspólny dla widoku płaskiego, pokoju i urządzenia). */
+function haEntityRow(app: AppUI, e: { entity_id: string; name: string; domain: string; deviceName?: string; areaName?: string; state?: string; unit?: string }): string {
+  let currentValue = '';
+  if (app.haPicker?.key) {
+    currentValue = String((app.form as unknown as Record<string, unknown>)?.[app.haPicker.key] || '');
+  } else if (app.haPicker?.ruleIndex !== undefined) {
+    const r = app.form?.voiceRules?.[app.haPicker.ruleIndex];
+    if (r?.actionPayload) {
+      if (r.actionPayload.trim().startsWith('{')) {
+        try {
+          currentValue = (JSON.parse(r.actionPayload) as Record<string, unknown>).entity_id as string || '';
+        } catch {
+          currentValue = r.actionPayload.trim();
+        }
+      } else {
+        currentValue = r.actionPayload.trim();
+      }
+    }
+  }
   const isSelected = currentValue === e.entity_id;
   const stateInfo = (e.domain === 'sensor' || e.domain === 'binary_sensor') && e.state
     ? `<span style="font-size:10px; color:var(--fc-text-muted); flex-shrink:0">${esc(e.state)}${e.unit ? ` ${esc(e.unit)}` : ''}</span>`
     : '';
   const check = isSelected ? `<span style="color:var(--fc-accent-green); flex-shrink:0">✓</span>` : '';
+  const metaParts: string[] = [e.entity_id];
+  if (e.areaName) metaParts.push(`🏷️ ${e.areaName}`);
+  if (e.deviceName) metaParts.push(`📦 ${e.deviceName}`);
+  const metaText = metaParts.join(' · ');
+
   return `
     <button data-ha-entity="${esc(e.entity_id)}"
       style="width:100%; display:flex; align-items:center; gap:8px; padding:7px 10px; border:none; border-bottom:1px solid var(--fc-card-border); background:${isSelected ? 'rgba(34,197,94,0.08)' : 'transparent'}; cursor:pointer; text-align:left">
       <span class="fc-badge ${haDomainBadge(e.domain)}" style="flex-shrink:0">${esc(e.domain)}</span>
       <span style="display:flex; flex-direction:column; min-width:0; flex:1">
         <span style="font-size:11.5px; color:var(--fc-text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(e.name)}</span>
-        <span style="font-size:10px; color:var(--fc-text-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(e.entity_id)}</span>
+        <span style="font-size:10px; color:var(--fc-text-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(metaText)}</span>
       </span>
       ${stateInfo}
       ${check}
@@ -672,7 +728,7 @@ function haEntityRow(app: AppUI, e: { entity_id: string; name: string; domain: s
   `;
 }
 
-/** Filtrowana lista: płaska encje / urządzenia / wnętrze urządzenia. */
+/** Filtrowana lista: pokoje/obszary / urządzenia / płaska lista encji. */
 export function renderHaPickerList(app: AppUI): string {
   if (!app.haPicker) return '';
   if (app.haFetchingPicker) {
@@ -687,7 +743,67 @@ export function renderHaPickerList(app: AppUI): string {
   const q = haNorm(app.haPickerSearch.trim());
   const matchesDomain = (e: { domain: string }): boolean => !app.haPickerDomain || e.domain === app.haPickerDomain;
 
-  // Wnętrze urządzenia (widok "Urządzenia" po wejściu)
+  // 1. Widok "Pokoje / Obszary" — po wejściu do wybranego pokoju
+  if (app.haPickerMode === 'areas' && app.haPickerArea) {
+    const inside = app.haCatalog.filter((e) => matchesDomain(e) && (e.areaName || '(Bez pokoju)') === app.haPickerArea)
+      .filter((e) => !q || haNorm(e.entity_id).includes(q) || haNorm(e.name).includes(q) || haNorm(e.deviceName || '').includes(q))
+      .slice(0, 150);
+    const back = `
+      <button data-ha-picker-back-area="1"
+        style="width:100%; display:flex; align-items:center; gap:6px; padding:7px 10px; border:none; border-bottom:1px solid var(--fc-card-border); background:rgba(255,255,255,0.03); cursor:pointer; text-align:left; font-size:11px; color:var(--fc-accent-blue)">
+        ← Wszystkie pokoje / obszary (Aktualnie: <strong>${esc(app.haPickerArea)}</strong>)
+      </button>`;
+    const rows = inside.length > 0
+      ? inside.map((e) => haEntityRow(app, e)).join('')
+      : `<div style="padding:14px; font-size:11.5px; color:var(--fc-text-muted); text-align:center">Ten pokój nie zawiera encji w dozwolonych domenach.</div>`;
+    return back + rows;
+  }
+
+  // 2. Widok "Pokoje / Obszary" — lista wszystkich pokoi
+  if (app.haPickerMode === 'areas') {
+    const entityHit = new Set<string>();
+    if (q) {
+      for (const e of app.haCatalog) {
+        if (!matchesDomain(e)) continue;
+        if (haNorm(e.entity_id).includes(q) || haNorm(e.name).includes(q) || haNorm(e.deviceName || '').includes(q)) {
+          entityHit.add(e.areaName || '(Bez pokoju)');
+        }
+      }
+    }
+    const groups = new Map<string, { count: number; devices: Set<string>; domains: Set<string> }>();
+    for (const e of app.haCatalog) {
+      if (!matchesDomain(e)) continue;
+      const key = e.areaName || '(Bez pokoju)';
+      if (q && !haNorm(key).includes(q) && !entityHit.has(key)) continue;
+      const g = groups.get(key) || { count: 0, devices: new Set<string>(), domains: new Set<string>() };
+      g.count++;
+      if (e.deviceName) g.devices.add(e.deviceName);
+      g.domains.add(e.domain);
+      groups.set(key, g);
+    }
+    if (groups.size === 0) {
+      return `<div style="padding:14px; font-size:11.5px; color:var(--fc-text-muted); text-align:center">Brak pokoi / obszarów pasujących do zapytania.</div>`;
+    }
+    const keys = Array.from(groups.keys()).sort((a, b) => (a === '(Bez pokoju)' ? 1 : 0) - (b === '(Bez pokoju)' ? 1 : 0) || a.localeCompare(b, 'pl'));
+    return keys.map((name) => {
+      const g = groups.get(name)!;
+      const badges = Array.from(g.domains).map((d) => `<span class="fc-badge ${haDomainBadge(d)}">${esc(d)}</span>`).join(' ');
+      const deviceCount = g.devices.size;
+      return `
+        <button data-ha-area="${esc(name)}"
+          style="width:100%; display:flex; align-items:center; gap:10px; padding:9px 12px; border:none; border-bottom:1px solid var(--fc-card-border); background:transparent; cursor:pointer; text-align:left; transition:background 0.1s ease;">
+          <span style="font-size:16px; flex-shrink:0">${name === '(Bez pokoju)' ? '📦' : '🏷️'}</span>
+          <span style="display:flex; flex-direction:column; min-width:0; flex:1">
+            <span style="font-size:12px; font-weight:600; color:var(--fc-text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(name)}</span>
+            <span style="font-size:10px; color:var(--fc-text-muted)">${deviceCount > 0 ? `${deviceCount} ${deviceCount === 1 ? 'urządzenie' : 'urządzeń'} · ` : ''}${g.count} ${g.count === 1 ? 'encja' : 'encji'}</span>
+          </span>
+          <span style="display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end">${badges}</span>
+        </button>
+      `;
+    }).join('');
+  }
+
+  // 3. Wnętrze urządzenia (widok "Urządzenia" po wejściu)
   if (app.haPickerMode === 'devices' && app.haPickerDevice) {
     const inside = app.haCatalog.filter((e) => matchesDomain(e) && (e.deviceName || '(bez urządzenia)') === app.haPickerDevice)
       .filter((e) => !q || haNorm(e.entity_id).includes(q) || haNorm(e.name).includes(q))
@@ -695,7 +811,7 @@ export function renderHaPickerList(app: AppUI): string {
     const back = `
       <button data-ha-picker-back="1"
         style="width:100%; display:flex; align-items:center; gap:6px; padding:7px 10px; border:none; border-bottom:1px solid var(--fc-card-border); background:rgba(255,255,255,0.03); cursor:pointer; text-align:left; font-size:11px; color:var(--fc-accent-blue)">
-        ← Wszystkie urządzenia
+        ← Wszystkie urządzenia (Aktualnie: <strong>${esc(app.haPickerDevice)}</strong>)
       </button>`;
     const rows = inside.length > 0
       ? inside.map((e) => haEntityRow(app, e)).join('')
@@ -703,25 +819,25 @@ export function renderHaPickerList(app: AppUI): string {
     return back + rows;
   }
 
-  // Widok urządzeń: grupowanie encji wg nazwy urządzenia. Wyszukiwanie trafia
-  // zarówno w nazwę urządzenia, jak i w nazwę/entity_id dowolnej jego encji.
+  // 4. Widok urządzeń: grupowanie encji wg nazwy urządzenia
   if (app.haPickerMode === 'devices') {
     const entityHit = new Set<string>();
     if (q) {
       for (const e of app.haCatalog) {
         if (!matchesDomain(e)) continue;
-        if (haNorm(e.entity_id).includes(q) || haNorm(e.name).includes(q)) {
+        if (haNorm(e.entity_id).includes(q) || haNorm(e.name).includes(q) || haNorm(e.areaName || '').includes(q)) {
           entityHit.add(e.deviceName || '(bez urządzenia)');
         }
       }
     }
-    const groups = new Map<string, { count: number; domains: Set<string> }>();
+    const groups = new Map<string, { count: number; area?: string; domains: Set<string> }>();
     for (const e of app.haCatalog) {
       if (!matchesDomain(e)) continue;
       const key = e.deviceName || '(bez urządzenia)';
       if (q && !haNorm(key).includes(q) && !entityHit.has(key)) continue;
-      const g = groups.get(key) || { count: 0, domains: new Set<string>() };
+      const g = groups.get(key) || { count: 0, area: e.areaName, domains: new Set<string>() };
       g.count++;
+      if (e.areaName) g.area = e.areaName;
       g.domains.add(e.domain);
       groups.set(key, g);
     }
@@ -738,7 +854,7 @@ export function renderHaPickerList(app: AppUI): string {
           <span style="font-size:14px; flex-shrink:0">📦</span>
           <span style="display:flex; flex-direction:column; min-width:0; flex:1">
             <span style="font-size:11.5px; color:var(--fc-text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(name)}</span>
-            <span style="font-size:10px; color:var(--fc-text-muted)">${g.count} ${g.count === 1 ? 'encja' : 'encji'}</span>
+            <span style="font-size:10px; color:var(--fc-text-muted)">${g.area ? `🏷️ ${esc(g.area)} · ` : ''}${g.count} ${g.count === 1 ? 'encja' : 'encji'}</span>
           </span>
           <span style="display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end">${badges}</span>
         </button>
@@ -746,13 +862,13 @@ export function renderHaPickerList(app: AppUI): string {
     }).join('');
   }
 
-  // Płaski widok encji (szuka też po nazwie urządzenia)
+  // 5. Płaski widok encji (szuka po encji, urządzeniu i pokoju)
   const matches = app.haCatalog.filter((e) => matchesDomain(e))
-    .filter((e) => !q || haNorm(e.entity_id).includes(q) || haNorm(e.name).includes(q) || haNorm(e.deviceName || '').includes(q));
+    .filter((e) => !q || haNorm(e.entity_id).includes(q) || haNorm(e.name).includes(q) || haNorm(e.deviceName || '').includes(q) || haNorm(e.areaName || '').includes(q));
   if (matches.length === 0) {
     return `<div style="padding:14px; font-size:11.5px; color:var(--fc-text-muted); text-align:center">Brak encji pasujących do zapytania.</div>`;
   }
-  const shown = matches.slice(0, 120);
+  const shown = matches.slice(0, 150);
   const more = matches.length > shown.length
     ? `<div style="padding:8px 10px; font-size:10.5px; color:var(--fc-text-muted); text-align:center">…i ${matches.length - shown.length} więcej — wpisz, żeby zawęzić</div>`
     : '';

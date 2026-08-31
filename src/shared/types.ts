@@ -3,6 +3,80 @@ export type DeskState = 'desk' | 'away';
 export type DeviceState = 'desk' | 'headset';
 export type DetectedPerson = 'me' | 'pet' | 'unknown';
 
+export type VoiceActionType =
+  | 'switch_desk'
+  | 'switch_headset'
+  | 'switch_auto'
+  | 'toggle_mute'
+  | 'mute'
+  | 'unmute'
+  | 'sleep_display'
+  | 'screensaver'
+  | 'snooze'
+  | 'run_app'
+  | 'kill_process'
+  | 'shell_cmd'
+  | 'open_url'
+  | 'ha_service';
+
+export interface VoiceRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  phrase: string;
+  actionType: VoiceActionType;
+  actionPayload?: string;
+}
+
+export type VoiceEngineType = 'whisper' | 'vosk';
+export type VoiceWhisperModel = 'whisper-base' | 'whisper-tiny' | 'whisper-small' | 'whisper-large-turbo';
+export type VoiceWhisperBackend = 'auto' | 'cuda12' | 'cuda11' | 'cpu_blas' | 'cpu' | 'hip';
+export type VoiceModelType = 'pl-small' | 'en-small' | 'whisper-base' | 'whisper-tiny' | 'whisper-small' | 'whisper-large-turbo' | 'custom';
+
+export interface VoiceStatus {
+  enabled: boolean;
+  running: boolean;
+  state: 'idle' | 'listening' | 'recognizing' | 'error' | 'downloading' | 'loading';
+  engine: VoiceEngineType;
+  backend?: VoiceWhisperBackend;
+  detectedGpu?: string;
+  /** Wykryty producent GPU (steruje wyborem backendu przy 'auto') */
+  gpuVendor?: 'nvidia' | 'amd' | 'intel' | 'other';
+  /** Wykryte karty graficzne (nazwy z Win32_VideoController) — do wyboru w UI */
+  gpus?: string[];
+  modelReady: boolean;
+  modelType: VoiceModelType;
+  modelPath?: string;
+  downloadProgress?: {
+    percent: number;
+    transferred: number;
+    total: number;
+    speed?: string;
+    modelName?: string;
+  };
+  lastPhrase?: string;
+  lastAction?: string;
+  lastTime?: number;
+  /** Czy model Whisper jest aktualnie w pamięci (false = zwolniony po bezczynności) */
+  modelLoaded?: boolean;
+  installedModels?: {
+    whisper: Record<string, boolean>;
+    vosk: Record<string, boolean>;
+  };
+  installedBackends?: Record<string, boolean>;
+  audioLevel?: {
+    rms: number;
+    db: number;
+    level: number;
+    device: string;
+    vad?: {
+      speech: boolean;
+      prob: number;
+    };
+  };
+  error?: string;
+}
+
 export interface AppConfig {
   port: string;
   baudRate: number;
@@ -140,6 +214,30 @@ export interface AppConfig {
   sensorLedAwayColor: string;
   /** Kolor diody przy wyciszonym mikrofonie (HEX, np. #ef4444) */
   sensorLedMuteColor: string;
+  /** Moduł rozpoznawania komend głosowych */
+  voiceEnabled: boolean;
+  /** Wybrany silnik rozpoznawania mowy: whisper (OpenAI Transformer) lub vosk (lekki streaming) */
+  voiceEngine: VoiceEngineType;
+  /** Wybrany wariant modelu Whisper */
+  voiceWhisperModel: VoiceWhisperModel;
+  /** Wybrany backend akceleracji Whisper (GPU CUDA, CPU OpenBLAS, Auto) */
+  voiceWhisperBackend: VoiceWhisperBackend;
+  /** Wybrany model mowy Vosk */
+  voiceModel: VoiceModelType;
+  /** Ścieżka do własnego folderu z modelem Vosk */
+  voiceCustomModelPath: string;
+  /** Słowo wywołania (wake word) — domyślnie 'desksense' */
+  voiceWakeWord: string;
+  /** Czy wymagane jest słowo wywołania przed komendą */
+  voiceRequireWakeWord: boolean;
+  /** Czy komendy mają być aktywne wyłącznie przy wykryciu użytkownika przy biurku (radar DESK) */
+  voiceOnlyAtDesk: boolean;
+  /** Sygnalizacja dźwiękowa (chime) przy wybudzeniu i wykonaniu akcji */
+  voiceChimeFeedback: boolean;
+  /** Po ilu minutach bezczynności zwolnić model Whisper z pamięci (0 = nigdy) */
+  voiceIdleUnloadMin: number;
+  /** Lista zdefiniowanych reguł komend użytkownika */
+  voiceRules: VoiceRule[];
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -219,7 +317,26 @@ export const DEFAULT_CONFIG: AppConfig = {
   sensorLedBrightness: 25,
   sensorLedDeskColor: '#22c55e',
   sensorLedAwayColor: '#f59e0b',
-  sensorLedMuteColor: '#ef4444'
+  sensorLedMuteColor: '#ef4444',
+  voiceEnabled: false,
+  voiceEngine: 'whisper',
+  voiceWhisperModel: 'whisper-base',
+  voiceWhisperBackend: 'auto',
+  voiceModel: 'pl-small',
+  voiceCustomModelPath: '',
+  voiceWakeWord: 'ok',
+  voiceRequireWakeWord: true,
+  voiceOnlyAtDesk: true,
+  voiceChimeFeedback: true,
+  voiceIdleUnloadMin: 2,
+  voiceRules: [
+    { id: 'rule_1', name: 'Przełącz na słuchawki', enabled: true, phrase: 'przełącz na słuchawki', actionType: 'switch_headset' },
+    { id: 'rule_2', name: 'Przełącz na biurko', enabled: true, phrase: 'przełącz na biurko', actionType: 'switch_desk' },
+    { id: 'rule_3', name: 'Tryb automatyczny', enabled: true, phrase: 'włącz tryb automatyczny', actionType: 'switch_auto' },
+    { id: 'rule_4', name: 'Wycisz mikrofon', enabled: true, phrase: 'wycisz mikrofon', actionType: 'mute' },
+    { id: 'rule_5', name: 'Odcisz mikrofon', enabled: true, phrase: 'odcisz mikrofon', actionType: 'unmute' },
+    { id: 'rule_6', name: 'Zgaś ekrany', enabled: true, phrase: 'zgaś ekrany', actionType: 'sleep_display' }
+  ]
 };
 
 export interface DiscordStatus {
@@ -357,6 +474,7 @@ export interface Snapshot {
   };
   ha?: HomeAssistantStatus;
   discord?: DiscordStatus;
+  voice?: VoiceStatus;
   telemetry: RadarTelemetry;
   config: AppConfig;
   /** Unix ms do kiedy trwa pauza automatyki (snooze); 0 = brak pauzy */
@@ -402,6 +520,8 @@ export interface PushEvent {
   device?: string | null;
   updateInfo?: UpdateInfo;
   status?: UpdaterStatus;
+  /** Stan modułu mowy (event voice:status) */
+  voiceStatus?: VoiceStatus;
   /** Aktualna lista urządzeń nagrywających (event devices:changed) */
   devices?: AudioDeviceItem[];
   /** Nazwy urządzeń, które się właśnie pojawiły */
@@ -499,17 +619,17 @@ export interface Api {
     ok: boolean;
     message?: string;
     error?: string;
-    binarySensors: { entity_id: string; name: string; state: string; deviceName?: string }[];
-    sensors: { entity_id: string; name: string; state: string; unit?: string; deviceName?: string }[];
-    /** Encje akcji (button/automation/script/scene/input_boolean/switch) do pickera automatyzacji i przycisków */
-    actions?: { entity_id: string; name: string; domain: string; deviceName?: string }[];
+    binarySensors: { entity_id: string; name: string; state: string; deviceName?: string; areaName?: string }[];
+    sensors: { entity_id: string; name: string; state: string; unit?: string; deviceName?: string; areaName?: string }[];
+    /** Encje akcji (light/switch/button/automation/script/scene/media_player/...) do pickera */
+    actions?: { entity_id: string; name: string; domain: string; deviceName?: string; areaName?: string }[];
     recommended?: { presence?: string; distance?: string; heartRate?: string; breathRate?: string };
   }>;
   /**
-   * Wywołanie usługi na encji HAOS dla domeny (automation/script/button/scene/
-   * input_boolean/switch) — używane przez przyciski "Testuj" w panelu HAOS.
+   * Wywołanie usługi na encji HAOS dla domeny (light/switch/automation/script/button/scene/
+   * media_player/cover/climate/...) — używane przez przyciski "Testuj" w panelu HAOS i komendy.
    */
-  haCallService: (entityId: string) => Promise<{ ok: boolean; message?: string; error?: string }>;
+  haCallService: (target: string | Record<string, unknown>) => Promise<{ ok: boolean; message?: string; error?: string }>;
 
   // SignalRGB Integration
   signalrgbTestAway: () => Promise<SignalRGBTestResult>;
@@ -541,6 +661,17 @@ export interface Api {
   diagStatus: () => Promise<{ active: boolean; startedAt: number }>;
   diagStop: () => Promise<DiagSessionReport | null>;
   openTextInNotepad: (text: string) => Promise<boolean>;
+
+  // Voice Control API
+  voiceGetStatus: () => Promise<VoiceStatus | null>;
+  voiceStartDownload: (engine?: VoiceEngineType, modelType?: VoiceModelType, backend?: VoiceWhisperBackend) => Promise<{ ok: boolean; message?: string }>;
+  voiceCancelDownload: () => Promise<boolean>;
+  voiceTestAction: (rule: VoiceRule) => Promise<{ ok: boolean; message?: string }>;
+  voiceStartLiveTest: () => Promise<boolean>;
+  voiceStopLiveTest: () => Promise<boolean>;
+  voicePickCustomModel: () => Promise<string | null>;
+  voicePickAppPath: () => Promise<string | null>;
+  voiceDeleteAsset: (kind: 'model' | 'backend' | 'qwen', key: string) => Promise<{ ok: boolean; message?: string }>;
 
   onEvent: (cb: (e: PushEvent) => void) => () => void;
 }

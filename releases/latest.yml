@@ -1,8 +1,8 @@
 version: 0.3.5
 files:
   - url: DeskSense-Setup-0.3.5.exe
-    sha512: y+KPrHTih+WbNDsSAHa2XIzRrTk+doVO9iCpY/rYoebWrRO0Pk9Czt3r5pEmNhFu12lhMD0s0+NbWMp2abSEtQ==
-    size: 121448448
+    sha512: dpmjePSseHId2H4lSS6yiMPky8kGXNqS20HhKF9kSVx/xosD3pJQdEWwFjiuy/H9HI/ojFEDdBkH22yiJ+9BZA==
+    size: 121489997
 path: DeskSense-Setup-0.3.5.exe
-sha512: y+KPrHTih+WbNDsSAHa2XIzRrTk+doVO9iCpY/rYoebWrRO0Pk9Czt3r5pEmNhFu12lhMD0s0+NbWMp2abSEtQ==
-releaseDate: '2026-08-31T10:19:21.714Z'
+sha512: dpmjePSseHId2H4lSS6yiMPky8kGXNqS20HhKF9kSVx/xosD3pJQdEWwFjiuy/H9HI/ojFEDdBkH22yiJ+9BZA==
+releaseDate: '2026-08-31T17:40:01.968Z'

@@ -1252,8 +1252,64 @@ export default class RadarListener extends EventEmitter {
   }
 
   private currentLedState: 'desk' | 'away' | 'headset' | 'mute' | 'off' = 'away';
+  private ledAnimTimer: NodeJS.Timeout | null = null;
+
+  startVoiceListeningAnimation(): void {
+    this.stopLedAnimation();
+    if (!this.port || !this.port.isOpen) return;
+    if (this.config.get('sensorLedEnabled') === false) return;
+
+    const baseBri = Math.max(15, Math.min(100, Number(this.config.get('sensorLedBrightness')) ?? 25));
+    let step = 0;
+
+    // Płynna, pulsująca animacja fali błękitno-cyjanowej (Siri / DeskSense voice glow)
+    this.ledAnimTimer = setInterval(() => {
+      if (!this.port || !this.port.isOpen) {
+        this.stopLedAnimation();
+        return;
+      }
+      // Sinusoidalna modulacja jasności i nasycenia koloru
+      const phase = (Math.sin(step * 0.22) + 1) / 2; // 0..1
+      const currentBri = Math.round(baseBri * (0.2 + 0.8 * phase));
+      const g = Math.round(150 + 95 * phase); // Błękit -> Cyjan [0, 150..245, 255]
+      this.sendDeviceCommand(`SET:LED=0,${g},255,${currentBri}`);
+      step++;
+    }, 55);
+  }
+
+  stopVoiceListeningAnimation(success?: boolean): void {
+    this.stopLedAnimation();
+    if (!this.port || !this.port.isOpen) return;
+    if (this.config.get('sensorLedEnabled') === false) return;
+
+    const baseBri = Math.max(15, Math.min(100, Number(this.config.get('sensorLedBrightness')) ?? 25));
+
+    if (success) {
+      // Podwójny szybki błysk potwierdzający wykonanie akcji (neon green)
+      this.sendDeviceCommand(`SET:LED=34,197,94,${Math.min(100, baseBri + 25)}`);
+      setTimeout(() => {
+        this.sendDeviceCommand('SET:LED=0,0,0,0');
+        setTimeout(() => {
+          this.sendDeviceCommand(`SET:LED=34,197,94,${Math.min(100, baseBri + 25)}`);
+          setTimeout(() => {
+            this.updateLed();
+          }, 140);
+        }, 90);
+      }, 140);
+    } else {
+      this.updateLed();
+    }
+  }
+
+  private stopLedAnimation(): void {
+    if (this.ledAnimTimer) {
+      clearInterval(this.ledAnimTimer);
+      this.ledAnimTimer = null;
+    }
+  }
 
   updateLed(state?: 'desk' | 'away' | 'headset' | 'mute' | 'off'): void {
+    this.stopLedAnimation();
     if (state) {
       this.currentLedState = state;
     }

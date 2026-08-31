@@ -29,10 +29,11 @@ interface HAWSMessage {
   result?: HAEntityState[];
 }
 
-/** Wiersz rejestru encji (config/entity_registry/list) — interesuje nas tylko powiązanie z urządzeniem. */
+/** Wiersz rejestru encji (config/entity_registry/list) */
 interface HAEntityRegistryEntry {
   entity_id: string;
   device_id?: string;
+  area_id?: string;
 }
 
 /** Wiersz rejestru urządzeń (config/device_registry/list). */
@@ -40,6 +41,13 @@ interface HADeviceRegistryEntry {
   id: string;
   name?: string;
   name_by_user?: string;
+  area_id?: string;
+}
+
+/** Wiersz rejestru obszarów/pokoi (config/area_registry/list). */
+interface HAAreaRegistryEntry {
+  area_id: string;
+  name: string;
 }
 
 export default class HomeAssistantIntegration extends EventEmitter {
@@ -82,44 +90,156 @@ export default class HomeAssistantIntegration extends EventEmitter {
     switch (domain) {
       case 'automation': return { service: 'trigger' };
       case 'script': return { service: 'turn_on' };
-      case 'button': return { service: 'press' };
+      case 'button':
+      case 'input_button': return { service: 'press' };
       case 'scene': return { service: 'turn_on' };
       case 'input_boolean': return { service: 'toggle' };
       case 'switch': return { service: 'toggle' };
+      case 'light': return { service: 'toggle' };
+      case 'media_player': return { service: 'media_play_pause' };
+      case 'cover': return { service: 'toggle' };
+      case 'climate': return { service: 'set_temperature' };
+      case 'fan': return { service: 'toggle' };
+      case 'lock': return { service: 'toggle' };
+      case 'vacuum': return { service: 'start' };
       default: return null;
     }
   }
 
   /**
-   * Wywołanie usługi na encji HAOS (REST). Używane do odpalania automatyzacji
-   * przy przejściach AWAY/DESK oraz przez przyciski "Testuj" w panelu HAOS.
+   * Wywołanie usługi na encji HAOS (REST). Obsługuje zarówno proste entity_id (np. "light.biurko"),
+   * jak i obiekty/stringi JSON z parametrami (service, brightness, color, rgb_color itp.).
    */
-  async callService(entityId: string): Promise<{ ok: boolean; message?: string; error?: string }> {
+  async callService(
+    target: string | Record<string, unknown>,
+    serviceOverride?: string,
+    serviceDataOverride?: Record<string, unknown>
+  ): Promise<{ ok: boolean; message?: string; error?: string }> {
     const url = this.normalizeHttpUrl();
     const token = (this.config.get('haToken') || '').trim();
-    const trimmed = String(entityId || '').trim();
 
-    if (!trimmed) {
-      return { ok: false, error: 'Nie podano encji do wywołania' };
-    }
     if (!token) {
       return { ok: false, error: 'Brak tokena dostępu (Long-Lived Access Token)' };
     }
 
-    const domain = trimmed.split('.')[0];
-    const svc = this.serviceForDomain(domain);
-    if (!svc) {
-      return { ok: false, error: `Nieobsługiwana domena "${domain}" (użyj automation/script/button/scene/input_boolean/switch)` };
+    let entityId = '';
+    let domain = '';
+    let service = (serviceOverride || '').trim();
+    let serviceData: Record<string, unknown> = { ...(serviceDataOverride || {}) };
+
+    if (typeof target === 'string') {
+      const trimmed = target.trim();
+      if (!trimmed) {
+        return { ok: false, error: 'Nie podano encji do wywołania' };
+      }
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        try {
+          const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+          entityId = String(parsed.entity_id || '').trim();
+          if (parsed.service) service = String(parsed.service).trim();
+          if (parsed.domain) domain = String(parsed.domain).trim();
+          if (parsed.data && typeof parsed.data === 'object') {
+            serviceData = { ...serviceData, ...(parsed.data as Record<string, unknown>) };
+          }
+          if (parsed.brightness !== undefined && serviceData.brightness_pct === undefined && serviceData.brightness === undefined) {
+            serviceData.brightness_pct = Number(parsed.brightness);
+          }
+          if (parsed.color !== undefined) {
+            if (typeof parsed.color === 'string' && parsed.color.startsWith('#')) {
+              const hex = parsed.color.replace('#', '');
+              if (hex.length === 6) {
+                serviceData.rgb_color = [
+                  parseInt(hex.substring(0, 2), 16),
+                  parseInt(hex.substring(2, 4), 16),
+                  parseInt(hex.substring(4, 6), 16)
+                ];
+              }
+            } else if (Array.isArray(parsed.color)) {
+              serviceData.rgb_color = parsed.color;
+            }
+          }
+          if (parsed.rgb_color !== undefined) {
+            serviceData.rgb_color = parsed.rgb_color;
+          }
+          if (parsed.temperature !== undefined) {
+            serviceData.temperature = Number(parsed.temperature);
+          }
+        } catch {
+          entityId = trimmed;
+        }
+      } else {
+        entityId = trimmed;
+      }
+    } else if (typeof target === 'object' && target !== null) {
+      entityId = String(target.entity_id || '').trim();
+      if (target.service) service = String(target.service).trim();
+      if (target.domain) domain = String(target.domain).trim();
+      if (target.data && typeof target.data === 'object') {
+        serviceData = { ...serviceData, ...(target.data as Record<string, unknown>) };
+      }
+      if (target.brightness !== undefined && serviceData.brightness_pct === undefined) {
+        serviceData.brightness_pct = Number(target.brightness);
+      }
+      if (target.color !== undefined) {
+        if (typeof target.color === 'string' && target.color.startsWith('#')) {
+          const hex = target.color.replace('#', '');
+          if (hex.length === 6) {
+            serviceData.rgb_color = [
+              parseInt(hex.substring(0, 2), 16),
+              parseInt(hex.substring(2, 4), 16),
+              parseInt(hex.substring(4, 6), 16)
+            ];
+          }
+        } else if (Array.isArray(target.color)) {
+          serviceData.rgb_color = target.color;
+        }
+      }
+      if (target.rgb_color !== undefined) {
+        serviceData.rgb_color = target.rgb_color;
+      }
+      if (target.temperature !== undefined) {
+        serviceData.temperature = Number(target.temperature);
+      }
+    }
+
+    if (!entityId && !service) {
+      return { ok: false, error: 'Nie podano encji ani usługi Home Assistant' };
+    }
+
+    if (!domain && entityId.includes('.')) {
+      domain = entityId.split('.')[0];
+    }
+    if (service.includes('.')) {
+      const parts = service.split('.');
+      domain = parts[0];
+      service = parts[1];
+    }
+
+    if (!domain) {
+      return { ok: false, error: 'Nie określono domeny encji Home Assistant' };
+    }
+
+    if (!service) {
+      const defaultSvc = this.serviceForDomain(domain);
+      if (!defaultSvc) {
+        return { ok: false, error: `Nieobsługiwana domena "${domain}"` };
+      }
+      service = defaultSvc.service;
+    }
+
+    const payloadBody: Record<string, unknown> = { ...serviceData };
+    if (entityId) {
+      payloadBody.entity_id = entityId;
     }
 
     try {
-      const res = await fetch(`${url}/api/services/${domain}/${svc.service}`, {
+      const res = await fetch(`${url}/api/services/${domain}/${service}`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ entity_id: trimmed }),
+        body: JSON.stringify(payloadBody),
         signal: AbortSignal.timeout(5000)
       });
 
@@ -127,14 +247,14 @@ export default class HomeAssistantIntegration extends EventEmitter {
         return { ok: false, error: 'Niepoprawny token dostępu (Błąd 401 Unauthorized)' };
       }
       if (res.status === 404) {
-        return { ok: false, error: `Nie znaleziono encji ${trimmed} (Błąd 404)` };
+        return { ok: false, error: `Nie znaleziono usługi ${domain}/${service} lub encji ${entityId || 'ogólnej'} (Błąd 404)` };
       }
       if (!res.ok) {
         return { ok: false, error: `Home Assistant zwrócił status HTTP ${res.status}` };
       }
 
-      appendLog('HAOS', `Wywołano usługę ${domain}/${svc.service} na [${trimmed}]`);
-      return { ok: true, message: `Wywołano: ${trimmed} (${domain}/${svc.service})` };
+      appendLog('HAOS', `Wywołano usługę ${domain}/${service} na [${entityId || 'ogólne'}]`);
+      return { ok: true, message: `Wywołano: ${entityId || domain} (${domain}/${service})` };
     } catch (err) {
       const msg = (err as Error).message || 'Błąd sieci';
       return { ok: false, error: `Błąd wywołania usługi na ${url}: ${msg}` };
@@ -222,15 +342,14 @@ export default class HomeAssistantIntegration extends EventEmitter {
   }
 
   /**
-   * Jednorazowe pobranie rejestrów encji/urządzeń przez WebSocket (REST ich
-   * nie wystawia). Zwraca mapę entity_id -> nazwa urządzenia; null = rejestry
-   * niedostępne (brak uprawnień / błąd) — UI wtedy pokazuje encje bez grupowania.
+   * Jednorazowe pobranie rejestrów encji, urządzeń i obszarów/pokoi przez WebSocket (REST ich
+   * nie wystawia). Zwraca mapę entity_id -> { deviceName, areaName }.
    */
-  private fetchDeviceNameMap(httpUrl: string, token: string): Promise<Map<string, string> | null> {
+  private fetchMetadataMap(httpUrl: string, token: string): Promise<Map<string, { deviceName?: string; areaName?: string }> | null> {
     return new Promise((resolve) => {
       let settled = false;
       let ws: WebSocket | null = null;
-      const finish = (value: Map<string, string> | null): void => {
+      const finish = (value: Map<string, { deviceName?: string; areaName?: string }> | null): void => {
         if (settled) return;
         settled = true;
         try { ws?.close(); } catch { /* ignore */ }
@@ -248,8 +367,9 @@ export default class HomeAssistantIntegration extends EventEmitter {
         return;
       }
 
-      const entityToDevice = new Map<string, string>();
-      const deviceNames = new Map<string, string>();
+      const entityRegistry = new Map<string, { device_id?: string; area_id?: string }>();
+      const deviceRegistry = new Map<string, { name: string; area_id?: string }>();
+      const areaRegistry = new Map<string, string>(); // area_id -> name
       let pending = 0;
       const send = (payload: Record<string, unknown>): void => {
         try { (ws as WebSocket).send(JSON.stringify(payload)); } catch { /* ignore */ }
@@ -270,26 +390,43 @@ export default class HomeAssistantIntegration extends EventEmitter {
           if (msg.type === 'auth_ok') {
             send({ id: 1, type: 'config/entity_registry/list' });
             send({ id: 2, type: 'config/device_registry/list' });
-            pending = 2;
+            send({ id: 3, type: 'config/area_registry/list' });
+            pending = 3;
             return;
           }
           if (msg.type === 'result' && Array.isArray(msg.result)) {
             if (msg.id === 1) {
               for (const e of msg.result as HAEntityRegistryEntry[]) {
-                if (e.entity_id && e.device_id) entityToDevice.set(e.entity_id, e.device_id);
+                if (e.entity_id) {
+                  entityRegistry.set(e.entity_id, { device_id: e.device_id, area_id: e.area_id });
+                }
               }
             } else if (msg.id === 2) {
               for (const d of msg.result as HADeviceRegistryEntry[]) {
-                if (d.id) deviceNames.set(d.id, d.name_by_user || d.name || d.id);
+                if (d.id) {
+                  deviceRegistry.set(d.id, {
+                    name: d.name_by_user || d.name || d.id,
+                    area_id: d.area_id
+                  });
+                }
+              }
+            } else if (msg.id === 3) {
+              for (const a of msg.result as HAAreaRegistryEntry[]) {
+                if (a.area_id && a.name) {
+                  areaRegistry.set(a.area_id, a.name);
+                }
               }
             }
             pending--;
             if (pending <= 0) {
               clearTimeout(timer);
-              const map = new Map<string, string>();
-              for (const [entityId, deviceId] of entityToDevice) {
-                const deviceName = deviceNames.get(deviceId);
-                if (deviceName) map.set(entityId, deviceName);
+              const map = new Map<string, { deviceName?: string; areaName?: string }>();
+              for (const [entityId, ent] of entityRegistry) {
+                const dev = ent.device_id ? deviceRegistry.get(ent.device_id) : undefined;
+                const deviceName = dev?.name;
+                const areaId = ent.area_id || dev?.area_id;
+                const areaName = areaId ? areaRegistry.get(areaId) : undefined;
+                map.set(entityId, { deviceName, areaName });
               }
               finish(map);
             }
@@ -313,9 +450,9 @@ export default class HomeAssistantIntegration extends EventEmitter {
     ok: boolean;
     message?: string;
     error?: string;
-    binarySensors: { entity_id: string; name: string; state: string; deviceName?: string }[];
-    sensors: { entity_id: string; name: string; state: string; unit?: string; deviceName?: string }[];
-    actions: { entity_id: string; name: string; domain: string; deviceName?: string }[];
+    binarySensors: { entity_id: string; name: string; state: string; deviceName?: string; areaName?: string }[];
+    sensors: { entity_id: string; name: string; state: string; unit?: string; deviceName?: string; areaName?: string }[];
+    actions: { entity_id: string; name: string; domain: string; deviceName?: string; areaName?: string }[];
     recommended?: {
       presence?: string;
       distance?: string;
@@ -357,15 +494,32 @@ export default class HomeAssistantIntegration extends EventEmitter {
 
       const states = (await res.json()) as HAEntityState[];
 
-      // Rejestry (device/entity) pobierane osobno przez WebSocket — gdy się nie
-      // uda (uprawnienia/timeout), encje wracają bez nazw urządzeń.
-      const deviceNames = await this.fetchDeviceNameMap(url, token).catch(() => null);
-      const deviceOf = (entityId: string): string | undefined => deviceNames?.get(entityId);
+      // Rejestry (device/entity/area) pobierane osobno przez WebSocket — gdy się nie
+      // uda (uprawnienia/timeout), encje wracają bez nazw urządzeń i pokoi.
+      const metadata = await this.fetchMetadataMap(url, token).catch(() => null);
+      const deviceOf = (entityId: string): string | undefined => metadata?.get(entityId)?.deviceName;
+      const areaOf = (entityId: string): string | undefined => metadata?.get(entityId)?.areaName;
 
-      const binarySensors: { entity_id: string; name: string; state: string; deviceName?: string }[] = [];
-      const sensors: { entity_id: string; name: string; state: string; unit?: string; deviceName?: string }[] = [];
-      const actions: { entity_id: string; name: string; domain: string; deviceName?: string }[] = [];
-      const ACTION_DOMAINS = new Set(['button', 'automation', 'script', 'scene', 'input_boolean', 'switch']);
+      const binarySensors: { entity_id: string; name: string; state: string; deviceName?: string; areaName?: string }[] = [];
+      const sensors: { entity_id: string; name: string; state: string; unit?: string; deviceName?: string; areaName?: string }[] = [];
+      const actions: { entity_id: string; name: string; domain: string; deviceName?: string; areaName?: string }[] = [];
+      const ACTION_DOMAINS = new Set([
+        'light',
+        'switch',
+        'scene',
+        'script',
+        'automation',
+        'button',
+        'input_button',
+        'input_boolean',
+        'media_player',
+        'cover',
+        'climate',
+        'fan',
+        'lock',
+        'vacuum',
+        'select'
+      ]);
 
       for (const s of states) {
         const friendlyName = (s.attributes?.friendly_name as string) || s.entity_id;
@@ -374,7 +528,8 @@ export default class HomeAssistantIntegration extends EventEmitter {
             entity_id: s.entity_id,
             name: friendlyName,
             state: s.state,
-            deviceName: deviceOf(s.entity_id)
+            deviceName: deviceOf(s.entity_id),
+            areaName: areaOf(s.entity_id)
           });
         } else if (s.entity_id.startsWith('sensor.')) {
           sensors.push({
@@ -382,14 +537,16 @@ export default class HomeAssistantIntegration extends EventEmitter {
             name: friendlyName,
             state: s.state,
             unit: s.attributes?.unit_of_measurement as string | undefined,
-            deviceName: deviceOf(s.entity_id)
+            deviceName: deviceOf(s.entity_id),
+            areaName: areaOf(s.entity_id)
           });
         } else if (ACTION_DOMAINS.has(s.entity_id.split('.')[0])) {
           actions.push({
             entity_id: s.entity_id,
             name: friendlyName,
             domain: s.entity_id.split('.')[0],
-            deviceName: deviceOf(s.entity_id)
+            deviceName: deviceOf(s.entity_id),
+            areaName: areaOf(s.entity_id)
           });
         }
       }

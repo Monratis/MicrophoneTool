@@ -7,7 +7,8 @@ import { renderSettingsTab } from './settingsPanels';
 import { renderHaPickerModal, refreshDiscordRpcStatus } from './integrationsPanels';
 import { renderLogsTab, renderAboutTab, refreshLogConsoleDOM } from './logsAbout';
 import { closeVadModal, renderDiagModal, renderDiagSessionModal, renderVadModal } from './modals';
-import { bindEvents } from './events';
+import { renderVoiceCalibratorModal, renderVoiceDownloadSection, renderVoiceLiveStatus, isSelectedVoiceModelReady } from './voicePanel';
+import { bindEvents, bindVoiceDynamic } from './events';
 
 
 export class AppUI {
@@ -28,6 +29,11 @@ export class AppUI {
   toastCounter = 0;
   saveState = { text: 'Wszystkie ustawienia zapisane ✓', kind: 'saved' };
 
+  // Voice Control State
+  voiceDownloadProgress: { percent: number; speed?: string } | null = null;
+  voiceCalibratorOpen = false;
+  voiceLastRecognized = '';
+
   // Live Audio VU-Meter Engine
   vuEngine = new LiveAudioEngine();
   osdTimer: any = null;
@@ -43,7 +49,7 @@ export class AppUI {
   selectedChimeStyle: ChimeStyle = 'harmonic';
 
   // QoL: Log Filtering & Search
-  logFilter: 'all' | 'radar' | 'haos' | 'audio' | 'discord' | 'error' = 'all';
+  logFilter: 'all' | 'radar' | 'voice' | 'haos' | 'audio' | 'discord' | 'error' = 'all';
   logSearch = '';
 
   // QoL: Discord Auto-Threshold Calibration Assistant
@@ -63,13 +69,15 @@ export class AppUI {
   haTestResult: { ok: boolean; message?: string; version?: string; error?: string } | null = null;
   haFetchingEntities = false;
   // Katalog encji HAOS (po "Wykryj & Pobierz encje") + stan otwartego pickera
-  haCatalog: { entity_id: string; name: string; domain: string; deviceName?: string; state?: string; unit?: string }[] = [];
-  /** Otwarty picker encji: klucz pola configu, tytuł modalu i dozwolone domeny */
-  haPicker: { key: string; title: string; domains: string[] } | null = null;
+  haCatalog: { entity_id: string; name: string; domain: string; deviceName?: string; areaName?: string; state?: string; unit?: string }[] = [];
+  /** Otwarty picker encji: klucz pola configu lub indeks reguły głosowej, tytuł modalu i dozwolone domeny */
+  haPicker: { key?: string; ruleIndex?: number; title: string; domains: string[] } | null = null;
   haPickerSearch = '';
   haPickerDomain = '';
-  /** Widok wyszukiwarki: płaska lista encji albo nawigacja po urządzeniach */
-  haPickerMode: 'entities' | 'devices' = 'devices';
+  /** Widok wyszukiwarki: pokoje/obszary, urządzenia lub płaska lista encji */
+  haPickerMode: 'areas' | 'devices' | 'entities' = 'areas';
+  /** Pokój / obszar, do którego weszliśmy w widoku "Pokoje" ('' = poziom listy) */
+  haPickerArea = '';
   /** Urządzenie, do którego weszliśmy w widoku "Urządzenia" ('' = poziom listy) */
   haPickerDevice = '';
   /** Trwa auto-pobieranie katalogu encji po otwarciu pickera */
@@ -390,6 +398,134 @@ export class AppUI {
       }
     }
 
+
+    if (e.type === 'voice:status' && e.voiceStatus) {
+      if (this.snap) {
+        this.snap.voice = e.voiceStatus as any;
+      }
+      // Koniec pobierania — wyczyść lokalny progres, inaczej pasek zostaje na 100%
+      if ((e.voiceStatus as any).state !== 'downloading' && this.voiceDownloadProgress) {
+        this.voiceDownloadProgress = null;
+      }
+      const readyBadge = document.getElementById('badge-whisper-model-ready');
+      if (readyBadge) {
+        const isReady = isSelectedVoiceModelReady(this);
+        readyBadge.className = `fc-badge ${isReady ? 'calibrated' : 'warning'}`;
+        readyBadge.textContent = isReady ? 'Zainstalowany ✓' : 'Wymaga pobrania';
+      }
+      const voskBadge = document.getElementById('badge-vosk-model-ready');
+      if (voskBadge) {
+        const isReady = isSelectedVoiceModelReady(this);
+        voskBadge.className = `fc-badge ${isReady ? 'calibrated' : 'warning'}`;
+        voskBadge.textContent = isReady ? 'Zainstalowany ✓' : 'Wymaga pobrania';
+      }
+      // Celowany refresh żywego statusu (bez pełnego re-renderu) gdy otwarta karta głosowa
+      if (this.currentTab === 'settings' && this.settingsTab === 'voice') {
+        const statusBlock = document.getElementById('voice-status-block');
+        if (statusBlock) statusBlock.innerHTML = renderVoiceLiveStatus(this);
+        const dlSection = document.getElementById('voice-download-section');
+        if (dlSection) {
+          dlSection.innerHTML = renderVoiceDownloadSection(this);
+          bindVoiceDynamic(this);
+        }
+      }
+      return;
+    }
+
+    if (e.type === 'voice:downloadProgress') {
+      this.voiceDownloadProgress = {
+        percent: typeof e.percent === 'number' ? e.percent : 0,
+        speed: typeof e.speed === 'string' ? e.speed : ''
+      };
+      const fill = document.getElementById('fc-voice-progress-fill');
+      const meta = document.getElementById('fc-voice-progress-meta');
+      if (fill) fill.style.width = `${this.voiceDownloadProgress.percent}%`;
+      if (meta) meta.innerHTML = `<span>Pobieranie i przygotowanie: <strong>${this.voiceDownloadProgress.percent}%</strong></span><span>${esc(this.voiceDownloadProgress.speed)}</span>`;
+      return;
+    }
+
+    if (e.type === 'voice:recognized' && e.text) {
+      this.voiceLastRecognized = String(e.text);
+      const transcriptEl = document.getElementById('voice-calibrator-transcript');
+      const useBtn = document.getElementById('btn-use-recognized-phrase') as HTMLButtonElement | null;
+      if (transcriptEl) {
+        let matchBadge = '';
+        if (e.matchedRule && typeof e.matchedRule === 'object') {
+          const r = e.matchedRule as { name?: string; confidence?: number };
+          if (r.name) {
+            matchBadge = `<div style="margin-top: 6px; font-size: 11.5px; color: #10b981; display: flex; align-items: center; gap: 6px;">
+              <span>🎯</span>
+              <span>Zrozumiano jako: <strong>${esc(r.name)}</strong> (${r.confidence ?? 100}% trafności)</span>
+            </div>`;
+          }
+        }
+        transcriptEl.innerHTML = `<strong style="color: var(--accent); font-size: 15px;">„${esc(e.text)}”</strong>${matchBadge}`;
+      }
+      if (useBtn) {
+        useBtn.disabled = false;
+      }
+      return;
+    }
+
+    if (e.type === 'voice:partial' && e.text) {
+      const transcriptEl = document.getElementById('voice-calibrator-transcript');
+      if (transcriptEl) {
+        transcriptEl.innerHTML = `<em style="color: var(--fc-text-secondary);">${esc(e.text)}…</em>`;
+      }
+      return;
+    }
+
+    if (e.type === 'voice:audioLevel') {
+      const level = typeof e.level === 'number' ? e.level : 0;
+      const db = typeof e.db === 'number' ? e.db : -60;
+      const dev = typeof e.device === 'string' ? e.device : 'Mikrofon';
+
+      const vuFill = document.getElementById('voice-calibrator-vu-fill');
+      const dbBadge = document.getElementById('voice-calibrator-db-badge');
+      const devEl = document.getElementById('voice-calibrator-dev');
+      const vadBadge = document.getElementById('voice-calibrator-vad-badge');
+
+      if (vuFill) vuFill.style.width = `${Math.min(100, Math.max(0, level))}%`;
+      if (dbBadge) dbBadge.textContent = `${db > -59 ? db.toFixed(1) : '-60'} dB`;
+      if (devEl && devEl.textContent !== dev) devEl.textContent = dev;
+
+      if (vadBadge && e.vad && typeof e.vad === 'object') {
+        const v = e.vad as { speech?: boolean; prob?: number };
+        if (v.speech) {
+          vadBadge.textContent = `🎙️ AI VAD: Mowa (${Math.round(v.prob ?? 100)}%)`;
+          vadBadge.style.background = 'rgba(16, 185, 129, 0.2)';
+          vadBadge.style.color = '#10b981';
+        } else {
+          vadBadge.textContent = 'AI VAD: Cisza';
+          vadBadge.style.background = 'rgba(255, 255, 255, 0.06)';
+          vadBadge.style.color = 'var(--fc-text-secondary)';
+        }
+      }
+
+      // Animate waveform bars on live audio level
+      for (let i = 0; i < 9; i++) {
+        const bar = document.getElementById(`vbar-${i}`);
+        if (bar) {
+          const factor = (i === 4 ? 1.0 : (i === 3 || i === 5) ? 0.8 : (i === 2 || i === 6) ? 0.6 : 0.4);
+          const height = Math.max(4, Math.min(32, (level * 0.32) * factor));
+          bar.style.height = `${height}px`;
+        }
+      }
+      return;
+    }
+
+    if (e.type === 'voice:playChime') {
+      const vol = this.form?.audioChimeVolume ?? 0.2;
+      const chimeType = (e as { chimeType?: string }).chimeType || 'action';
+      if (chimeType === 'wake') {
+        playChime('desk', vol * 0.85, 'soft_click');
+      } else if (chimeType === 'miss') {
+        playChime('away', vol * 0.7, 'soft_click');
+      } else {
+        playChime('desk', vol, this.selectedChimeStyle);
+      }
+      return;
+    }
 
     if (e.type === 'log:entry' && (e.entry || e.message)) {
       const line = e.entry || e.message || '';
@@ -758,6 +894,7 @@ export class AppUI {
         ${this.diagModalOpen ? renderDiagModal(this) : ''}
         ${this.diagReportModalOpen ? renderDiagSessionModal(this) : ''}
         ${this.haPicker ? renderHaPickerModal(this) : ''}
+        ${this.voiceCalibratorOpen ? renderVoiceCalibratorModal(this) : ''}
 
         <!-- TOASTS CONTAINER (with A11y role) -->
         <div class="toasts" role="status" aria-live="polite"></div>

@@ -11,6 +11,7 @@ import { esc } from './ui';
 export function applyLogFilter(app: AppUI, logs: string[]): string[] {
     let filtered = logs;
     if (app.logFilter === 'radar') filtered = filtered.filter((l) => l.toLowerCase().includes('radar') || l.toLowerCase().includes('serial') || l.toLowerCase().includes('dsp'));
+    if (app.logFilter === 'voice') filtered = filtered.filter((l) => l.includes('[VOICE') || l.toLowerCase().includes('voice') || l.toLowerCase().includes('vosk') || l.toLowerCase().includes('mow') || l.toLowerCase().includes('komend'));
     if (app.logFilter === 'haos') filtered = filtered.filter((l) => l.includes('[HAOS]'));
     if (app.logFilter === 'audio') filtered = filtered.filter((l) => l.toLowerCase().includes('audio') || l.toLowerCase().includes('mic') || l.toLowerCase().includes('vu'));
     if (app.logFilter === 'discord') filtered = filtered.filter((l) => l.toLowerCase().includes('discord') || l.toLowerCase().includes('vad') || l.toLowerCase().includes('signalrgb'));
@@ -56,6 +57,7 @@ export function renderLogsTab(app: AppUI): string {
               <div class="fc-log-chips">
                 <button class="fc-log-chip ${app.logFilter === 'all' ? 'active' : ''}" data-log-filter="all">Wszystkie</button>
                 <button class="fc-log-chip ${app.logFilter === 'radar' ? 'active' : ''}" data-log-filter="radar">📡 Radar & DSP</button>
+                <button class="fc-log-chip ${app.logFilter === 'voice' ? 'active' : ''}" data-log-filter="voice">🎙️ Mowa & Vosk</button>
                 <button class="fc-log-chip ${app.logFilter === 'haos' ? 'active' : ''}" data-log-filter="haos">🏠 HAOS</button>
                 <button class="fc-log-chip ${app.logFilter === 'audio' ? 'active' : ''}" data-log-filter="audio">🎙️ Audio & VU</button>
                 <button class="fc-log-chip ${app.logFilter === 'discord' ? 'active' : ''}" data-log-filter="discord">🎮 Discord & RGB</button>

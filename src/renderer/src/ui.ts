@@ -112,7 +112,7 @@ function playCustomAudioFile(filePath: string, state: 'desk' | 'headset' | 'away
 
 
 type TabType = 'home' | 'settings' | 'logs' | 'about';
-type SettingsTab = 'port' | 'timeouts' | 'biometrics' | 'discord' | 'signalrgb' | 'chime' | 'haos';
+type SettingsTab = 'port' | 'timeouts' | 'voice' | 'biometrics' | 'discord' | 'signalrgb' | 'chime' | 'haos';
 
 export {
   esc,

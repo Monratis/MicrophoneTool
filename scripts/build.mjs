@@ -26,13 +26,13 @@ function cscPath() {
   return fs.existsSync(csc) ? `"${csc}"` : 'csc';
 }
 
-function compileIfStale(csSource, outExe) {
+function compileIfStale(csSource, outExe, extraFlags = '') {
   if (!fs.existsSync(csSource)) return false;
   if (fs.existsSync(outExe) && fs.statSync(csSource).mtimeMs <= fs.statSync(outExe).mtimeMs) {
     return false;
   }
   console.log(`[build] Compiling ${path.basename(outExe)}...`);
-  execSync(`${cscPath()} /nologo /optimize /out:"${outExe}" "${csSource}"`, { stdio: 'inherit' });
+  execSync(`${cscPath()} /nologo /optimize ${extraFlags} /out:"${outExe}" "${csSource}"`, { stdio: 'inherit' });
   return true;
 }
 
@@ -47,6 +47,12 @@ fs.mkdirSync(binDir, { recursive: true });
 compileIfStale(
   path.join(root, 'src', 'native', 'AudioSwitcher.cs'),
   path.join(binDir, 'AudioSwitcher.exe')
+);
+
+compileIfStale(
+  path.join(root, 'src', 'native', 'VoiceListener.cs'),
+  path.join(binDir, 'VoiceListener.exe'),
+  '/platform:x64'
 );
 
 // --- 2. Icons & Assets -----------------------------------------------------
@@ -87,7 +93,7 @@ for (const procName of [appExeName, `${productName} (Portable).exe`, 'DeskSense.
   } catch (_) {}
 }
 try {
-  execSync(`powershell -NoProfile -Command "Get-Process -Name 'DeskSense*', 'AudioSwitcher*' -ErrorAction SilentlyContinue | Stop-Process -Force"`, { stdio: 'ignore' });
+  execSync(`powershell -NoProfile -Command "Get-Process -Name 'DeskSense*', 'AudioSwitcher*', 'VoiceListener*' -ErrorAction SilentlyContinue | Stop-Process -Force"`, { stdio: 'ignore' });
 } catch (_) {}
 
 if (fs.existsSync(distDir)) {
