@@ -273,6 +273,11 @@ export default class HomeAssistantIntegration extends EventEmitter {
     const res = await this.callService(entityId);
     if (!res.ok) {
       appendLog('HAOS', `Automatyzacja przy ${state === 'desk' ? 'powrocie (DESK)' : 'odejściu (AWAY)'} nieudana: ${res.error}`);
+      if (res.error?.includes('401') || res.error?.includes('token')) {
+        this.emit('authError', {
+          message: `Automatyzacja ${state === 'desk' ? 'DESK' : 'AWAY'} nie powiodła się (Błąd tokena HAOS: 401 Unauthorized). Token jest bezpiecznie zachowany — sprawdź uprawnienia w HA.`
+        });
+      }
     }
   }
 
@@ -856,9 +861,12 @@ export default class HomeAssistantIntegration extends EventEmitter {
 
     if (msg.type === 'auth_invalid') {
       this.status.connected = false;
-      this.status.error = 'Nieprawidłowy token autoryzacji HAOS';
-      appendLog('HAOS', 'Błąd autoryzacji: podany token HAOS został odrzucony');
+      this.status.error = 'Błąd autoryzacji: token HAOS został odrzucony';
+      appendLog('HAOS', 'Błąd autoryzacji: podany token HAOS został odrzucony przez serwer. Token NIE został usunięty z konfiguracji.');
       this.emit('status', this.getStatus());
+      this.emit('authError', {
+        message: 'Token Home Assistant został odrzucony (401/auth_invalid). Token NIE został usunięty z konfiguracji — sprawdź jego ważność w profilu Home Assistant.'
+      });
       if (this.ws) {
         this.ws.close();
         this.ws = null;

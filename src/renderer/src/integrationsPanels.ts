@@ -886,6 +886,13 @@ export function renderHaosPanel(app: AppUI): string {
           </div>
         </div>
 
+        ${form.haEnabled && snap.ha?.error ? `
+          <div style="margin-top: 10px; padding: 8px 12px; border-radius: var(--fc-radius-sm); background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.25); font-size: 11px; color: #f87171; line-height: 1.4">
+            ⚠️ <strong>Status połączenia:</strong> ${esc(snap.ha.error)}.<br/>
+            <span style="color: var(--fc-text-secondary); font-size: 10.5px">🔒 Twój token dostępu jest bezpiecznie zachowany w konfiguracji (nigdy nie jest usuwany). Upewnij się, że serwer Home Assistant działa i token nie wygasł.</span>
+          </div>
+        ` : ''}
+
         ${catalogStatusInfo}
       </div>
     </div>

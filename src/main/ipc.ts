@@ -54,6 +54,17 @@ export function registerIpc(ctx: AppContext): void {
         if (key === 'discordAccessToken' || key === 'discordRefreshToken' || key === 'discordTokenExpiresAt') {
           continue;
         }
+        // Konfiguracje i tokeny użytkownika są święte — nigdy nie pozwalamy na przypadkowe
+        // wyzerowanie zapisanego tokena HAOS, GitHub lub Discord przez pusty/whitespace patch
+        if (key === 'haToken' && (!value || typeof value !== 'string' || !(value as string).trim()) && prevHaToken) {
+          continue;
+        }
+        if (key === 'githubToken' && (!value || typeof value !== 'string' || !(value as string).trim()) && ctx.config.get('githubToken')) {
+          continue;
+        }
+        if (key === 'discordClientSecret' && (!value || typeof value !== 'string' || !(value as string).trim()) && ctx.config.get('discordClientSecret')) {
+          continue;
+        }
         (ctx.config.data as unknown as Record<string, unknown>)[key] = value;
       }
     }
@@ -234,16 +245,41 @@ export function registerIpc(ctx: AppContext): void {
     return { ok: false, error: 'Integracja z Discordem jest niedostępna' };
   });
   ipcMain.handle('config:reset', () => {
-    const savedAccessToken = ctx.config.get('discordAccessToken');
-    const savedRefreshToken = ctx.config.get('discordRefreshToken');
-    const savedTokenExpiresAt = ctx.config.get('discordTokenExpiresAt');
+    // Zachowaj wszystkie kluczowe tokeny, sekrety i konfigurację integracji/sprzętu:
+    // Konfiguracje integracji i tokeny użytkownika są święte — reset przywraca jedynie
+    // domyślne parametry detekcji, progi audio i opóźnienia, nie niszcząc integracji.
+    const savedIntegrationConfig = {
+      haToken: ctx.config.get('haToken'),
+      haUrl: ctx.config.get('haUrl'),
+      haEnabled: ctx.config.get('haEnabled'),
+      haPresenceEntity: ctx.config.get('haPresenceEntity'),
+      haDistanceEntity: ctx.config.get('haDistanceEntity'),
+      haHeartRateEntity: ctx.config.get('haHeartRateEntity'),
+      haBreathRateEntity: ctx.config.get('haBreathRateEntity'),
+      haAutomationOnAway: ctx.config.get('haAutomationOnAway'),
+      haAutomationOnDesk: ctx.config.get('haAutomationOnDesk'),
+      haButtonSnoozeEntity: ctx.config.get('haButtonSnoozeEntity'),
+      haButtonMuteEntity: ctx.config.get('haButtonMuteEntity'),
+      githubToken: ctx.config.get('githubToken'),
+      discordAccessToken: ctx.config.get('discordAccessToken'),
+      discordRefreshToken: ctx.config.get('discordRefreshToken'),
+      discordTokenExpiresAt: ctx.config.get('discordTokenExpiresAt'),
+      discordClientId: ctx.config.get('discordClientId'),
+      discordClientSecret: ctx.config.get('discordClientSecret'),
+      port: ctx.config.get('port')
+    };
+
     for (const [key, value] of Object.entries(DEFAULTS)) {
       (ctx.config.data as unknown as Record<string, unknown>)[key] = value;
     }
-    // Zachowaj aktywne tokeny Discorda przy resecie ustawień
-    if (savedAccessToken) ctx.config.data.discordAccessToken = savedAccessToken;
-    if (savedRefreshToken) ctx.config.data.discordRefreshToken = savedRefreshToken;
-    if (savedTokenExpiresAt) ctx.config.data.discordTokenExpiresAt = savedTokenExpiresAt;
+
+    // Przywróć nienaruszone tokeny i integracje
+    for (const [key, val] of Object.entries(savedIntegrationConfig)) {
+      if (val !== undefined && val !== '') {
+        (ctx.config.data as unknown as Record<string, unknown>)[key] = val;
+      }
+    }
+
     ctx.config.save();
     applyAutoStart(ctx.config.get('autoStart'));
     void ctx.restartRadar();

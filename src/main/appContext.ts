@@ -202,21 +202,15 @@ export function resolveAppIcon(): string {
   return path.join(__dirname, '..', '..', 'resources', 'icon.png');
 }
 
-export function resolveWindowIcon(): Electron.NativeImage | string | null {
+export function resolveWindowIcon(): Electron.NativeImage | null {
   const iconPath = resolveAppIconPath();
   if (fs.existsSync(iconPath)) {
-    // Na Windows przekazanie ścieżki pliku .ico do BrowserWindow / win.setIcon
-    // pozwala Win32 załadować pełną grupę ikon w wielu rozdzielczościach (16-256px).
-    if (process.platform === 'win32' && iconPath.endsWith('.ico')) {
-      return iconPath;
-    }
     try {
       const img = nativeImage.createFromPath(iconPath);
       if (!img.isEmpty()) return img;
-    } catch {
-      /* fallback to path string */
+    } catch (err) {
+      console.warn('[main] resolveWindowIcon error:', (err as Error).message);
     }
-    return iconPath;
   }
   return null;
 }

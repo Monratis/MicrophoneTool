@@ -342,6 +342,19 @@ app.whenReady().then(() => {
     pushEvent('toast', { error: true, message: `Discord: nie zsynchronizowano mikrofonu (${powod})` });
     refreshSnapshot();
   });
+
+  // Błąd autoryzacji tokena Home Assistant — użytkownik musi zostać powiadomiony,
+  // a token pozostaje nienaruszony w konfiguracji.
+  let lastHaAuthErrorToastAt = 0;
+  ha.on('authError', (p: { message: string }) => {
+    appendLog('HAOS', `Błąd autoryzacji HAOS: ${p.message}`);
+    const now = Date.now();
+    if (now - lastHaAuthErrorToastAt < 5 * 60 * 1000) return;
+    lastHaAuthErrorToastAt = now;
+    pushEvent('toast', { error: true, message: `🏠 HAOS: ${p.message}` });
+    refreshSnapshot();
+  });
+
   controller.on('mode', () => refreshSnapshot());
   controller.on('snooze', () => refreshSnapshot());
 

@@ -68,7 +68,9 @@ export function decryptSecret(val: string): string {
     } catch (err) {
       console.warn('[config] safeStorage decrypt failed:', (err as Error).message);
     }
-    return '';
+    // WAŻNE: W przypadku błędu deszyfracji (np. safeStorage chwilowo niedostępne)
+    // zwracamy oryginalny ciąg zaszyfrowany, aby NIE wyzerować tokena użytkownika!
+    return val;
   }
   if (val.startsWith('enc_b64:')) {
     try {
@@ -76,7 +78,7 @@ export function decryptSecret(val: string): string {
     } catch (err) {
       console.warn('[config] xor decrypt failed:', (err as Error).message);
     }
-    return '';
+    return val;
   }
   return val;
 }
@@ -100,7 +102,10 @@ export default class Config {
         for (const k of Object.keys(DEFAULTS) as (keyof AppConfig)[]) {
           if (k in parsed && parsed[k] !== undefined) {
             if (SENSITIVE_FIELDS.includes(k) && typeof parsed[k] === 'string') {
-              sanitized[k] = decryptSecret(parsed[k] as string) as any;
+              const rawVal = parsed[k] as string;
+              const decrypted = decryptSecret(rawVal);
+              // Jeśli pole miało wartość, a deszyfracja zwróciła pusty ciąg, zachowaj surową wartość
+              sanitized[k] = (decrypted || rawVal) as any;
             } else {
               sanitized[k] = parsed[k] as any;
             }
@@ -127,16 +132,19 @@ export default class Config {
         this.save();
       }
     } catch (err) {
-      // Uszkodzony config NIE może zniknąć bez śladu — kopia .bak daje
-      // użytkownikowi szansę odzyskania ustawień po naprawie pliku.
-      console.error('[config] load error, backing up and restoring defaults:', (err as Error).message);
+      // Uszkodzony config NIE może zniknąć bez śladu — kopie .bak i .corrupted dają
+      // użytkownikowi 100% pewności odzyskania ustawień i tokenów po naprawie pliku.
+      console.error('[config] load error, backing up and keeping current data:', (err as Error).message);
       try {
-        fs.copyFileSync(this.filePath, `${this.filePath}.bak`);
+        if (fs.existsSync(this.filePath)) {
+          fs.copyFileSync(this.filePath, `${this.filePath}.bak`);
+          fs.copyFileSync(this.filePath, `${this.filePath}.corrupted_${Date.now()}`);
+        }
       } catch (bakErr) {
         console.error('[config] backup failed:', (bakErr as Error).message);
       }
+      // WAŻNE: Nie nadpisujemy pliku na dysku pustymi DEFAULTS!
       this.data = { ...DEFAULTS };
-      this.save();
     }
   }
 
@@ -151,6 +159,13 @@ export default class Config {
         if (typeof toSerialize[k] === 'string') {
           toSerialize[k] = encryptSecret(toSerialize[k] as string);
         }
+      }
+
+      // Kopia zapasowa .bak przed nadpisaniem
+      if (fs.existsSync(this.filePath)) {
+        try {
+          fs.copyFileSync(this.filePath, `${this.filePath}.bak`);
+        } catch { /* ignore */ }
       }
 
       const tempPath = `${this.filePath}.tmp`;
