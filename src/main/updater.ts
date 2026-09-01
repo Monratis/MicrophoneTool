@@ -10,11 +10,11 @@ import type { UpdateInfo, UpdaterStatus } from '../shared/types';
 const GITHUB_REPO = 'Monratis/MicrophoneTool';
 
 function compareSemver(v1: string, v2: string): number {
-  const clean1 = (v1 || '').replace(/^v/i, '').trim();
-  const clean2 = (v2 || '').replace(/^v/i, '').trim();
+  const clean1 = (v1 || '').replace(/^v/i, '').split('-')[0].trim();
+  const clean2 = (v2 || '').replace(/^v/i, '').split('-')[0].trim();
 
-  const parts1 = clean1.split('.').map(Number);
-  const parts2 = clean2.split('.').map(Number);
+  const parts1 = clean1.split('.').map((p) => parseInt(p, 10) || 0);
+  const parts2 = clean2.split('.').map((p) => parseInt(p, 10) || 0);
 
   for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
     const p1 = parts1[i] || 0;
@@ -311,6 +311,16 @@ export default class AppUpdater {
           });
           fileStream.on('finish', () => {
             if (failed) return;
+            if (downloadedBytes === 0 || (totalBytes > 0 && downloadedBytes < totalBytes)) {
+              this.status = 'error';
+              const errMsg = `Pobieranie niekompletne (${downloadedBytes} z ${totalBytes} bajtów)`;
+              this.emit('status', { ...this.getStatus(), error: errMsg });
+              try {
+                fs.unlinkSync(targetFile);
+              } catch {}
+              reject(new Error(errMsg));
+              return;
+            }
             this.status = 'downloaded';
             this.emit('status', this.getStatus());
             resolve({ ok: true, file: targetFile });

@@ -422,8 +422,10 @@ export default class SignalRGBIntegration {
    * -silentlaunch- to udokumentowany parametr launchu bez przejmowania fokusu.
    */
   private launchDeepLink(effectName: string, params: Record<string, string> = {}): boolean {
+    const cleanName = (effectName || '').trim();
+    if (!cleanName) return false;
     try {
-      const enc = encodeURIComponent(effectName);
+      const enc = encodeURIComponent(cleanName);
       const query = new URLSearchParams(params).toString();
       const url = `signalrgb://effect/apply/${enc}?${query}${query ? '&' : ''}-silentlaunch-`;
       appendLog('SIGNALRGB', `Uruchamianie deep-link: ${url}`);

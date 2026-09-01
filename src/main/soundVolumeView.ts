@@ -182,13 +182,11 @@ export default class SoundVolumeView {
         // stdout, błędy na stderr. Obie ścieżki konsumują głowę kolejki, inaczej
         // odpowiedzi tracą parowanie z komendami (desync FIFO).
         const dequeue = (val: ExecResult): void => {
-          // Odrzuć głowy, na które już odpowiedział timeout — ich odpowiedź
-          // (spóźniona) nie może rozwiązać następnego żądania.
-          while (this.daemonQueue.length > 0 && this.daemonQueue[0].timedOut) {
-            this.daemonQueue.shift();
+          if (this.daemonQueue.length === 0) return;
+          const head = this.daemonQueue.shift();
+          if (head && !head.timedOut) {
+            head.resolve(val);
           }
-          const item = this.daemonQueue.shift();
-          if (item) item.resolve(val);
         };
 
         // Czekamy na baner startowy {"ready":true,"version":"..."} zanim zaczniemy przyjmować komendy

@@ -3,18 +3,57 @@
 import type { AppUI } from './app';
 import { esc, STATE_LABEL } from './ui';
 
-export function triggerOsdHud(app: AppUI, text: string, isMuted: boolean) {
-    const el = document.getElementById('fc-osd-hud');
-    if (!el) return;
-    if (app.osdTimer) clearTimeout(app.osdTimer);
+export function triggerOsdHud(
+  app: AppUI,
+  text: string,
+  kindOrMuted: boolean | 'mute' | 'unmute' | 'listen' | 'ok' | 'miss' | 'blocked' | 'loading' | 'info' = false,
+  durationMs = 2200,
+  customTitle?: string
+) {
+  const el = document.getElementById('fc-osd-hud');
+  if (!el) return;
+  if (app.osdTimer) clearTimeout(app.osdTimer);
 
-    el.className = `fc-osd-hud visible ${isMuted ? 'muted' : ''}`;
-    el.innerHTML = `<span>${text}</span>`;
+  const isMuted = kindOrMuted === true || kindOrMuted === 'mute';
+  const kind = typeof kindOrMuted === 'string' ? kindOrMuted : (isMuted ? 'mute' : 'info');
+  const isVoiceKind = ['listen', 'ok', 'miss', 'blocked', 'loading', 'info'].includes(kind);
 
-    app.osdTimer = setTimeout(() => {
-      el.className = `fc-osd-hud ${isMuted ? 'muted' : ''}`;
-    }, 2200);
+  let extraClass = '';
+  if (isMuted) extraClass += ' muted';
+  if (isVoiceKind) extraClass += ` osd-voice osd-${kind}`;
+
+  el.className = `fc-osd-hud visible${extraClass}`;
+
+  if (isVoiceKind) {
+    const title =
+      customTitle ||
+      (kind === 'listen'
+        ? 'DeskSense · Słucham'
+        : kind === 'ok'
+          ? 'DeskSense · Wykonano'
+          : kind === 'miss'
+            ? 'DeskSense · Nierozpoznano'
+            : kind === 'blocked'
+              ? 'DeskSense · Zablokowano'
+              : 'DeskSense');
+    el.innerHTML = `<div class="osd-title">${esc(title)}</div><div class="osd-text">${esc(text)}</div>`;
+  } else {
+    el.innerHTML = `<span>${esc(text)}</span>`;
   }
+
+  if (durationMs > 0) {
+    app.osdTimer = setTimeout(() => {
+      el.className = `fc-osd-hud${isMuted ? ' muted' : ''}`;
+    }, durationMs);
+  }
+}
+
+export function hideOsdHud(app: AppUI) {
+  const el = document.getElementById('fc-osd-hud');
+  if (!el) return;
+  if (app.osdTimer) clearTimeout(app.osdTimer);
+  el.className = `fc-osd-hud ${app.isMuted ? 'muted' : ''}`;
+}
 
 export function updateHeaderAndLiveDOM(app: AppUI) {
     if (!app.snap) return;
@@ -118,6 +157,7 @@ export function updateActiveMicCards(app: AppUI) {
 
 export function updateTelemetryDOM(app: AppUI) {
     const t = app.telemetry;
+    const is24G = t.sensorFreq === '24GHz' || (app.snap?.telemetry?.deviceInfo?.sensorModel?.includes('24G') ?? false);
 
     // Kafle na pulpicie głównym (Home)
     const elHomeDist = document.getElementById('home-val-distance');
@@ -127,18 +167,32 @@ export function updateTelemetryDOM(app: AppUI) {
     const elHomePerson = document.getElementById('home-val-person');
     const elHomeTargets = document.getElementById('home-val-targets');
 
+    const elHomeMoving = document.getElementById('home-val-moving');
+    const elHomeStill = document.getElementById('home-val-still');
+
     if (elHomeDist) {
       elHomeDist.textContent = t.distanceCm && t.distanceCm > 0 ? `${t.distanceCm} cm` : '—';
     }
-    if (elHomeHeart) {
-      elHomeHeart.textContent = t.heartRate && t.heartRate > 0 ? `${t.heartRate} BPM` : '—';
+
+    if (is24G) {
+      if (elHomeMoving) {
+        elHomeMoving.textContent = t.movingTarget ? (t.movingDistanceCm ? `Ruch (${t.movingDistanceCm} cm)` : 'Wykryto ruch') : 'Brak ruchu';
+      }
+      if (elHomeStill) {
+        elHomeStill.textContent = t.stillTarget ? (t.stillDistanceCm ? `Statyka (${t.stillDistanceCm} cm)` : 'Wykryto obecność') : (t.presence ? 'Obecny ✓' : '—');
+      }
+    } else {
+      if (elHomeHeart) {
+        elHomeHeart.textContent = t.heartRate && t.heartRate > 0 ? `${t.heartRate} BPM` : '—';
+      }
+      if (elHomeBreath) {
+        elHomeBreath.textContent = t.breathRate && t.breathRate > 0 ? `${t.breathRate} RPM` : '—';
+      }
+      if (elHomeLux) {
+        elHomeLux.textContent = typeof t.illuminanceLux === 'number' ? `${t.illuminanceLux} lx` : '—';
+      }
     }
-    if (elHomeBreath) {
-      elHomeBreath.textContent = t.breathRate && t.breathRate > 0 ? `${t.breathRate} RPM` : '—';
-    }
-    if (elHomeLux) {
-      elHomeLux.textContent = typeof t.illuminanceLux === 'number' ? `${t.illuminanceLux} lx` : '—';
-    }
+
     if (elHomePerson) {
       const p = t.detectedPerson || 'unknown';
       elHomePerson.textContent = p === 'me' ? 'Człowiek ✓' : (p === 'pet' ? 'Zwierzę' : (t.presence ? 'Człowiek ✓' : 'Brak celu'));
@@ -166,10 +220,10 @@ export function updateTelemetryDOM(app: AppUI) {
         elDist.textContent = '—';
       }
     }
-    if (elHeart) elHeart.textContent = t.heartRate ? `${t.heartRate} BPM` : '—';
-    if (elBreath) elBreath.textContent = t.breathRate ? `${t.breathRate} RPM` : '—';
+    if (elHeart) elHeart.textContent = is24G ? 'N/A (24GHz)' : (t.heartRate ? `${t.heartRate} BPM` : '—');
+    if (elBreath) elBreath.textContent = is24G ? 'N/A (24GHz)' : (t.breathRate ? `${t.breathRate} RPM` : '—');
     if (elLux) {
-      elLux.textContent = typeof t.illuminanceLux === 'number' ? `${t.illuminanceLux} lx` : '—';
+      elLux.textContent = typeof t.illuminanceLux === 'number' ? `${t.illuminanceLux} lx` : (is24G ? 'N/A (24GHz)' : '—');
     }
 
     if (elPerson) {
@@ -247,6 +301,8 @@ export function renderHomeTab(app: AppUI): string {
     const headGateVal = Math.max(-100, Math.min(0, form.micHeadsetGateDb ?? -45));
     const headGatePct = Math.max(0, Math.min(100, ((headGateVal + 100) / 100) * 100));
 
+    const is24G = app.telemetry.sensorFreq === '24GHz' || (snap.telemetry?.deviceInfo?.sensorModel?.includes('24G') ?? false);
+
     return `
       <div class="fc-tab-pane">
 
@@ -259,9 +315,6 @@ export function renderHomeTab(app: AppUI): string {
                 Kontrola Mikrofonów, Live VU-Meter & Filtry DSP
               </span>
               <span class="fc-info-badge" title="Pełne sterowanie mikrofonem stacjonarnym i mobilnym, poziom wejściowy w 60 FPS oraz filtry Krisp/AGC">?</span>
-            </div>
-            <div class="fc-section-actions">
-              <button class="btn btn-ghost btn-sm" id="btn-home-detect-mics" style="font-size: 11px; padding: 4px 9px">🔍 Auto-wykryj mikrofony</button>
             </div>
           </div>
 
@@ -277,11 +330,23 @@ export function renderHomeTab(app: AppUI): string {
               </div>
 
               <div class="fc-card-body">
-                <select class="fc-select ${isDeskActive ? 'active-source' : ''}" id="sel-mic-desk">
-                  <option value="" ${!form.micDeskName ? 'selected' : ''}>— Wybierz mikrofon Windows —</option>
-                  ${app.missingDeviceOption(form.micDeskName, app.audioDevices)}
-                  ${app.audioDevices.map((d) => `<option value="${esc(d.name)}" data-id="${esc(d.id || '')}" ${d.name === form.micDeskName ? 'selected' : ''}>${esc(d.name)}${d.isDefault ? ' (Domyślny)' : ''}</option>`).join('')}
-                </select>
+                <div style="display: flex; flex-direction: column; gap: 2px;">
+                  <span style="font-size: 10.5px; font-weight: 700; color: #cbd5e1; text-transform: uppercase; letter-spacing: 0.5px;">Główny mikrofon (Priorytet 1):</span>
+                  <select class="fc-select ${isDeskActive ? 'active-source' : ''}" id="sel-mic-desk">
+                    <option value="" ${!form.micDeskName ? 'selected' : ''}>— Wybierz mikrofon Windows —</option>
+                    ${app.missingDeviceOption(form.micDeskName, app.audioDevices)}
+                    ${app.audioDevices.map((d) => `<option value="${esc(d.name)}" data-id="${esc(d.id || '')}" ${d.name === form.micDeskName ? 'selected' : ''}>${esc(d.name)}${d.isDefault ? ' (Domyślny)' : ''}</option>`).join('')}
+                  </select>
+                </div>
+
+                <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 2px;">
+                  <span style="font-size: 10px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px;">Zapasowy / Fallback (Priorytet 2 — gdy główny odłączony):</span>
+                  <select class="fc-select" id="sel-mic-desk-fallback" style="font-size: 11px; padding: 4px 8px; height: 28px;">
+                    <option value="" ${!form.micDeskFallbackName ? 'selected' : ''}>— Brak zapasowego (opcjonalny) —</option>
+                    ${app.missingDeviceOption(form.micDeskFallbackName || '', app.audioDevices)}
+                    ${app.audioDevices.map((d) => `<option value="${esc(d.name)}" data-id="${esc(d.id || '')}" ${d.name === form.micDeskFallbackName ? 'selected' : ''}>${esc(d.name)}${d.isDefault ? ' (Domyślny)' : ''}</option>`).join('')}
+                  </select>
+                </div>
 
                 <!-- LIVE VU-METER BAR (DESK) WITH VAD GATE MARKER -->
                 <div class="fc-vu-meter-box" id="vu-box-desk">
@@ -311,7 +376,7 @@ export function renderHomeTab(app: AppUI): string {
                   <div style="display: flex; justify-content: space-between; align-items: center">
                     <div class="fc-micro-label">
                       <span>🎮 Próg Discord:</span>
-                      <strong style="color: ${form.micDeskAutoThreshold ? '#a855f7' : '#fbbf24'}" id="val-gate-desk">${form.micDeskAutoThreshold ? 'Auto (Voice Isolation)' : `${deskGateVal} dB`}</strong>
+                      <strong style="color: ${form.micDeskAutoThreshold ? '#a855f7' : form.micDeskGateDb === -1 ? '#38bdf8' : '#fbbf24'}" id="val-gate-desk">${form.micDeskAutoThreshold ? 'Auto (Voice Isolation)' : form.micDeskGateDb === -1 ? 'Push-to-Talk (PTT)' : `${deskGateVal} dB`}</strong>
                     </div>
                     <div style="display: flex; gap: 4px">
                       <button class="fc-preset-pill" id="btn-vad-sync-desk" style="color: #38bdf8; border-color: rgba(56, 189, 248, 0.4); padding: 2px 7px" title="Pobierz aktualny próg z Discorda">⬇️ Z Discorda</button>
@@ -382,11 +447,23 @@ export function renderHomeTab(app: AppUI): string {
               </div>
 
               <div class="fc-card-body">
-                <select class="fc-select ${isHeadsetActive ? 'active-source' : ''}" id="sel-mic-headset">
-                  <option value="" ${!form.micHeadsetName ? 'selected' : ''}>— Wybierz mikrofon Windows —</option>
-                  ${app.missingDeviceOption(form.micHeadsetName, app.audioDevices)}
-                  ${app.audioDevices.map((d) => `<option value="${esc(d.name)}" data-id="${esc(d.id || '')}" ${d.name === form.micHeadsetName ? 'selected' : ''}>${esc(d.name)}${d.isDefault ? ' (Domyślny)' : ''}</option>`).join('')}
-                </select>
+                <div style="display: flex; flex-direction: column; gap: 2px;">
+                  <span style="font-size: 10.5px; font-weight: 700; color: #cbd5e1; text-transform: uppercase; letter-spacing: 0.5px;">Główny mikrofon (Priorytet 1):</span>
+                  <select class="fc-select ${isHeadsetActive ? 'active-source' : ''}" id="sel-mic-headset">
+                    <option value="" ${!form.micHeadsetName ? 'selected' : ''}>— Wybierz mikrofon Windows —</option>
+                    ${app.missingDeviceOption(form.micHeadsetName, app.audioDevices)}
+                    ${app.audioDevices.map((d) => `<option value="${esc(d.name)}" data-id="${esc(d.id || '')}" ${d.name === form.micHeadsetName ? 'selected' : ''}>${esc(d.name)}${d.isDefault ? ' (Domyślny)' : ''}</option>`).join('')}
+                  </select>
+                </div>
+
+                <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 2px;">
+                  <span style="font-size: 10px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px;">Zapasowy / Fallback (Priorytet 2 — gdy główny odłączony):</span>
+                  <select class="fc-select" id="sel-mic-headset-fallback" style="font-size: 11px; padding: 4px 8px; height: 28px;">
+                    <option value="" ${!form.micHeadsetFallbackName ? 'selected' : ''}>— Brak zapasowego (opcjonalny) —</option>
+                    ${app.missingDeviceOption(form.micHeadsetFallbackName || '', app.audioDevices)}
+                    ${app.audioDevices.map((d) => `<option value="${esc(d.name)}" data-id="${esc(d.id || '')}" ${d.name === form.micHeadsetFallbackName ? 'selected' : ''}>${esc(d.name)}${d.isDefault ? ' (Domyślny)' : ''}</option>`).join('')}
+                  </select>
+                </div>
 
                 <!-- LIVE VU-METER BAR (HEADSET) WITH VAD GATE MARKER -->
                 <div class="fc-vu-meter-box" id="vu-box-headset">
@@ -416,7 +493,7 @@ export function renderHomeTab(app: AppUI): string {
                   <div style="display: flex; justify-content: space-between; align-items: center">
                     <div class="fc-micro-label">
                       <span>🎮 Próg Discord:</span>
-                      <strong style="color: ${form.micHeadsetAutoThreshold ? '#a855f7' : '#fbbf24'}" id="val-gate-headset">${form.micHeadsetAutoThreshold ? 'Auto (Voice Isolation)' : `${headGateVal} dB`}</strong>
+                      <strong style="color: ${form.micHeadsetAutoThreshold ? '#a855f7' : form.micHeadsetGateDb === -1 ? '#38bdf8' : '#fbbf24'}" id="val-gate-headset">${form.micHeadsetAutoThreshold ? 'Auto (Voice Isolation)' : form.micHeadsetGateDb === -1 ? 'Push-to-Talk (PTT)' : `${headGateVal} dB`}</strong>
                     </div>
                     <div style="display: flex; gap: 4px">
                       <button class="fc-preset-pill" id="btn-vad-sync-headset" style="color: #38bdf8; border-color: rgba(56, 189, 248, 0.4); padding: 2px 7px" title="Pobierz aktualny próg z Discorda">⬇️ Z Discorda</button>
@@ -466,13 +543,13 @@ export function renderHomeTab(app: AppUI): string {
               <div class="fc-card-footer">
                 <div>
                   <div class="fc-metric-large" id="status-title-headset" style="color: ${isHeadsetActive ? (app.isMuted ? '#f59e0b' : '#38bdf8') : 'var(--fc-text-secondary)'}">
-                    ${isHeadsetActive ? (app.isMuted ? 'Wyciszony 🔇' : 'Aktywny 🎙️') : 'Rezerwa'}
+                    ${isHeadsetActive ? (app.isMuted ? 'Wyciszony 🔇' : 'Aktywny 🎙️') : 'Gotowy'}
                   </div>
                   <div class="fc-metric-sub" id="status-sub-headset">
                     ${isHeadsetActive ? (app.isMuted ? 'Mikrofon jest wyciszony w systemie' : 'Dźwięk przekazywany do aplikacji') : 'Mikrofon mobilny'}
                   </div>
                 </div>
-                <span class="fc-badge ${isHeadsetActive ? 'calibrated' : 'muted'}" id="badge-mic-headset">${isHeadsetActive ? 'Domyślny ✓' : 'Rezerwa'}</span>
+                <span class="fc-badge ${isHeadsetActive ? 'calibrated' : 'muted'}" id="badge-mic-headset">${isHeadsetActive ? 'Domyślny ✓' : 'Gotowy'}</span>
               </div>
             </div>
 
@@ -498,9 +575,9 @@ export function renderHomeTab(app: AppUI): string {
                   <span style="font-size: 11px; color: var(--fc-text-secondary)">Pauza automatyki:</span>
                   <select class="fc-select fc-select-sm" id="sel-quick-snooze" style="width: 140px">
                     <option value="0" ${!app.snoozeUntil ? 'selected' : ''}>Brak (Aktywna)</option>
-                    <option value="15" ${app.snoozeUntil ? 'selected' : ''}>Pauza 15 min</option>
-                    <option value="30">Pauza 30 min</option>
-                    <option value="60">Pauza 1 godzina</option>
+                    <option value="15" ${app.snoozeUntil && Math.round((app.snoozeUntil - Date.now()) / 60000) <= 20 ? 'selected' : ''}>Pauza 15 min</option>
+                    <option value="30" ${app.snoozeUntil && Math.round((app.snoozeUntil - Date.now()) / 60000) > 20 && Math.round((app.snoozeUntil - Date.now()) / 60000) <= 45 ? 'selected' : ''}>Pauza 30 min</option>
+                    <option value="60" ${app.snoozeUntil && Math.round((app.snoozeUntil - Date.now()) / 60000) > 45 ? 'selected' : ''}>Pauza 1 godzina</option>
                   </select>
                 </div>
 
@@ -540,7 +617,6 @@ export function renderHomeTab(app: AppUI): string {
           </div>
         </section>
 
-
         <!-- ==================== SEKCJA 2: TELEMETRIA SENSORÓW & STAN OBECNOŚCI ==================== -->
         <section class="fc-section">
           <div class="fc-section-header">
@@ -564,7 +640,7 @@ export function renderHomeTab(app: AppUI): string {
                   ${snap.state === 'desk' ? 'WYKRYTO OBECNOŚĆ (DESK)' : 'BRAK OBECNOŚCI (AWAY)'}
                 </div>
                 <div style="font-size: 11.5px; color: var(--fc-text-secondary); margin-top: 2px;">
-                  Fuzja radaru mmWave 60 GHz + czujników biometrycznych
+                  ${is24G ? 'Radar mmWave 24 GHz · Błyskawiczna reakcja strefowa (1–2s)' : 'Fuzja radaru mmWave 60 GHz + czujników biometrycznych'}
                 </div>
               </div>
             </div>
@@ -576,7 +652,7 @@ export function renderHomeTab(app: AppUI): string {
             </div>
           </div>
 
-          <!-- KAFLE TELEMETRII (5 METRYK NA ŻYWO) -->
+          <!-- KAFLE TELEMETRII (DOPASOWANE DYNAMICZNIE DO 24GHz / 60GHz) -->
           <div class="fc-subgrid-5">
             <!-- Kafel 1: Dystans -->
             <div class="fc-telemetry-tile">
@@ -590,41 +666,79 @@ export function renderHomeTab(app: AppUI): string {
               <div class="fc-telemetry-tile-sub">Odległość do radaru</div>
             </div>
 
-            <!-- Kafel 2: Tętno -->
-            <div class="fc-telemetry-tile">
-              <div class="fc-telemetry-tile-header">
-                <span style="font-size: 13px;">❤️</span>
-                <span class="fc-telemetry-tile-title">Tętno</span>
+            ${is24G ? `
+              <!-- Kafel 2 (24G): Ruch -->
+              <div class="fc-telemetry-tile">
+                <div class="fc-telemetry-tile-header">
+                  <span style="font-size: 13px;">🏃</span>
+                  <span class="fc-telemetry-tile-title">Cel Ruchomy</span>
+                </div>
+                <div class="fc-telemetry-tile-val" id="home-val-moving" style="color: #38bdf8; font-size: 15px;">
+                  ${app.telemetry.movingTarget ? (app.telemetry.movingDistanceCm ? `Ruch (${app.telemetry.movingDistanceCm} cm)` : 'Wykryto ruch') : 'Brak ruchu'}
+                </div>
+                <div class="fc-telemetry-tile-sub">Strefa ruchu 24 GHz</div>
               </div>
-              <div class="fc-telemetry-tile-val" id="home-val-heart" style="color: #f87171;">
-                ${app.telemetry.heartRate && app.telemetry.heartRate > 0 ? `${app.telemetry.heartRate} BPM` : '—'}
-              </div>
-              <div class="fc-telemetry-tile-sub">Biometria 60 GHz</div>
-            </div>
 
-            <!-- Kafel 3: Oddech -->
-            <div class="fc-telemetry-tile">
-              <div class="fc-telemetry-tile-header">
-                <span style="font-size: 13px;">🫁</span>
-                <span class="fc-telemetry-tile-title">Oddech</span>
+              <!-- Kafel 3 (24G): Statyka -->
+              <div class="fc-telemetry-tile">
+                <div class="fc-telemetry-tile-header">
+                  <span style="font-size: 13px;">🧘</span>
+                  <span class="fc-telemetry-tile-title">Cel Statyczny</span>
+                </div>
+                <div class="fc-telemetry-tile-val" id="home-val-still" style="color: var(--fc-accent-green); font-size: 15px;">
+                  ${app.telemetry.stillTarget ? (app.telemetry.stillDistanceCm ? `Statyka (${app.telemetry.stillDistanceCm} cm)` : 'Wykryto obecność') : (snap.state === 'desk' ? 'Obecny ✓' : '—')}
+                </div>
+                <div class="fc-telemetry-tile-sub">Strefa bezruchu</div>
               </div>
-              <div class="fc-telemetry-tile-val" id="home-val-breath" style="color: #38bdf8;">
-                ${app.telemetry.breathRate && app.telemetry.breathRate > 0 ? `${app.telemetry.breathRate} RPM` : '—'}
-              </div>
-              <div class="fc-telemetry-tile-sub">Częstotliwość oddechu</div>
-            </div>
 
-            <!-- Kafel 4: Oświetlenie -->
-            <div class="fc-telemetry-tile">
-              <div class="fc-telemetry-tile-header">
-                <span style="font-size: 13px;">💡</span>
-                <span class="fc-telemetry-tile-title">Oświetlenie</span>
+              <!-- Kafel 4 (24G): Czas Reakcji -->
+              <div class="fc-telemetry-tile">
+                <div class="fc-telemetry-tile-header">
+                  <span style="font-size: 13px;">⚡</span>
+                  <span class="fc-telemetry-tile-title">Czas Reakcji</span>
+                </div>
+                <div class="fc-telemetry-tile-val" id="home-val-speed" style="color: #fbbf24; font-size: 15px;">
+                  ⚡ 1–2s
+                </div>
+                <div class="fc-telemetry-tile-sub">Brak bufora 30s</div>
               </div>
-              <div class="fc-telemetry-tile-val" id="home-val-lux" style="color: #fbbf24;">
-                ${typeof app.telemetry.illuminanceLux === 'number' ? `${app.telemetry.illuminanceLux} lx` : '—'}
+            ` : `
+              <!-- Kafel 2 (60G): Tętno -->
+              <div class="fc-telemetry-tile">
+                <div class="fc-telemetry-tile-header">
+                  <span style="font-size: 13px;">❤️</span>
+                  <span class="fc-telemetry-tile-title">Tętno</span>
+                </div>
+                <div class="fc-telemetry-tile-val" id="home-val-heart" style="color: #f87171;">
+                  ${app.telemetry.heartRate && app.telemetry.heartRate > 0 ? `${app.telemetry.heartRate} BPM` : '—'}
+                </div>
+                <div class="fc-telemetry-tile-sub">Biometria 60 GHz</div>
               </div>
-              <div class="fc-telemetry-tile-sub">Czujnik BH1750</div>
-            </div>
+
+              <!-- Kafel 3 (60G): Oddech -->
+              <div class="fc-telemetry-tile">
+                <div class="fc-telemetry-tile-header">
+                  <span style="font-size: 13px;">🫁</span>
+                  <span class="fc-telemetry-tile-title">Oddech</span>
+                </div>
+                <div class="fc-telemetry-tile-val" id="home-val-breath" style="color: #38bdf8;">
+                  ${app.telemetry.breathRate && app.telemetry.breathRate > 0 ? `${app.telemetry.breathRate} RPM` : '—'}
+                </div>
+                <div class="fc-telemetry-tile-sub">Częstotliwość oddechu</div>
+              </div>
+
+              <!-- Kafel 4 (60G): Oświetlenie -->
+              <div class="fc-telemetry-tile">
+                <div class="fc-telemetry-tile-header">
+                  <span style="font-size: 13px;">💡</span>
+                  <span class="fc-telemetry-tile-title">Oświetlenie</span>
+                </div>
+                <div class="fc-telemetry-tile-val" id="home-val-lux" style="color: #fbbf24;">
+                  ${typeof app.telemetry.illuminanceLux === 'number' ? `${app.telemetry.illuminanceLux} lx` : '—'}
+                </div>
+                <div class="fc-telemetry-tile-sub">Czujnik BH1750</div>
+              </div>
+            `}
 
             <!-- Kafel 5: Cel / Obiekt -->
             <div class="fc-telemetry-tile">

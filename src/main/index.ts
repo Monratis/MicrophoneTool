@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, session } from 'electron';
+import { app, BrowserWindow, session } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 
@@ -11,10 +11,12 @@ import DiscordIntegration from './discordIntegration';
 import SignalRGBIntegration from './signalrgbIntegration';
 import HomeAssistantIntegration from './haIntegration';
 import { VoiceManager } from './voiceManager';
-import { closeVoiceOsd } from './voiceOsd';
+import { initVoiceOsd, showVoiceOsd, closeVoiceOsd } from './voiceOsd';
+import { shortcutManager } from './shortcutManager';
 import DeviceWatcher from './deviceWatcher';
 import ActivityWatcher from './activityWatcher';
 import ScreenManager from './screenManager';
+import { FirmwareFlasher } from './firmwareFlasher';
 import type { AppContext } from './appContext';
 import type { DeviceState } from '../shared/types';
 import {
@@ -24,7 +26,6 @@ import {
   resolveConfigPath,
   resolveBinDir,
   applyAutoStart,
-  createNotification,
   toggleMuteWithFeedback
 } from './appContext';
 import { interceptConsole, setLogSink, appendLog } from './logger';
@@ -34,7 +35,21 @@ import { registerIpc } from './ipc';
 
 // Performance App Flags
 app.commandLine.appendSwitch('disable-http-cache');
-app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling');
+app.commandLine.appendSwitch(
+  'disable-features',
+  'HardwareMediaKeyHandling,SpareRendererForSitePerProcess'
+);
+
+// Konfiguracja katalogu danych użytkownika PRZED requestSingleInstanceLock i whenReady
+const appDataDir = getAppDataDir();
+try {
+  fs.mkdirSync(appDataDir, { recursive: true });
+  app.setPath('userData', appDataDir);
+} catch (err) {
+  console.warn('[main] setup appDataDir warning:', (err as Error).message);
+}
+
+app.setAppUserModelId('com.monratis.desksense');
 
 // Single instance lock
 const gotSingleLock = app.requestSingleInstanceLock();
@@ -42,6 +57,10 @@ if (!gotSingleLock) {
   app.quit();
   process.exit(0);
 }
+
+app.on('second-instance', () => {
+  if (ctx) showSettings(ctx);
+});
 
 interceptConsole();
 
@@ -111,14 +130,6 @@ function pushEvent(type: string, payload: Record<string, unknown> = {}): void {
   }
 }
 
-function showWindowsNotification(title: string, body: string): void {
-  if (ctx) {
-    createNotification(title, body, ctx.config.get('notifications'), () => {
-      if (ctx) showSettings(ctx);
-    });
-  }
-}
-
 async function restartRadar(): Promise<void> {
   if (!ctx) return;
   await ctx.radar.stop();
@@ -147,19 +158,10 @@ function refreshSnapshot(): void {
 
 // ---------- lifecycle ----------
 
-app.setAppUserModelId('com.monratis.desksense');
-
 app.whenReady().then(() => {
   cleanupStaleUpdateFiles();
   ensureToastShortcut();
-
-  const appDataDir = getAppDataDir();
-  try {
-    fs.mkdirSync(appDataDir, { recursive: true });
-    app.setPath('userData', appDataDir);
-  } catch (err) {
-    console.warn('[main] setup appDataDir warning:', (err as Error).message);
-  }
+  initVoiceOsd();
 
   setLogSink((entry) => {
     const win = getSettingsWindow();
@@ -241,6 +243,7 @@ app.whenReady().then(() => {
     signalrgb,
     ha,
     voice: undefined,
+    flasher: undefined as any,
     appDataDir,
     settingsWindow: null,
     buildSnapshot,
@@ -248,9 +251,11 @@ app.whenReady().then(() => {
     refreshSnapshot,
     restartRadar,
     showSettings: () => showSettings(ctx!),
-    showWindowsNotification,
     applyAutoStart
   };
+
+  const flasher = new FirmwareFlasher(ctx);
+  ctx.flasher = flasher;
 
   // VoiceManager potrzebuje pełnego kontekstu DI — budujemy go po utworzeniu ctx
   const voice = new VoiceManager(ctx);
@@ -275,18 +280,26 @@ app.whenReady().then(() => {
   });
   controller.on('switched', (p: { state: DeviceState; device?: string | null; ok: boolean; switched?: boolean }) => {
     appendLog('APP', `switched state=${p.state} device=${p.device} ok=${p.ok} switched=${p.switched}`);
+    voice.onDeviceSwitched(p.state);
     if (p.ok && p.switched && p.device) {
       pushEvent('toast', { message: `Przełączono mikrofon: ${p.device}` });
+      showVoiceOsd(
+        `Aktywny: ${p.device}`,
+        'ok',
+        2400,
+        p.state === 'desk' ? 'DeskSense · Mikrofon Biurkowy' : 'DeskSense · Mikrofon Mobilny'
+      );
       const chimeWillPlay =
         ctx!.config.get('audioChime') &&
         (p.state === 'desk'
           ? ctx!.config.get('audioChimeOnDesk') !== false
           : ctx!.config.get('audioChimeOnAway') !== false);
       if (!chimeWillPlay) {
-        showWindowsNotification('DeskSense', `Aktywny mikrofon: ${p.device}`);
+        pushEvent('toast', { message: `Aktywny mikrofon: ${p.device}` });
       }
     } else if (!p.ok && p.device) {
       pushEvent('toast', { error: true, message: `Nie udało się aktywować mikrofonu: ${p.device} — ponawiam w tle` });
+      showVoiceOsd(`Błąd przełączania: ${p.device}`, 'blocked', 3000);
     }
     refreshSnapshot();
   });
@@ -330,6 +343,7 @@ app.whenReady().then(() => {
     refreshSnapshot();
   });
   controller.on('mode', () => refreshSnapshot());
+  controller.on('snooze', () => refreshSnapshot());
 
   tray = createTray(ctx);
 
@@ -354,6 +368,7 @@ app.whenReady().then(() => {
   deviceWatcher = new DeviceWatcher(audio, {
     devicesChanged: (devices, added, removed) => {
       ctx!.pushEvent('devices:changed', { devices, added, removed });
+      controller.onDevicesChanged(devices, added);
       if (added.length > 0) {
         pushEvent('toast', { message: `Wykryto nowy mikrofon: ${added.join(', ')}` });
       }
@@ -376,56 +391,18 @@ app.whenReady().then(() => {
   // bez cold-startu procesu.
   void audio.warmup();
 
-  // Global hotkey: Ctrl+Shift+M -> szybkie wyciszenie/odciszenie
-  try {
-    const registered = globalShortcut.register(config.get('globalShortcut'), () => {
-      // Wspólny helper (dioda + toast + powiadomienie + snapshot) — ten sam,
-      // którego używa menu tray i IPC audio:toggleMute.
-      void toggleMuteWithFeedback(ctx!);
-    });
-    // register() zwraca false gdy skrót zajęty przez inną apkę — bez tego
-    // awaria przechodzi zupełnie po cichu.
-    if (!registered) {
-      console.warn(`[main] globalShortcut '${config.get('globalShortcut')}' zajęty — skrót wyłączony`);
-      pushEvent('toast', { error: true, message: 'Skrót Ctrl+Shift+M zajęty przez inną aplikację' });
-    }
-  } catch (err) {
-    console.warn('[main] globalShortcut register error:', (err as Error).message);
-  }
+  // Rejestracja globalnych skrótów klawiszowych (Mute + Wywołanie Mowy)
+  shortcutManager.registerAll(ctx);
 
   // Ciche sprawdzenie aktualizacji w tle po 5 sekundach od uruchomienia
   setTimeout(() => {
     void updater.checkForUpdates().catch(() => {});
   }, 5000);
 
-  // Powiadomienie startowe: apka siedzi w tray i mówi krótko, że działa
-  // oraz jaki mikrofon jest teraz aktywny. Po 1,5 s — żeby nie kolidować
-  // z logowaniem Windows przy autostarcie.
-  setTimeout(() => {
-    if (!ctx) return;
-    void ctx.audio
-      .getCurrentDefault()
-      .then((current) => {
-        const name =
-          current?.name ||
-          ctx!.config.get('micDeskName') ||
-          ctx!.config.get('micHeadsetName') ||
-          'nie wykryto';
-        createNotification(
-          'DeskSense',
-          `Wystartowała w tle. Aktywny mikrofon: ${name}`,
-          ctx!.config.get('notifications'),
-          () => {
-            if (ctx) showSettings(ctx);
-          }
-        );
-      })
-      .catch(() => {});
-  }, 1500);
-});
-
-app.on('second-instance', () => {
-  if (ctx) showSettings(ctx);
+  // Otwórz okno jeśli jawnie zażądano tego w argumentach CLI (np. po buildzie przez build.mjs)
+  if (process.argv.includes('--show') || process.argv.includes('--open')) {
+    showSettings(ctx);
+  }
 });
 
 let isCleanedUp = false;
@@ -434,7 +411,7 @@ app.on('before-quit', (e) => {
   if (isCleanedUp) return;
   e.preventDefault();
   (app as Electron.App & { isQuitting?: boolean }).isQuitting = true;
-  globalShortcut.unregisterAll();
+  shortcutManager.unregisterAll();
 
   // Asynchroniczne sprzątanie: zwalnia port COM, zatrzymuje kontrolery i ubija daemony
   const cleanupTasks: Promise<unknown>[] = [];

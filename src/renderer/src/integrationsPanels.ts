@@ -3,6 +3,7 @@
 import type { AppUI } from './app';
 import { esc } from './ui';
 import { DEFAULT_CONFIG } from '../../shared/types';
+import { formatAcceleratorDisplay } from './hotkeyRecorder';
 
 let lastSrgbStatusFetch = 0;
 
@@ -22,7 +23,12 @@ export function renderDiscordPanel(app: AppUI): string {
       statusColor = 'var(--fc-text-dim)';
     } else if (discord?.ready) {
       if (discord.authenticated) {
-        statusText = `Połączono${discord.user ? ` (@${discord.user})` : ''} ✓`;
+        const badges: string[] = [];
+        if (discord.inVoiceCall) badges.push('📞 W rozmowie');
+        if (discord.muted) badges.push('🔇 Mute');
+        if (discord.deaf) badges.push('🎧 Deaf');
+        const badgeStr = badges.length > 0 ? ` [${badges.join(', ')}]` : '';
+        statusText = `Połączono${discord.user ? ` (@${discord.user})` : ''}${badgeStr} ✓`;
         statusColor = '#22c55e';
       } else {
         statusText = 'Połączono (wymagana autoryzacja OAuth) ⚠';
@@ -32,6 +38,15 @@ export function renderDiscordPanel(app: AppUI): string {
       statusText = 'Handshake w toku…';
       statusColor = '#fbbf24';
     }
+
+    const isAuto = snap.state === 'desk' ? form.micDeskAutoThreshold : form.micHeadsetAutoThreshold;
+    const rawGate = snap.state === 'desk' ? form.micDeskGateDb : form.micHeadsetGateDb;
+    const gateLabel = isAuto
+      ? 'Auto (Voice Isolation)'
+      : rawGate === -1
+        ? 'Push-to-Talk (PTT)'
+        : `${gateVal} dB`;
+    const gateColor = isAuto ? '#a855f7' : rawGate === -1 ? '#38bdf8' : '#fbbf24';
 
     return `
       <div class="fc-settings-panel">
@@ -62,7 +77,7 @@ export function renderDiscordPanel(app: AppUI): string {
           </div>
           <div class="fc-field-row" style="border-top: 1px solid var(--fc-card-border); padding-top: 10px">
             <span class="fc-field-label">Aktywny próg Discord</span>
-            <strong style="color: #fbbf24">${gateVal} dB</strong>
+            <strong style="color: ${gateColor}">${gateLabel}</strong>
           </div>
         </div>
       </div>
@@ -127,8 +142,13 @@ export async function refreshDiscordRpcStatus(_app: AppUI): Promise<void> {
       const target = document.getElementById('discord-rpc-status-val');
       if (!target) return; // render mógł podmienić DOM w trakcie zapytania
       if (s.ready) {
+        const badges: string[] = [];
+        if (s.inVoiceCall) badges.push('📞 W rozmowie');
+        if (s.muted) badges.push('🔇 Mute');
+        if (s.deaf) badges.push('🎧 Deaf');
+        const badgeStr = badges.length > 0 ? ` [${badges.join(', ')}]` : '';
         target.textContent = s.authenticated
-          ? `Połączono${s.user ? ` (@${s.user})` : ''} ✓`
+          ? `Połączono${s.user ? ` (@${s.user})` : ''}${badgeStr} ✓`
           : 'Połączono (wymagana autoryzacja OAuth) ⚠';
         target.style.color = s.authenticated ? '#22c55e' : '#fbbf24';
       } else if (s.connected) {
@@ -394,6 +414,18 @@ export function renderChimePanel(app: AppUI): string {
               <div class="fc-field-desc">Uruchamiaj DeskSense razem z systemem</div>
             </div>
             <button class="fc-switch ${form.autoStart ? 'active' : ''}" id="sw-autostart" aria-checked="${form.autoStart ?? false}" role="switch"></button>
+          </div>
+          <div class="fc-field-row">
+            <div>
+              <div class="fc-field-label">Globalny przycisk wyciszenia (Hotkey / Mysz)</div>
+              <div class="fc-field-desc">Wycisz lub odcisz mikrofon z dowolnego programu (kliknij, aby nagrać klawisz lub przycisk myszy)</div>
+            </div>
+            <div class="fc-hotkey-recorder" id="mute-hotkey-recorder-container">
+              <button type="button" class="fc-hotkey-btn" id="btn-record-mute-hotkey" title="Kliknij, aby nagrać dowolny klawisz lub przycisk myszy">
+                <span class="fc-hotkey-display" id="mute-hotkey-display">${formatAcceleratorDisplay(form.globalShortcut || 'CommandOrControl+Shift+M')}</span>
+              </button>
+              ${form.globalShortcut ? `<button type="button" class="btn btn-ghost btn-sm fc-hotkey-clear-btn" id="btn-clear-mute-hotkey" title="Usuń skrót" style="font-size: 11px; padding: 2px 7px; height: 26px;">✕</button>` : ''}
+            </div>
           </div>
         </div>
 

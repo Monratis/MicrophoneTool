@@ -1,7 +1,11 @@
+import type { SensorProfile } from './sensorProfiles';
+
 export type AppMode = 'auto' | 'desk' | 'headset';
 export type DeskState = 'desk' | 'away';
 export type DeviceState = 'desk' | 'headset';
 export type DetectedPerson = 'me' | 'pet' | 'unknown';
+
+export * from './sensorProfiles';
 
 export type VoiceActionType =
   | 'switch_desk'
@@ -10,6 +14,8 @@ export type VoiceActionType =
   | 'toggle_mute'
   | 'mute'
   | 'unmute'
+  | 'open_app'
+  | 'show_commands'
   | 'sleep_display'
   | 'screensaver'
   | 'snooze'
@@ -28,10 +34,25 @@ export interface VoiceRule {
   actionPayload?: string;
 }
 
+/**
+ * Normalizuje frazę komendy głosowej (małe litery, bez znaków interpunkcyjnych i polskich znaków diakrytycznych).
+ * Gwarantuje jednolity format do porównań i walidacji unikalności reguł w rendererze i procesie głównym.
+ */
+export function normalizeVoicePhrase(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[.,?!:;'"()\-—_]/g, ' ')
+    .replace(/ą/g, 'a').replace(/ć/g, 'c').replace(/ę/g, 'e')
+    .replace(/ł/g, 'l').replace(/ń/g, 'n').replace(/ó/g, 'o')
+    .replace(/ś/g, 's').replace(/ż/g, 'z').replace(/ź/g, 'z')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export type VoiceEngineType = 'whisper' | 'vosk';
-export type VoiceWhisperModel = 'whisper-base' | 'whisper-tiny' | 'whisper-small' | 'whisper-large-turbo';
+export type VoiceWhisperModel = 'whisper-base' | 'whisper-tiny' | 'whisper-small' | 'whisper-small-pl' | 'whisper-medium-pl' | 'whisper-large-turbo';
 export type VoiceWhisperBackend = 'auto' | 'cuda12' | 'cuda11' | 'cpu_blas' | 'cpu' | 'hip';
-export type VoiceModelType = 'pl-small' | 'en-small' | 'whisper-base' | 'whisper-tiny' | 'whisper-small' | 'whisper-large-turbo' | 'custom';
+export type VoiceModelType = 'pl-small' | 'en-small' | 'whisper-base' | 'whisper-tiny' | 'whisper-small' | 'whisper-small-pl' | 'whisper-medium-pl' | 'whisper-large-turbo' | 'custom';
 
 export interface VoiceStatus {
   enabled: boolean;
@@ -81,7 +102,9 @@ export interface AppConfig {
   port: string;
   baudRate: number;
   micDeskName: string;
+  micDeskFallbackName?: string;
   micHeadsetName: string;
+  micHeadsetFallbackName?: string;
   /** Głośność mikrofonu stacjonarnego 0-100; -1 = nie steruj głośnością */
   micDeskVolume: number;
   /** Głośność mikrofonu mobilnego 0-100; -1 = nie steruj głośnością */
@@ -234,8 +257,12 @@ export interface AppConfig {
   voiceOnlyAtDesk: boolean;
   /** Sygnalizacja dźwiękowa (chime) przy wybudzeniu i wykonaniu akcji */
   voiceChimeFeedback: boolean;
+  /** Globalny skrót klawiszowy wywołania nasłuchu komendy głosowej (np. CommandOrControl+Shift+V) */
+  voiceShortcut: string;
   /** Po ilu minutach bezczynności zwolnić model Whisper z pamięci (0 = nigdy) */
   voiceIdleUnloadMin: number;
+  /** Bias dekodera słownictwem komend (whisper: initial_prompt, vosk: gramatyka). Wyłączenie przywraca domyślne rozpoznawanie */
+  voiceVocabBias: boolean;
   /** Lista zdefiniowanych reguł komend użytkownika */
   voiceRules: VoiceRule[];
 }
@@ -244,7 +271,9 @@ export const DEFAULT_CONFIG: AppConfig = {
   port: 'auto',
   baudRate: 115200,
   micDeskName: '',
+  micDeskFallbackName: '',
   micHeadsetName: '',
+  micHeadsetFallbackName: '',
   micDeskVolume: -1,
   micHeadsetVolume: -1,
   micDeskGateDb: -1,
@@ -320,7 +349,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   sensorLedMuteColor: '#ef4444',
   voiceEnabled: false,
   voiceEngine: 'whisper',
-  voiceWhisperModel: 'whisper-base',
+  voiceWhisperModel: 'whisper-small-pl',
   voiceWhisperBackend: 'auto',
   voiceModel: 'pl-small',
   voiceCustomModelPath: '',
@@ -328,14 +357,18 @@ export const DEFAULT_CONFIG: AppConfig = {
   voiceRequireWakeWord: true,
   voiceOnlyAtDesk: true,
   voiceChimeFeedback: true,
+  voiceShortcut: 'CommandOrControl+Shift+V',
   voiceIdleUnloadMin: 2,
+  voiceVocabBias: true,
   voiceRules: [
     { id: 'rule_1', name: 'Przełącz na słuchawki', enabled: true, phrase: 'przełącz na słuchawki', actionType: 'switch_headset' },
     { id: 'rule_2', name: 'Przełącz na biurko', enabled: true, phrase: 'przełącz na biurko', actionType: 'switch_desk' },
     { id: 'rule_3', name: 'Tryb automatyczny', enabled: true, phrase: 'włącz tryb automatyczny', actionType: 'switch_auto' },
     { id: 'rule_4', name: 'Wycisz mikrofon', enabled: true, phrase: 'wycisz mikrofon', actionType: 'mute' },
     { id: 'rule_5', name: 'Odcisz mikrofon', enabled: true, phrase: 'odcisz mikrofon', actionType: 'unmute' },
-    { id: 'rule_6', name: 'Zgaś ekrany', enabled: true, phrase: 'zgaś ekrany', actionType: 'sleep_display' }
+    { id: 'rule_6', name: 'Zgaś ekrany', enabled: true, phrase: 'zgaś ekrany', actionType: 'sleep_display' },
+    { id: 'rule_7', name: 'Otwórz aplikację', enabled: true, phrase: 'otwórz', actionType: 'open_app' },
+    { id: 'rule_8', name: 'Pokaż listę komend', enabled: true, phrase: 'pokaż listę komend', actionType: 'show_commands' }
   ]
 };
 
@@ -346,6 +379,11 @@ export interface DiscordStatus {
   authenticated: boolean;
   user?: string;
   error?: string;
+  muted?: boolean;
+  deaf?: boolean;
+  inVoiceCall?: boolean;
+  voiceChannelId?: string | null;
+  currentInputDeviceId?: string | null;
 }
 
 export interface DiscordVoiceSettings {
@@ -388,8 +426,15 @@ export interface RadarTelemetry {
   breathRate?: number;
   illuminanceLux?: number;
   detectedPerson?: DetectedPerson;
+  movingTarget?: boolean;
+  stillTarget?: boolean;
+  movingDistanceCm?: number;
+  stillDistanceCm?: number;
+  sensorFreq?: '24GHz' | '60GHz';
+  profile?: SensorProfile;
   deviceInfo?: {
     fwVersion?: string;
+    sensorModel?: string;
     uptimeSec?: number;
     chipTempC?: number;
   };
@@ -574,6 +619,22 @@ export interface DiagSessionReport {
   text: string;
 }
 
+export interface FlasherDependencies {
+  python: boolean;
+  pythonCmd: string;
+  esptool: boolean;
+  arduinoCli: boolean;
+  arduinoCliPath?: string;
+  stockFiles: Array<{ name: string; path: string; type: 'bin' | 'ino'; description: string }>;
+}
+
+export interface FlashedFileInfo {
+  filePath: string;
+  fileName: string;
+  sizeBytes: number;
+  extension: string;
+}
+
 export interface Api {
   getState: () => Promise<Snapshot>;
   getPorts: () => Promise<SerialPortInfo[]>;
@@ -672,6 +733,13 @@ export interface Api {
   voicePickCustomModel: () => Promise<string | null>;
   voicePickAppPath: () => Promise<string | null>;
   voiceDeleteAsset: (kind: 'model' | 'backend' | 'qwen', key: string) => Promise<{ ok: boolean; message?: string }>;
+  voiceTriggerListening: () => Promise<boolean>;
+
+  // Firmware Flasher (XIAO ESP32-C6)
+  flasherCheckDeps: () => Promise<FlasherDependencies>;
+  flasherSelectFile: () => Promise<FlashedFileInfo | null>;
+  flasherFlash: (opts: { port: string; filePath: string; baudRate?: number }) => Promise<{ success: boolean; error?: string }>;
+  flasherCancel: () => Promise<void>;
 
   onEvent: (cb: (e: PushEvent) => void) => () => void;
 }

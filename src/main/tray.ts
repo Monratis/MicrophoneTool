@@ -27,14 +27,48 @@ const TRAY_ICONS = {
   default: nativeImage.createFromDataURL(TRAY_PNG_DEF)
 };
 
-export function trayIcon(state: string | null | undefined): Electron.NativeImage {
-  return TRAY_ICONS[state as keyof typeof TRAY_ICONS] || TRAY_ICONS.default;
+import path from 'node:path';
+import fs from 'node:fs';
+
+function getTrayIconPath(name: string): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'resources', name);
+  }
+  return path.join(__dirname, '..', '..', 'resources', name);
 }
 
+export function trayIcon(state: string | null | undefined): Electron.NativeImage {
+  const iconName =
+    state === 'desk'
+      ? 'tray-desk.png'
+      : state === 'away' || state === 'headset'
+        ? 'tray-away.png'
+        : 'tray-default.png';
+  const filePath = getTrayIconPath(iconName);
+  if (fs.existsSync(filePath)) {
+    const img = nativeImage.createFromPath(filePath);
+    if (!img.isEmpty()) return img;
+  }
+  const fallbackKey =
+    state === 'desk'
+      ? 'desk'
+      : state === 'away' || state === 'headset'
+        ? 'away'
+        : 'default';
+  return TRAY_ICONS[fallbackKey] || TRAY_ICONS.default;
+}
+
+let trayInstance: Electron.Tray | null = null;
+
 export function createTray(ctx: AppContext): Electron.Tray {
+  if (trayInstance && !trayInstance.isDestroyed()) {
+    try { trayInstance.destroy(); } catch (_) {}
+  }
   const tray = new Tray(trayIcon('away'));
+  trayInstance = tray;
   tray.on('click', () => ctx.showSettings());
   tray.on('double-click', () => ctx.showSettings());
+  refreshTray(ctx, tray);
   return tray;
 }
 
@@ -87,14 +121,11 @@ export function refreshTray(ctx: AppContext, tray: Electron.Tray): void {
       label: 'Autoryzuj Discord (presety głosowe)',
       click: () => {
         if (!ctx.controller.discord) {
-          ctx.showWindowsNotification('DeskSense', 'Integracja Discord nie jest skonfigurowana');
+          ctx.pushEvent('toast', { message: 'Integracja Discord nie jest skonfigurowana' });
           return;
         }
         ctx.controller.discord.authorizeManually();
-        ctx.showWindowsNotification(
-          'DeskSense',
-          'Sprawdź popup zgody w kliencie Discord i zatwierdź autoryzację'
-        );
+        ctx.pushEvent('toast', { message: 'Sprawdź popup zgody w kliencie Discord i zatwierdź autoryzację' });
       }
     },
     { label: 'Wyjdź', click: () => app.quit() }

@@ -31,6 +31,9 @@ export class LiveAudioEngine {
   // Voice Activity Hangover Timers (eliminates flickering/jumping)
   private deskVoiceHangover = 0;
   private headVoiceHangover = 0;
+  // Throttle: VU nie potrzebuje 60 fps — ~30 fps to o połowę mniej rAF + DOM (mniej CPU)
+  private lastTickMs = 0;
+  private readonly VU_TICK_MS = 33;
 
   async start(deskName: string, headName: string) {
     this.lastDeskName = deskName;
@@ -169,7 +172,14 @@ export class LiveAudioEngine {
   }
 
   private tick = () => {
+    if (!this.isRunning) return;
     const now = Date.now();
+    // Throttle ~30 fps — VU nie wymaga płynności 60 fps, oszczędza CPU/DOM
+    if (now - this.lastTickMs < this.VU_TICK_MS) {
+      this.animFrameId = requestAnimationFrame(this.tick);
+      return;
+    }
+    this.lastTickMs = now;
 
     // Process Desk Mic (32-bit Float RMS z Envelope Followerem jak w WebRTC/Discord)
     if (this.deskAnalyser && this.deskData) {

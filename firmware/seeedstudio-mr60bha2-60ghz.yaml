@@ -1,0 +1,99 @@
+# ==============================================================================
+# DeskSense — ESPHome Configuration for Seeed Studio MR60BHA2 60GHz Kit
+# Hardware: Seeed Studio XIAO ESP32-C6 + MR60BHA2 (60GHz Sleep/Presence Radar)
+# Peripherals: BH1750 (I2C Light Sensor), WS2812 RGB LED (GPIO1)
+# ==============================================================================
+
+substitutions:
+  name: "desksense-mr60bha2-60ghz"
+  friendly_name: "DeskSense MR60BHA2 60GHz Sensor"
+
+esphome:
+  name: "${name}"
+  friendly_name: "${friendly_name}"
+  name_add_mac_suffix: true
+  project:
+    name: "seeedstudio.mr60bha2_kit"
+    version: "3.6-stable"
+  platformio_options:
+    board_upload.maximum_size: 4194304
+  min_version: "2024.3.2"
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: DEBUG
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: "M_2.4g"
+  password: "grandlinerayman33"
+  ap:
+    ssid: "desksense-mr60bha2"
+
+captive_portal:
+
+# Dioda WS2812 RGB na płytce zestawu (GPIO1)
+light:
+  - platform: esp32_rmt_led_strip
+    id: led_ring
+    name: "Seeed MR60BHA2 RGB Light"
+    pin: GPIO1
+    num_leds: 1
+    rgb_order: GRB
+    chipset: ws2812
+
+# Magistrala I2C dla czujnika natężenia oświetlenia BH1750
+i2c:
+  sda: GPIO22
+  scl: GPIO23
+  scan: true
+  id: bus_a
+
+# Port szeregowy UART radaru MR60BHA2 (115200 baud)
+uart:
+  id: uart_bus
+  baud_rate: 115200
+  rx_pin: 17
+  tx_pin: 16
+  parity: NONE
+  stop_bits: 1
+
+# Wbudowany komponent Seeed MR60BHA2
+seeed_mr60bha2:
+  id: my_seeed_mr60bha2
+
+binary_sensor:
+  - platform: seeed_mr60bha2
+    has_target:
+      name: "Person Information"
+
+sensor:
+  # Czujnik oświetlenia BH1750
+  - platform: bh1750
+    name: "Seeed MR60BHA2 Illuminance"
+    address: 0x23
+    update_interval: 1s
+
+  # Sensory radaru 60GHz
+  - platform: seeed_mr60bha2
+    breath_rate:
+      name: "Real-time respiratory rate"
+    heart_rate:
+      name: "Real-time heart rate"
+    distance:
+      name: "Distance to detection object"
+    num_targets:
+      name: "Target Number"
+      filters:
+        - heartbeat: 5s

@@ -738,6 +738,10 @@ export default class HomeAssistantIntegration extends EventEmitter {
     }
     if (this.ws) {
       try {
+        this.ws.onopen = null;
+        this.ws.onmessage = null;
+        this.ws.onerror = null;
+        this.ws.onclose = null;
         this.ws.close();
       } catch {
         /* ignore */

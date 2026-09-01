@@ -2,7 +2,7 @@ import type { AppUI } from './app';
 import { esc, type SettingsTab } from './ui';
 import { renderChimePanel, renderDiscordPanel, renderHaosPanel, renderSignalrgbPanel } from './integrationsPanels';
 import { renderVoiceTab } from './voicePanel';
-import { DEFAULT_CONFIG } from '../../shared/types';
+import { DEFAULT_CONFIG, hasSensorFeature } from '../../shared/types';
 
   // ---------- SETTINGS TAB (LEWY PANEL USTAWIEŃ) ----------
 export function renderSettingsTab(app: AppUI): string {
@@ -51,10 +51,13 @@ export function renderSettingsPanel(app: AppUI): string {
 export function renderPortPanel(app: AppUI): string {
     const form = app.form!;
     const snap = app.snap!;
+    const profile = app.telemetry.profile;
+    const hasRgb = hasSensorFeature(profile, 'ws2812_rgb');
+
     return `
       <div class="fc-settings-panel">
         <div class="fc-settings-group">
-          <div class="fc-settings-group-title">🔌 Port USB COM & Czułość Wiązki</div>
+          <div class="fc-settings-group-title">🔌 Port USB COM & Aktywny Profil Sensora</div>
           <div>
             <label class="fc-micro-label">Port szeregowy radaru (XIAO ESP32-C6):</label>
             <select class="fc-select" id="sel-port" style="width: 100%; margin-top: 4px">
@@ -62,48 +65,59 @@ export function renderPortPanel(app: AppUI): string {
               ${app.ports.map((p) => `<option value="${esc(p.path)}" ${p.path === form.port ? 'selected' : ''}>${esc(p.path)}${p.manufacturer ? ` · ${esc(p.manufacturer)}` : ''}</option>`).join('')}
             </select>
           </div>
-          <div class="fc-field-row">
-            <button class="btn btn-ghost btn-sm" id="fc-btn-refresh-ports">🔄 Odśwież porty</button>
-            <span class="fc-badge ${snap.radar.connected ? 'calibrated' : (snap.ha?.connected ? 'calibrated' : 'muted')}">${snap.radar.connected ? 'USB Serial ✓' : (snap.ha?.connected ? 'HAOS Stream ✓' : 'Brak COM')}</span>
+          <div class="fc-field-row" style="margin-top: 8px;">
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <button class="btn btn-ghost btn-sm" id="fc-btn-refresh-ports">🔄 Odśwież porty</button>
+              <button class="btn btn-secondary btn-sm" id="btn-port-open-flasher" style="font-size: 11px; padding: 3px 8px;">⚡ Wgraj Firmware</button>
+              <span class="fc-badge ${snap.radar.connected ? 'calibrated' : (snap.ha?.connected ? 'calibrated' : 'muted')}">${snap.radar.connected ? 'USB Serial ✓' : (snap.ha?.connected ? 'HAOS Stream ✓' : 'Brak COM')}</span>
+            </div>
+            <span class="fc-badge blue">${esc(profile?.shortName || app.telemetry.deviceInfo?.sensorModel || 'Auto-Detekcja')}</span>
           </div>
         </div>
+
         <div class="fc-settings-group">
-          <div class="fc-settings-group-title">💡 Dioda Statusowa Sensora (WS2812 RGB)</div>
-          <div class="fc-field-row">
+          <div class="fc-settings-group-title">💡 Dioda Statusowa Sensora ${hasRgb ? '(WS2812 RGB)' : '(Status LED)'}</div>
+          ${hasRgb ? `
+            <div class="fc-field-row">
+              <div>
+                <div class="fc-field-label">Włącz diodę na obudowie sensora</div>
+                <div class="fc-field-desc">Sygnalizuje status: zielony (przy biurku), bursztynowy (poza), czerwony (mute)</div>
+              </div>
+              <button class="fc-switch ${form.sensorLedEnabled !== false ? 'active' : ''}" id="sw-sensor-led" aria-checked="${form.sensorLedEnabled !== false}" role="switch"></button>
+            </div>
             <div>
-              <div class="fc-field-label">Włącz diodę na obudowie sensora</div>
-              <div class="fc-field-desc">Sygnalizuje status: zielony (przy biurku), bursztynowy (poza), czerwony (mute)</div>
+              <label class="fc-micro-label">Jasność diody (tryb nocny / stealth):</label>
+              <div class="fc-slider-row">
+                <input type="range" class="fc-slider" id="rng-sensor-led-bri" min="0" max="100" step="5" value="${form.sensorLedBrightness ?? DEFAULT_CONFIG.sensorLedBrightness}" />
+                <span style="font-size: 11px; font-weight: 600; color: #fff; width: 34px; text-align: right" id="val-sensor-led-bri">${form.sensorLedBrightness ?? DEFAULT_CONFIG.sensorLedBrightness}%</span>
+              </div>
             </div>
-            <button class="fc-switch ${form.sensorLedEnabled !== false ? 'active' : ''}" id="sw-sensor-led" aria-checked="${form.sensorLedEnabled !== false}" role="switch"></button>
-          </div>
-          <div>
-            <label class="fc-micro-label">Jasność diody (tryb nocny / stealth):</label>
-            <div class="fc-slider-row">
-              <input type="range" class="fc-slider" id="rng-sensor-led-bri" min="0" max="100" step="5" value="${form.sensorLedBrightness ?? DEFAULT_CONFIG.sensorLedBrightness}" />
-              <span style="font-size: 11px; font-weight: 600; color: #fff; width: 34px; text-align: right" id="val-sensor-led-bri">${form.sensorLedBrightness ?? DEFAULT_CONFIG.sensorLedBrightness}%</span>
+            <div class="fc-field-row">
+              <div>
+                <div class="fc-field-label">Kolor — Stacjonarny (przy biurku)</div>
+                <div class="fc-field-desc">Świeci, gdy jesteś przy biurku</div>
+              </div>
+              <input type="color" class="fc-color-input" id="clr-led-desk" value="${esc(form.sensorLedDeskColor || DEFAULT_CONFIG.sensorLedDeskColor)}" title="Kolor diody w trybie Stacjonarnym" />
             </div>
-          </div>
-          <div class="fc-field-row">
-            <div>
-              <div class="fc-field-label">Kolor — Stacjonarny (przy biurku)</div>
-              <div class="fc-field-desc">Świeci, gdy jesteś przy biurku</div>
+            <div class="fc-field-row">
+              <div>
+                <div class="fc-field-label">Kolor — Słuchawki (poza biurkiem)</div>
+                <div class="fc-field-desc">Świeci, gdy mikrofon mobilny jest aktywny</div>
+              </div>
+              <input type="color" class="fc-color-input" id="clr-led-away" value="${esc(form.sensorLedAwayColor || DEFAULT_CONFIG.sensorLedAwayColor)}" title="Kolor diody w trybie Słuchawki" />
             </div>
-            <input type="color" class="fc-color-input" id="clr-led-desk" value="${esc(form.sensorLedDeskColor || DEFAULT_CONFIG.sensorLedDeskColor)}" title="Kolor diody w trybie Stacjonarnym" />
-          </div>
-          <div class="fc-field-row">
-            <div>
-              <div class="fc-field-label">Kolor — Słuchawki (poza biurkiem)</div>
-              <div class="fc-field-desc">Świeci, gdy mikrofon mobilny jest aktywny</div>
+            <div class="fc-field-row">
+              <div>
+                <div class="fc-field-label">Kolor — Mikrofon wyciszony</div>
+                <div class="fc-field-desc">Nakładka koloru przy wyciszeniu (Ctrl+Shift+M)</div>
+              </div>
+              <input type="color" class="fc-color-input" id="clr-led-mute" value="${esc(form.sensorLedMuteColor || DEFAULT_CONFIG.sensorLedMuteColor)}" title="Kolor diody przy wyciszonym mikrofonie" />
             </div>
-            <input type="color" class="fc-color-input" id="clr-led-away" value="${esc(form.sensorLedAwayColor || DEFAULT_CONFIG.sensorLedAwayColor)}" title="Kolor diody w trybie Słuchawki" />
-          </div>
-          <div class="fc-field-row">
-            <div>
-              <div class="fc-field-label">Kolor — Mikrofon wyciszony</div>
-              <div class="fc-field-desc">Nakładka koloru przy wyciszeniu (Ctrl+Shift+M)</div>
-            </div>
-            <input type="color" class="fc-color-input" id="clr-led-mute" value="${esc(form.sensorLedMuteColor || DEFAULT_CONFIG.sensorLedMuteColor)}" title="Kolor diody przy wyciszonym mikrofonie" />
-          </div>
+          ` : `
+            <p style="font-size: 12px; color: var(--fc-text-secondary); line-height: 1.5;">
+              Wykryto sensor <strong>${esc(profile?.name || 'Seeed 24GHz')}</strong>. Moduł wykorzystuje wbudowaną diodę LED mikrokontrolera (GPIO15) do sygnalizacji aktywności. Pełna paleta kolorów RGB dotyczy zestawu MR60BHA2 (60GHz).
+            </p>
+          `}
         </div>
 
         <div class="fc-settings-group">
@@ -115,7 +129,7 @@ export function renderPortPanel(app: AppUI): string {
             </div>
             <div class="fc-diag-item">
               <div class="fc-diag-item-title"><span>💡 Światło otoczenia</span></div>
-              <div class="fc-diag-item-val" id="card-val-lux">${typeof app.telemetry.illuminanceLux === 'number' ? `${app.telemetry.illuminanceLux} lx` : '—'}</div>
+              <div class="fc-diag-item-val" id="card-val-lux">${typeof app.telemetry.illuminanceLux === 'number' ? `${app.telemetry.illuminanceLux} lx` : (hasSensorFeature(profile, 'illuminance') ? '—' : 'N/A (Brak BH1750)')}</div>
             </div>
             <div class="fc-diag-item">
               <div class="fc-diag-item-title"><span>🌡️ ESP32 / Firmware</span></div>
@@ -193,33 +207,57 @@ export function renderTimeoutsPanel(app: AppUI): string {
 export function renderBiometricsPanel(app: AppUI): string {
     const form = app.form!;
     const person = app.telemetry.detectedPerson || 'unknown';
+    const profile = app.telemetry.profile;
+    const hasBio = hasSensorFeature(profile, 'heart_rate');
+
     return `
       <div class="fc-settings-panel">
         <div class="fc-settings-group">
-          <div class="fc-settings-group-title">🐾 Filtr Zwierząt</div>
-          <div class="fc-field-row">
-            <div>
-              <div class="fc-field-label">🐾 Filtr psa / kota (tętno &gt;125 BPM)</div>
-              <div class="fc-field-desc">Ignoruje zwierzęta na bazie oddechu i tętna</div>
+          <div class="fc-settings-group-title">🐾 Zwierzęta & Biometria</div>
+          ${hasBio ? `
+            <div class="fc-field-row">
+              <div>
+                <div class="fc-field-label">🐾 Filtr psa / kota (tętno &gt;125 BPM)</div>
+                <div class="fc-field-desc">Ignoruje zwierzęta na bazie oddechu i tętna</div>
+              </div>
+              <button class="fc-switch ${form.petFilterEnabled ? 'active' : ''}" id="sw-pet-filter" aria-checked="${form.petFilterEnabled ?? true}" role="switch"></button>
             </div>
-            <button class="fc-switch ${form.petFilterEnabled ? 'active' : ''}" id="sw-pet-filter" aria-checked="${form.petFilterEnabled ?? true}" role="switch"></button>
-          </div>
-          <div style="border-top: 1px solid var(--fc-card-border); padding-top: 10px">
-            <div class="fc-diag-grid" style="grid-template-columns: repeat(3, 1fr)">
-              <div class="fc-diag-item">
-                <div class="fc-diag-item-title"><span>🫀 Tętno live</span></div>
-                <div class="fc-diag-item-val" id="card-val-heart">${app.telemetry.heartRate ? `${app.telemetry.heartRate} BPM` : '—'}</div>
-              </div>
-              <div class="fc-diag-item">
-                <div class="fc-diag-item-title"><span>🫁 Oddech live</span></div>
-                <div class="fc-diag-item-val" id="card-val-breath">${app.telemetry.breathRate ? `${app.telemetry.breathRate} RPM` : '—'}</div>
-              </div>
-              <div class="fc-diag-item">
-                <div class="fc-diag-item-title"><span>👤 Wykryta osoba</span></div>
-                <span class="fc-badge blue" id="card-badge-person">${person === 'me' ? '👤 Człowiek ✓' : (person === 'pet' ? '🐾 Zwierzę' : '🔍 Skanowanie…')}</span>
+            <div style="border-top: 1px solid var(--fc-card-border); padding-top: 10px">
+              <div class="fc-diag-grid" style="grid-template-columns: repeat(3, 1fr)">
+                <div class="fc-diag-item">
+                  <div class="fc-diag-item-title"><span>🫀 Tętno live</span></div>
+                  <div class="fc-diag-item-val" id="card-val-heart">${app.telemetry.heartRate ? `${app.telemetry.heartRate} BPM` : '—'}</div>
+                </div>
+                <div class="fc-diag-item">
+                  <div class="fc-diag-item-title"><span>🫁 Oddech live</span></div>
+                  <div class="fc-diag-item-val" id="card-val-breath">${app.telemetry.breathRate ? `${app.telemetry.breathRate} RPM` : '—'}</div>
+                </div>
+                <div class="fc-diag-item">
+                  <div class="fc-diag-item-title"><span>👤 Wykryta osoba</span></div>
+                  <span class="fc-badge blue" id="card-badge-person">${person === 'me' ? '👤 Człowiek ✓' : (person === 'pet' ? '🐾 Zwierzę' : '🔍 Skanowanie…')}</span>
+                </div>
               </div>
             </div>
-          </div>
+          ` : `
+            <div style="padding: 12px; background: rgba(13, 17, 23, 0.6); border: 1px solid var(--fc-card-border); border-radius: 8px;">
+              <div style="font-size: 13px; font-weight: 600; color: #38bdf8; margin-bottom: 4px;">ℹ️ Aktywny profil: ${esc(profile?.name || 'Radar 24GHz')}</div>
+              <p style="font-size: 12px; color: var(--fc-text-secondary); line-height: 1.5; margin: 0;">
+                Ten radar operuje na częstotliwości 24GHz i korzysta ze sprzętowych bramek ruchu oraz energii statycznej. Nie wymaga ani nie mierzy tętna/oddechu, co eliminuje fałszywe podtrzymania obecności po wyjściu z pokoju.
+              </p>
+            </div>
+            <div style="margin-top: 12px;">
+              <div class="fc-diag-grid" style="grid-template-columns: repeat(2, 1fr)">
+                <div class="fc-diag-item">
+                  <div class="fc-diag-item-title"><span>📏 Dystans celu</span></div>
+                  <div class="fc-diag-item-val">${app.telemetry.distanceCm ? `${app.telemetry.distanceCm} cm` : '— (Brak celu)'}</div>
+                </div>
+                <div class="fc-diag-item">
+                  <div class="fc-diag-item-title"><span>👤 Status</span></div>
+                  <span class="fc-badge ${app.telemetry.presence ? 'calibrated' : 'muted'}">${app.telemetry.presence ? 'Wykryto obecność ✓' : 'Brak obecności'}</span>
+                </div>
+              </div>
+            </div>
+          `}
         </div>
       </div>
     `;

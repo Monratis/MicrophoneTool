@@ -85,6 +85,14 @@ const api = {
   voiceStopLiveTest: () => ipcRenderer.invoke('voice:stopLiveTest'),
   voicePickCustomModel: () => ipcRenderer.invoke('voice:pickCustomModel'),
   voicePickAppPath: () => ipcRenderer.invoke('voice:pickAppPath'),
+  voiceTriggerListening: () => ipcRenderer.invoke('voice:triggerListening'),
+
+  // ESP32-C6 Firmware Flasher API
+  flasherCheckDeps: () => ipcRenderer.invoke('flasher:checkDeps'),
+  flasherSelectFile: () => ipcRenderer.invoke('flasher:selectFile'),
+  flasherFlash: (opts: { port: string; filePath: string; baudRate?: number }) =>
+    ipcRenderer.invoke('flasher:flash', opts),
+  flasherCancel: () => ipcRenderer.invoke('flasher:cancel'),
 
   onEvent: (cb: (e: unknown) => void) => {
     const listener = (_e: IpcRendererEvent, payload: unknown): void => cb(payload);

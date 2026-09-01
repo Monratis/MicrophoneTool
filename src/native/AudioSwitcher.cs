@@ -267,6 +267,8 @@ namespace AudioSwitcher
 
         // STA: obiekty Device Topology (PartsList, kontrolki) żyją na wewnętrznych
         // wątkach STA audioses — z MTA QI do IPartsList/IAudioMute kończy się
+        // E_NOINTERFACE (0x80004002). STAThread gwarantuje poprawny apartment.
+        [STAThread]
         public static int Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;

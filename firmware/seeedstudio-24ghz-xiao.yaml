@@ -1,0 +1,106 @@
+# ==============================================================================
+# DeskSense — ESPHome Configuration for Seeed Studio 24GHz mmWave for XIAO
+# Hardware: Seeed Studio XIAO ESP32-C6 + Human Static Presence Sensor (101010001)
+# Sensor Chip: 24GHz mmWave (HLK-LD2410 / Seeed 24GHz Architecture)
+# Communication: UART 256000 baud (RX=17/D7, TX=16/D6)
+# ==============================================================================
+
+substitutions:
+  name: "desksense-24ghz-xiao"
+  friendly_name: "DeskSense 24GHz XIAO Sensor"
+
+esphome:
+  name: "${name}"
+  friendly_name: "${friendly_name}"
+  name_add_mac_suffix: true
+  project:
+    name: "seeedstudio.24ghz_xiao"
+    version: "1.0-stable"
+  platformio_options:
+    board_upload.maximum_size: 4194304
+  min_version: "2024.3.2"
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: DEBUG
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: "M_2.4g"
+  password: "grandlinerayman33"
+  ap:
+    ssid: "desksense-24ghz"
+
+captive_portal:
+
+# Dioda użytkownika na płytce XIAO ESP32-C6 (GPIO15)
+status_led:
+  pin:
+    number: GPIO15
+    inverted: true
+
+# Port szeregowy UART radaru 24GHz dla XIAO (domyślnie 256000 baud na pinach XIAO D7/RX=17, D6/TX=16)
+uart:
+  id: uart_radar_24g
+  baud_rate: 256000
+  rx_pin: 17
+  tx_pin: 16
+  parity: NONE
+  stop_bits: 1
+
+# Komponent radaru 24GHz (LD2410 / Seeed Human Static Presence)
+ld2410:
+  id: my_ld2410
+  uart_id: uart_radar_24g
+
+binary_sensor:
+  - platform: ld2410
+    has_target:
+      name: "Person Information"
+    has_moving_target:
+      name: "Moving Target"
+    has_still_target:
+      name: "Still Target"
+
+sensor:
+  - platform: ld2410
+    moving_distance:
+      name: "Moving Distance"
+      unit_of_measurement: "cm"
+    still_distance:
+      name: "Still Distance"
+      unit_of_measurement: "cm"
+    detection_distance:
+      name: "Distance to detection object"
+      unit_of_measurement: "cm"
+    moving_energy:
+      name: "Moving Energy"
+    still_energy:
+      name: "Still Energy"
+
+number:
+  - platform: ld2410
+    timeout:
+      name: "Radar Timeout"
+    max_move_distance_gate:
+      name: "Max Move Distance Gate"
+    max_still_distance_gate:
+      name: "Max Still Distance Gate"
+
+button:
+  - platform: ld2410
+    restart:
+      name: "Restart 24GHz Radar"
+    factory_reset:
+      name: "Factory Reset 24GHz Radar"

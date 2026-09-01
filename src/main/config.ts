@@ -113,6 +113,14 @@ export default class Config {
         if (typeof sanitized.timeoutDeskMs === 'number' && sanitized.timeoutDeskMs < 0) {
           sanitized.timeoutDeskMs = DEFAULTS.timeoutDeskMs;
         }
+        if (Array.isArray(sanitized.voiceRules)) {
+          const existingActionTypes = new Set(sanitized.voiceRules.map((r) => r.actionType));
+          for (const defRule of DEFAULTS.voiceRules) {
+            if (!existingActionTypes.has(defRule.actionType)) {
+              sanitized.voiceRules.push({ ...defRule });
+            }
+          }
+        }
         this.data = { ...DEFAULTS, ...sanitized };
         this.save(); // natychmiast czyści stary plik z usuniętych pól i zaszyfrowuje tokeny
       } else {
@@ -147,7 +155,14 @@ export default class Config {
 
       const tempPath = `${this.filePath}.tmp`;
       fs.writeFileSync(tempPath, JSON.stringify(toSerialize, null, 2), 'utf8');
-      fs.renameSync(tempPath, this.filePath);
+      try {
+        fs.renameSync(tempPath, this.filePath);
+      } catch {
+        fs.copyFileSync(tempPath, this.filePath);
+        try {
+          fs.unlinkSync(tempPath);
+        } catch {}
+      }
     } catch (err) {
       console.error('[config] atomic save error:', (err as Error).message);
       try {

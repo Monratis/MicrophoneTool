@@ -1,12 +1,13 @@
 import './styles.css';
 import type { AudioDeviceItem, DiagSessionReport, PushEvent, RadarTelemetry, SerialPortInfo, Snapshot, UpdaterStatus } from './global';
-import { esc, playChime, playCustomAudioFile, type ChimeStyle, type TabType, type SettingsTab } from './ui';
+import { normalizeVoicePhrase, type FlasherDependencies } from '../../shared/types';
+import { esc, playChime, playVoiceFeedbackChime, playCustomAudioFile, type ChimeStyle, type TabType, type SettingsTab } from './ui';
 import { LiveAudioEngine } from './liveAudioEngine';
-import { renderHomeTab, triggerOsdHud, updateHeaderAndLiveDOM, updateRadarScopeDOM, updateTelemetryDOM } from './homeView';
+import { renderHomeTab, triggerOsdHud, hideOsdHud, updateHeaderAndLiveDOM, updateRadarScopeDOM, updateTelemetryDOM } from './homeView';
 import { renderSettingsTab } from './settingsPanels';
 import { renderHaPickerModal, refreshDiscordRpcStatus } from './integrationsPanels';
 import { renderLogsTab, renderAboutTab, refreshLogConsoleDOM } from './logsAbout';
-import { closeVadModal, renderDiagModal, renderDiagSessionModal, renderVadModal } from './modals';
+import { closeVadModal, renderDiagModal, renderDiagSessionModal, renderVadModal, renderFlasherModal } from './modals';
 import { renderVoiceCalibratorModal, renderVoiceDownloadSection, renderVoiceLiveStatus, isSelectedVoiceModelReady } from './voicePanel';
 import { bindEvents, bindVoiceDynamic } from './events';
 
@@ -33,6 +34,17 @@ export class AppUI {
   voiceDownloadProgress: { percent: number; speed?: string } | null = null;
   voiceCalibratorOpen = false;
   voiceLastRecognized = '';
+
+  // Firmware Flasher State (XIAO ESP32-C6)
+  flasherModalOpen = false;
+  flasherLoading = false;
+  flasherSelectedFile = '';
+  flasherSelectedFileName = '';
+  flasherSelectedFileSize = 0;
+  flasherSelectedPort = '';
+  flasherLogs: string[] = [];
+  flasherSuccess: boolean | null = null;
+  flasherDeps: FlasherDependencies | null = null;
 
   // Live Audio VU-Meter Engine
   vuEngine = new LiveAudioEngine();
@@ -241,6 +253,14 @@ export class AppUI {
         if (this.vadModalOpen) {
           ev.preventDefault();
           closeVadModal(this);
+        } else if (this.haPicker) {
+          ev.preventDefault();
+          this.haPicker = null;
+          this.render();
+        } else if (this.voiceCalibratorOpen) {
+          ev.preventDefault();
+          this.voiceCalibratorOpen = false;
+          this.render();
         } else if (this.diagModalOpen || this.diagReportModalOpen) {
           ev.preventDefault();
           this.diagModalOpen = false;
@@ -302,6 +322,12 @@ export class AppUI {
       if (!this.dirty) {
         this.form = { ...e.snapshot.config };
         this.selectedChimeStyle = this.form.audioChimeStyle || 'harmonic';
+        if (typeof this.form.micDeskGateDb === 'number') {
+          this.vuEngine.deskGateDb = this.form.micDeskGateDb;
+        }
+        if (typeof this.form.micHeadsetGateDb === 'number') {
+          this.vuEngine.headGateDb = this.form.micHeadsetGateDb;
+        }
       }
       this.loadAudioDevices().then(() => {
         updateHeaderAndLiveDOM(this);
@@ -323,6 +349,20 @@ export class AppUI {
         this.pushToast(`Odłączono mikrofon: ${e.removed.join(', ')}`);
       }
       void this.vuEngine.start(this.form?.micDeskName || '', this.form?.micHeadsetName || '');
+      return;
+    }
+
+    if (e.type === 'navigate:tab' && (e as any).tab) {
+      const tab = (e as any).tab as string;
+      const settingsSubTabs: SettingsTab[] = ['port', 'timeouts', 'voice', 'biometrics', 'discord', 'signalrgb', 'chime', 'haos'];
+      if (settingsSubTabs.includes(tab as SettingsTab)) {
+        this.currentTab = 'settings';
+        this.settingsTab = tab as SettingsTab;
+        this.render();
+      } else if (['home', 'settings', 'logs', 'about'].includes(tab)) {
+        this.currentTab = tab as TabType;
+        this.render();
+      }
       return;
     }
 
@@ -399,6 +439,29 @@ export class AppUI {
     }
 
 
+    if (e.type === 'voice:listening') {
+      const duration = (e as any).durationMs || 4500;
+      triggerOsdHud(this, 'Słucham komendy…', 'listen', duration);
+    }
+
+    if (e.type === 'voice:listening_timeout') {
+      hideOsdHud(this);
+    }
+
+    if (e.type === 'voice:understood') {
+      const label = String((e as any).actionLabel || (e as any).name || 'Zrozumiałem');
+      triggerOsdHud(this, label, 'ok', 2800);
+    }
+
+    if (e.type === 'voice:miss') {
+      triggerOsdHud(this, 'Nie zrozumiałem komendy — powtórz proszę', 'miss', 2800);
+    }
+
+    if (e.type === 'voice:blocked') {
+      const name = String((e as any).name || 'komendę');
+      triggerOsdHud(this, `Zablokowano „${name}” — poza biurkiem`, 'blocked', 2800);
+    }
+
     if (e.type === 'voice:status' && e.voiceStatus) {
       if (this.snap) {
         this.snap.voice = e.voiceStatus as any;
@@ -467,6 +530,40 @@ export class AppUI {
       return;
     }
 
+    if (e.type === 'flasher:start') {
+      this.flasherLoading = true;
+      this.flasherLogs = ['Rozpoczynanie wgrywania...'];
+      this.flasherSuccess = null;
+      this.render();
+      return;
+    }
+
+    if (e.type === 'flasher:log') {
+      const payload = e as any;
+      if (payload.text) {
+        this.flasherLogs.push(payload.text);
+        const elConsole = document.getElementById('flasher-console');
+        if (elConsole) {
+          elConsole.textContent = this.flasherLogs.join('\n');
+          elConsole.scrollTop = elConsole.scrollHeight;
+        }
+      }
+      return;
+    }
+
+    if (e.type === 'flasher:done') {
+      const payload = e as any;
+      this.flasherLoading = false;
+      this.flasherSuccess = Boolean(payload.success);
+      if (payload.success) {
+        this.pushToast('✓ Firmware został pomyślnie wgrany na XIAO ESP32-C6!');
+      } else {
+        this.pushToast(`❌ Błąd wgrywania: ${payload.error || 'Nieznany błąd'}`, true);
+      }
+      this.render();
+      return;
+    }
+
     if (e.type === 'voice:partial' && e.text) {
       const transcriptEl = document.getElementById('voice-calibrator-transcript');
       if (transcriptEl) {
@@ -516,14 +613,8 @@ export class AppUI {
 
     if (e.type === 'voice:playChime') {
       const vol = this.form?.audioChimeVolume ?? 0.2;
-      const chimeType = (e as { chimeType?: string }).chimeType || 'action';
-      if (chimeType === 'wake') {
-        playChime('desk', vol * 0.85, 'soft_click');
-      } else if (chimeType === 'miss') {
-        playChime('away', vol * 0.7, 'soft_click');
-      } else {
-        playChime('desk', vol, this.selectedChimeStyle);
-      }
+      const chimeType = ((e as { chimeType?: string }).chimeType || 'action') as 'wake' | 'action' | 'miss';
+      playVoiceFeedbackChime(chimeType, vol);
       return;
     }
 
@@ -634,6 +725,36 @@ export class AppUI {
 
   async save() {
     if (!this.form || this.saving) return;
+
+    // Walidacja unikalności fraz wywołania komend głosowych
+    if (this.form.voiceRules && this.form.voiceRules.length > 0) {
+      const seen = new Map<string, string>();
+      for (const r of this.form.voiceRules) {
+        if (!r.enabled) continue;
+        const norm = normalizeVoicePhrase(r.phrase || '');
+        if (!norm) continue;
+        if (seen.has(norm)) {
+          const existingName = seen.get(norm)!;
+          this.saving = false;
+          this.saveState = { text: 'Błąd: Zduplikowana fraza komendy!', kind: 'error' };
+          const saveStateEl = document.getElementById('fc-save-state-text');
+          if (saveStateEl) {
+            saveStateEl.className = 'fc-save-state error';
+            saveStateEl.textContent = 'Błąd: Zduplikowana fraza!';
+          }
+          this.pushToast(
+            `🚫 Nie można zapisać: wykryto identyczną frazę wywołania „${r.phrase}” w komendach: „${existingName}” oraz „${r.name}”. Każda komenda musi mieć unikalną frazę.`,
+            true
+          );
+          if (this.currentTab === 'settings' && this.settingsTab === 'voice') {
+            this.render();
+          }
+          return;
+        }
+        seen.set(norm, r.name || 'Komenda');
+      }
+    }
+
     if (this.autoSaveTimer) {
       clearTimeout(this.autoSaveTimer);
       this.autoSaveTimer = null;
@@ -711,7 +832,9 @@ export class AppUI {
           .join('');
     };
     build('sel-mic-desk', form.micDeskName);
+    build('sel-mic-desk-fallback', form.micDeskFallbackName || '');
     build('sel-mic-headset', form.micHeadsetName);
+    build('sel-mic-headset-fallback', form.micHeadsetFallbackName || '');
   }
 
   refreshPortSelectOptions(): void {
@@ -805,7 +928,7 @@ export class AppUI {
               ${this.diagActive ? '⏹ Zakończ test' : '🧪 Wyjście z pokoju'}
             </button>
 
-            <button class="fc-mute-btn ${this.isMuted ? 'muted' : ''}" id="fc-header-mute-btn" title="Wycisz/Odcisz mikrofon (Skrót: Ctrl+Shift+M)">
+            <button class="fc-mute-btn ${this.isMuted ? 'muted' : ''}" id="fc-header-mute-btn" title="Wycisz/Odcisz mikrofon (Skrót: ${esc((this.form?.globalShortcut || 'CommandOrControl+Shift+M').replace('CommandOrControl', 'Ctrl'))})">
               ${this.isMuted ? '🔇 Wyciszony' : '🎙️ Aktywny'}
             </button>
 
@@ -895,6 +1018,7 @@ export class AppUI {
         ${this.diagReportModalOpen ? renderDiagSessionModal(this) : ''}
         ${this.haPicker ? renderHaPickerModal(this) : ''}
         ${this.voiceCalibratorOpen ? renderVoiceCalibratorModal(this) : ''}
+        ${this.flasherModalOpen ? renderFlasherModal(this) : ''}
 
         <!-- TOASTS CONTAINER (with A11y role) -->
         <div class="toasts" role="status" aria-live="polite"></div>

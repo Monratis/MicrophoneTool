@@ -69,6 +69,10 @@ export function createSettingsWindow(ctx: AppContext): void {
   // (klik w tray, przycisk ✕, druga instancja).
   settingsWindow.on('show', () => {
     settingsWindow?.setSkipTaskbar(false);
+    const currentIcon = resolveWindowIcon();
+    if (currentIcon && settingsWindow && !settingsWindow.isDestroyed()) {
+      settingsWindow.setIcon(currentIcon);
+    }
     settingsWindow?.webContents.send('push:event', { type: 'window:visibility', visible: true });
   });
   settingsWindow.on('hide', () => {
@@ -85,14 +89,60 @@ export function createSettingsWindow(ctx: AppContext): void {
   ctx.settingsWindow = settingsWindow;
 }
 
-export function showSettings(ctx: AppContext): void {
+export function showSettings(ctx: AppContext, atCursor = false, initialTab?: string): void {
   if (!settingsWindow || settingsWindow.isDestroyed()) {
     createSettingsWindow(ctx);
   }
   if (settingsWindow && !settingsWindow.isDestroyed()) {
+    const { screen } = require('electron');
+    const winBounds = settingsWindow.getBounds();
+
+    if (atCursor) {
+      const cursor = screen.getCursorScreenPoint();
+      const display = screen.getDisplayNearestPoint(cursor);
+      const wa = display.workArea;
+      let x = Math.round(cursor.x - winBounds.width / 2);
+      let y = Math.round(cursor.y - winBounds.height / 2);
+      // Ogranicz do obszaru roboczego aktywnego monitora
+      x = Math.max(wa.x, Math.min(x, wa.x + wa.width - winBounds.width));
+      y = Math.max(wa.y, Math.min(y, wa.y + wa.height - winBounds.height));
+      settingsWindow.setPosition(x, y);
+    } else {
+      const isVisibleOnAnyDisplay = screen.getAllDisplays().some((d: Electron.Display) => {
+        const db = d.bounds;
+        return (
+          winBounds.x + winBounds.width > db.x &&
+          winBounds.x < db.x + db.width &&
+          winBounds.y + winBounds.height > db.y &&
+          winBounds.y < db.y + db.height
+        );
+      });
+      if (!isVisibleOnAnyDisplay) {
+        settingsWindow.center();
+      }
+    }
+
+    const currentIcon = resolveWindowIcon();
+    if (currentIcon && !settingsWindow.isDestroyed()) {
+      settingsWindow.setIcon(currentIcon);
+    }
+
     settingsWindow.webContents.send('push:event', { type: 'snapshot', snapshot: ctx.buildSnapshot() });
+    if (initialTab) {
+      settingsWindow.webContents.send('push:event', { type: 'navigate:tab', tab: initialTab });
+    }
+    if (settingsWindow.isMinimized()) {
+      settingsWindow.restore();
+    }
     settingsWindow.show();
+    settingsWindow.setAlwaysOnTop(true);
     settingsWindow.focus();
+    settingsWindow.moveTop();
+    setTimeout(() => {
+      if (settingsWindow && !settingsWindow.isDestroyed()) {
+        settingsWindow.setAlwaysOnTop(false);
+      }
+    }, 200);
   }
 }
 

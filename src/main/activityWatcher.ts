@@ -106,15 +106,17 @@ export default class ActivityWatcher extends EventEmitter {
 
     try {
       const idleSec = powerMonitor.getSystemIdleTime();
-      if (idleSec <= 1 || idleSec < this.lastIdleSeconds) {
-        const wasIdle = this.lastIdleSeconds > 2;
-        this.lastInputTime = Date.now();
-        if (wasIdle) {
-          appendLog('ACTIVITY', 'Wykryto aktywność wejściową użytkownika (klawiatura / mysz)');
+      if (typeof idleSec === 'number' && Number.isFinite(idleSec)) {
+        if (idleSec <= 1 || idleSec < this.lastIdleSeconds) {
+          const wasIdle = this.lastIdleSeconds > 2;
+          this.lastInputTime = Date.now();
+          if (wasIdle) {
+            appendLog('ACTIVITY', 'Wykryto aktywność wejściową użytkownika (klawiatura / mysz)');
+          }
+          this.emit('activity', { idleSec, freshInput: wasIdle });
         }
-        this.emit('activity', { idleSec, freshInput: wasIdle });
+        this.lastIdleSeconds = idleSec;
       }
-      this.lastIdleSeconds = idleSec;
     } catch {
       /* ignore powerMonitor errors */
     }

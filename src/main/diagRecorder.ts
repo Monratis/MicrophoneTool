@@ -112,6 +112,8 @@ function buildResult(): DiagRecordResult {
   };
 }
 
+let lastResult: DiagRecordResult | null = null;
+
 function stop(): DiagRecordResult {
   if (stopTimer) {
     clearTimeout(stopTimer);
@@ -119,10 +121,18 @@ function stop(): DiagRecordResult {
   }
   const result = buildResult();
   active = false;
+  lastResult = result;
   return result;
 }
 
+export function isRecordingActive(): boolean {
+  return active;
+}
+
 export function stopRecording(): DiagRecordResult {
+  if (!active && lastResult) {
+    return lastResult;
+  }
   return stop();
 }
 
@@ -131,12 +141,12 @@ export function startRecording(durationSecArg = 300): DiagRecordResult {
     stop();
   }
   samples = [];
+  lastResult = null;
   durationSec = Math.max(30, Math.min(1800, Math.round(durationSecArg)));
   startedAt = Date.now();
   active = true;
   stopTimer = setTimeout(() => {
-    stopTimer = null;
-    active = false;
+    stop();
   }, durationSec * 1000);
   return { active: true, durationSec, sampleCount: 0, summary: '', csv: '' };
 }

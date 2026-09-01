@@ -9,80 +9,104 @@ import { esc } from './ui';
    * zakładce (Audio & VU, Discord & RGB itd.) plus wyszukiwarka.
    */
 export function applyLogFilter(app: AppUI, logs: string[]): string[] {
-    let filtered = logs;
-    if (app.logFilter === 'radar') filtered = filtered.filter((l) => l.toLowerCase().includes('radar') || l.toLowerCase().includes('serial') || l.toLowerCase().includes('dsp'));
-    if (app.logFilter === 'voice') filtered = filtered.filter((l) => l.includes('[VOICE') || l.toLowerCase().includes('voice') || l.toLowerCase().includes('vosk') || l.toLowerCase().includes('mow') || l.toLowerCase().includes('komend'));
-    if (app.logFilter === 'haos') filtered = filtered.filter((l) => l.includes('[HAOS]'));
-    if (app.logFilter === 'audio') filtered = filtered.filter((l) => l.toLowerCase().includes('audio') || l.toLowerCase().includes('mic') || l.toLowerCase().includes('vu'));
-    if (app.logFilter === 'discord') filtered = filtered.filter((l) => l.toLowerCase().includes('discord') || l.toLowerCase().includes('vad') || l.toLowerCase().includes('signalrgb'));
-    if (app.logFilter === 'error') filtered = filtered.filter((l) => l.toLowerCase().includes('err') || l.toLowerCase().includes('błąd') || l.toLowerCase().includes('warn') || l.toLowerCase().includes('error'));
-
-    if (app.logSearch) {
-      const q = app.logSearch.toLowerCase();
-      filtered = filtered.filter((l) => l.toLowerCase().includes(q));
-    }
-    return filtered;
+  let filtered = logs;
+  if (app.logFilter === 'radar') {
+    filtered = filtered.filter((l) => {
+      const lower = l.toLowerCase();
+      return lower.includes('[radar') || lower.includes('[serial') || lower.includes('[dsp') || lower.includes('radar') || lower.includes('serial') || lower.includes('dsp');
+    });
+  } else if (app.logFilter === 'voice') {
+    filtered = filtered.filter((l) => {
+      const lower = l.toLowerCase();
+      return l.includes('[VOICE') || lower.includes('voice') || lower.includes('vosk') || lower.includes('whisper') || lower.includes('mow') || lower.includes('komend') || lower.includes('wake') || lower.includes('spotter');
+    });
+  } else if (app.logFilter === 'haos') {
+    filtered = filtered.filter((l) => l.includes('[HAOS]') || l.toLowerCase().includes('home assistant') || l.toLowerCase().includes('haos'));
+  } else if (app.logFilter === 'audio') {
+    filtered = filtered.filter((l) => {
+      const lower = l.toLowerCase();
+      return lower.includes('[audio') || lower.includes('[vu') || lower.includes('[mic') || lower.includes('audio') || lower.includes('mic') || lower.includes('sound') || lower.includes('głośn');
+    });
+  } else if (app.logFilter === 'discord') {
+    filtered = filtered.filter((l) => {
+      const lower = l.toLowerCase();
+      return lower.includes('[discord') || lower.includes('[signalrgb') || lower.includes('discord') || lower.includes('signalrgb') || lower.includes('rgb');
+    });
+  } else if (app.logFilter === 'error') {
+    filtered = filtered.filter((l) => {
+      const lower = l.toLowerCase();
+      return lower.includes('err') || lower.includes('błąd') || lower.includes('warn') || lower.includes('error') || lower.includes('fail') || lower.includes('awaria');
+    });
   }
+
+  if (app.logSearch) {
+    const q = app.logSearch.toLowerCase();
+    filtered = filtered.filter((l) => l.toLowerCase().includes(q));
+  }
+  return filtered;
+}
 
 export function refreshLogConsoleDOM(app: AppUI) {
-    const c = document.getElementById('log-console');
-    if (!c) return;
+  const c = document.getElementById('log-console');
+  if (!c) return;
 
-    const filtered = applyLogFilter(app, app.logs);
+  const filtered = applyLogFilter(app, app.logs);
 
-    c.textContent = filtered.length > 0 ? filtered.join('\n') : 'Brak pasujących logów dla zadanego filtru.';
-    c.scrollTop = c.scrollHeight;
-  }
+  c.textContent = filtered.length > 0 ? filtered.join('\n') : 'Brak pasujących logów dla zadanego filtru.';
+  c.scrollTop = c.scrollHeight;
+}
 
-  // ---------- LOGS TAB WITH QoL SEARCH & FILTERS ----------
+// ---------- LOGS TAB WITH QoL SEARCH & FILTERS ----------
 export function renderLogsTab(app: AppUI): string {
-    return `
-      <div class="fc-tab-pane">
-        <div class="fc-settings-view">
-          <div class="fc-settings-group">
-            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--fc-card-border); padding-bottom: 8px">
-              <div class="fc-settings-group-title" style="border: none; padding: 0">
-                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="var(--fc-accent-blue)" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                Konsola Diagnostyczna & Logi Live (${app.logs.length} wpisów)
-              </div>
-              <div style="display: flex; gap: 8px">
-                <button class="btn btn-primary btn-sm" id="fc-btn-copy-diag-report" title="Wygeneruj zwięzły, pełny raport diagnostyczny dla asystenta AI / programisty" style="font-size: 11px; padding: 4px 9px">🤖 Kopiuj dla AI</button>
-                <button class="btn btn-secondary btn-sm" id="fc-btn-open-notepad" title="Otwórz wszystkie surowe logi (.txt) w Notatniku Windows" style="font-size: 11px; padding: 4px 9px">📝 Notatnik</button>
-                <button class="btn btn-ghost btn-sm" id="fc-btn-copy-logs" title="Skopiuj wszystkie surowe logi RAW do schowka" style="font-size: 11px; padding: 4px 9px">📋 Kopiuj RAW</button>
-                <button class="btn btn-ghost btn-sm" id="fc-btn-clear-logs" title="Wyczyść historię logów" style="font-size: 11px; padding: 4px 9px">🗑️ Wyczyść</button>
-              </div>
+  const visibleLogs = applyLogFilter(app, app.logs);
+  return `
+    <div class="fc-tab-pane">
+      <div class="fc-settings-view">
+        <div class="fc-settings-group">
+          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--fc-card-border); padding-bottom: 8px">
+            <div class="fc-settings-group-title" style="border: none; padding: 0">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="var(--fc-accent-blue)" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+              Konsola Diagnostyczna & Logi Live (${app.logs.length} wpisów, ${visibleLogs.length} widocznych)
             </div>
-
-            <div class="fc-log-toolbar">
-              <div class="fc-log-chips">
-                <button class="fc-log-chip ${app.logFilter === 'all' ? 'active' : ''}" data-log-filter="all">Wszystkie</button>
-                <button class="fc-log-chip ${app.logFilter === 'radar' ? 'active' : ''}" data-log-filter="radar">📡 Radar & DSP</button>
-                <button class="fc-log-chip ${app.logFilter === 'voice' ? 'active' : ''}" data-log-filter="voice">🎙️ Mowa & Vosk</button>
-                <button class="fc-log-chip ${app.logFilter === 'haos' ? 'active' : ''}" data-log-filter="haos">🏠 HAOS</button>
-                <button class="fc-log-chip ${app.logFilter === 'audio' ? 'active' : ''}" data-log-filter="audio">🎙️ Audio & VU</button>
-                <button class="fc-log-chip ${app.logFilter === 'discord' ? 'active' : ''}" data-log-filter="discord">🎮 Discord & RGB</button>
-                <button class="fc-log-chip ${app.logFilter === 'error' ? 'active' : ''}" data-log-filter="error">⚠️ Błędy</button>
-              </div>
-              <input type="text" class="fc-search-input" id="inp-log-search" placeholder="🔍 Szukaj w logach…" value="${esc(app.logSearch)}" />
-            </div>
-
-            <div id="log-console" style="background: #0d1117; border: 1px solid var(--fc-card-border); border-radius: var(--fc-radius-sm); padding: 12px; height: 350px; overflow-y: auto; font-family: monospace; font-size: 11.5px; line-height: 1.5; color: #38bdf8; white-space: pre-wrap; word-break: break-all">
-              ${app.logs.length > 0 ? esc(app.logs.join('\n')) : 'Oczekiwanie na zdarzenia…'}
+            <div style="display: flex; gap: 8px">
+              <button class="btn btn-primary btn-sm" id="fc-btn-copy-diag-report" title="Wygeneruj zwięzły, pełny raport diagnostyczny dla asystenta AI / programisty" style="font-size: 11px; padding: 4px 9px">🤖 Kopiuj dla AI</button>
+              <button class="btn btn-secondary btn-sm" id="fc-btn-open-notepad" title="Otwórz przefiltrowane logi (.txt) w Notatniku Windows" style="font-size: 11px; padding: 4px 9px">📝 Notatnik</button>
+              <button class="btn btn-ghost btn-sm" id="fc-btn-copy-logs" title="Skopiuj widoczne logi wybranej zakładki do schowka" style="font-size: 11px; padding: 4px 9px">📋 Kopiuj RAW</button>
+              <button class="btn btn-ghost btn-sm" id="fc-btn-clear-logs" title="Wyczyść historię logów" style="font-size: 11px; padding: 4px 9px">🗑️ Wyczyść</button>
             </div>
           </div>
+
+          <div class="fc-log-toolbar">
+            <div class="fc-log-chips">
+              <button class="fc-log-chip ${app.logFilter === 'all' ? 'active' : ''}" data-log-filter="all">Wszystkie</button>
+              <button class="fc-log-chip ${app.logFilter === 'radar' ? 'active' : ''}" data-log-filter="radar">📡 Radar & DSP</button>
+              <button class="fc-log-chip ${app.logFilter === 'voice' ? 'active' : ''}" data-log-filter="voice">🎙️ Mowa & Vosk</button>
+              <button class="fc-log-chip ${app.logFilter === 'haos' ? 'active' : ''}" data-log-filter="haos">🏠 HAOS</button>
+              <button class="fc-log-chip ${app.logFilter === 'audio' ? 'active' : ''}" data-log-filter="audio">🎙️ Audio & VU</button>
+              <button class="fc-log-chip ${app.logFilter === 'discord' ? 'active' : ''}" data-log-filter="discord">🎮 Discord & RGB</button>
+              <button class="fc-log-chip ${app.logFilter === 'error' ? 'active' : ''}" data-log-filter="error">⚠️ Błędy</button>
+            </div>
+            <input type="text" class="fc-search-input" id="inp-log-search" placeholder="🔍 Szukaj w logach…" value="${esc(app.logSearch)}" />
+          </div>
+
+          <div id="log-console" style="background: #0d1117; border: 1px solid var(--fc-card-border); border-radius: var(--fc-radius-sm); padding: 12px; height: 350px; overflow-y: auto; font-family: monospace; font-size: 11.5px; line-height: 1.5; color: #38bdf8; white-space: pre-wrap; word-break: break-all">
+            ${visibleLogs.length > 0 ? esc(visibleLogs.join('\n')) : 'Brak pasujących logów dla wybranego filtru.'}
+          </div>
+        </div>
 
           <div class="fc-settings-group">
             <div class="fc-settings-group-title">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="var(--fc-accent-blue)" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-              Oficjalny Firmware & Flasher MR60BHA2 (XIAO ESP32-C6)
+              Oficjalny Firmware & Konfiguracje (60GHz MR60BHA2 / 24GHz 101010001)
             </div>
             <p style="font-size: 12px; color: var(--fc-text-secondary); line-height: 1.5">
-              Sensor działa natywnie na fabrycznym firmware Seeed Studio lub alternatywnym ESPHome. Do przywrócenia lub ponownego wgrania oprogramowania użyj poniższych zasobów:
+              Sensory działają natywnie na wsadzie DeskSense Native OS lub alternatywnym ESPHome (.yaml). W repozytorium znajdują się gotowe konfiguracje dla obu modeli radaru:
             </p>
             <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px">
-              <button class="btn btn-primary btn-sm" id="btn-open-stock-bin">💾 Pobierz Binarki Firmware (Releases)</button>
+              <button class="btn btn-primary btn-sm" id="btn-open-flasher-modal" style="background: linear-gradient(135deg, #10b981 0%, #0284c7 100%); border: none; font-weight: 700;">⚡ Wgraj Firmware na ESP32-C6</button>
+              <button class="btn btn-secondary btn-sm" id="btn-open-stock-bin">💾 Pobierz Binarki Firmware</button>
               <button class="btn btn-ghost btn-sm" id="btn-open-seeed-wiki">🧰 Web Flasher (ESPHOME)</button>
-              <button class="btn btn-ghost btn-sm" id="btn-open-seeed-gh">🐙 Repozytorium GitHub (ESPHome)</button>
+              <button class="btn btn-ghost btn-sm" id="btn-open-seeed-gh">🐙 Repozytorium GitHub</button>
             </div>
           </div>
         </div>
@@ -93,6 +117,8 @@ export function renderLogsTab(app: AppUI): string {
   // ---------- ABOUT TAB WITH HEALTH DIAGNOSTICS ----------
 export function renderAboutTab(app: AppUI): string {
     const isRadarConnected = Boolean(app.snap?.radar?.connected);
+    const sensorModel = app.snap?.telemetry?.deviceInfo?.sensorModel || 'Radar mmWave';
+    const fwVersion = app.snap?.telemetry?.deviceInfo?.fwVersion ? ` FW v${app.snap.telemetry.deviceInfo.fwVersion}` : '';
     // To jest stan PRZEŁĄCZNIKA w opcjach, nie faktyczne połączenie RPC —
     // nazwa zmiennej miała to ukrywać.
     const isDiscordEnabled = Boolean(app.form?.discordIntegration);
@@ -130,7 +156,7 @@ export function renderAboutTab(app: AppUI): string {
                   <span>📡 Sensor Radar mmWave</span>
                   <span class="fc-badge ${isRadarConnected ? 'calibrated' : 'amber'}">${isRadarConnected ? 'Połączony ✓' : 'Brak COM'}</span>
                 </div>
-                <div class="fc-diag-item-val">${isRadarConnected ? (app.form?.port || 'USB COM') : 'Niepołączony'}</div>
+                <div class="fc-diag-item-val">${isRadarConnected ? `${esc(sensorModel)}${esc(fwVersion)} (${app.form?.port || 'USB COM'})` : 'Niepołączony'}</div>
               </div>
 
               <div class="fc-diag-item">

@@ -147,7 +147,7 @@ export function applyVadResults(app: AppUI) {
     }
 
     closeVadModal(app);
-    app.save();
+    void app.save();
   }
 
   // ---------- MODAL: VAD Auto-Calibration Assistant Modal ----------
@@ -440,3 +440,148 @@ export async function toggleDiagSession(app: AppUI): Promise<void> {
     app.diagReportModalOpen = true;
     app.render();
   }
+
+  // ---------- Firmware Flasher Assistant ----------
+export async function openFlasherModal(app: AppUI): Promise<void> {
+  app.flasherModalOpen = true;
+  app.flasherLoading = false;
+  app.flasherLogs = ['[DeskSense Flasher] Gotowość do pracy. Sprawdzam środowisko systemowe...'];
+  app.flasherSuccess = null;
+  app.flasherSelectedPort = app.form?.port && app.form.port !== 'auto' ? app.form.port : (app.ports[0]?.path || '');
+  app.render();
+
+  try {
+    const deps = await window.api.flasherCheckDeps();
+    app.flasherDeps = deps;
+    if (deps.esptool) {
+      app.flasherLogs.push(`✓ Wykryto narzędzie esptool (${deps.pythonCmd})`);
+    } else {
+      app.flasherLogs.push('⚠️ Brak esptool. Zainstaluj w terminalu: pip install esptool');
+    }
+    if (deps.arduinoCli) {
+      app.flasherLogs.push(`✓ Wykryto kompilator arduino-cli`);
+    }
+    app.render();
+  } catch (e) {
+    app.flasherLogs.push(`❌ Błąd sprawdzania narzędzi: ${(e as Error).message}`);
+    app.render();
+  }
+}
+
+export function closeFlasherModal(app: AppUI): void {
+  if (app.flasherLoading) {
+    void window.api.flasherCancel();
+  }
+  app.flasherModalOpen = false;
+  app.render();
+}
+
+export function renderFlasherModal(app: AppUI): string {
+  const deps = app.flasherDeps;
+  const isFlashing = app.flasherLoading;
+
+  return `
+    <div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-flasher-title">
+      <div class="modal-card" style="max-width: 680px; width: 95%;">
+        <div class="modal-header">
+          <div class="modal-title" id="modal-flasher-title" style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 18px;">⚡</span>
+            <span>Wgrywanie Firmware (XIAO ESP32-C6 mmWave)</span>
+          </div>
+          <button class="modal-close" id="btn-flasher-close" ${isFlashing ? 'disabled' : ''} aria-label="Zamknij modal">✕</button>
+        </div>
+
+        <div class="modal-body" style="display: flex; flex-direction: column; gap: 14px; max-height: 70vh; overflow-y: auto;">
+          <!-- Krok 1: Weryfikacja środowiska -->
+          <div class="fc-settings-group" style="padding: 12px; margin: 0;">
+            <div style="font-size: 12.5px; font-weight: 700; color: #fff; margin-bottom: 6px;">1. Stan Narzędzi & Zależności</div>
+            <div class="fc-diag-grid" style="grid-template-columns: 1fr 1fr; gap: 8px;">
+              <div class="fc-diag-item" style="padding: 8px 10px;">
+                <div class="fc-diag-item-title"><span>🐍 Python + esptool (.bin)</span></div>
+                <div class="fc-diag-item-val" style="font-size: 13px;">
+                  <span class="fc-badge ${deps?.esptool ? 'calibrated' : 'amber'}">
+                    ${deps?.esptool ? 'Gotowy do wgrywania ✓' : (deps?.python ? 'Wymagane: pip install esptool' : 'Brak Pythona w PATH')}
+                  </span>
+                </div>
+              </div>
+              <div class="fc-diag-item" style="padding: 8px 10px;">
+                <div class="fc-diag-item-title"><span>🛠️ Arduino CLI (.ino)</span></div>
+                <div class="fc-diag-item-val" style="font-size: 13px;">
+                  <span class="fc-badge ${deps?.arduinoCli ? 'calibrated' : 'muted'}">
+                    ${deps?.arduinoCli ? 'Kompilator dostępny ✓' : 'Opcjonalny (dla plików .ino)'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Krok 2: Wybór pliku firmware -->
+          <div class="fc-settings-group" style="padding: 12px; margin: 0;">
+            <div style="font-size: 12.5px; font-weight: 700; color: #fff; margin-bottom: 6px;">2. Wybierz Plik Wsadu do Wgrania</div>
+            
+            <!-- Gotowe szablony -->
+            ${deps?.stockFiles && deps.stockFiles.length > 0 ? `
+              <div style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px;">
+                <span class="fc-micro-label">Dołączone gotowe wsady DeskSense:</span>
+                ${deps.stockFiles.map((sf) => `
+                  <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: rgba(13, 17, 23, 0.7); border: 1px solid ${app.flasherSelectedFile === sf.path ? 'var(--fc-accent-blue)' : 'var(--fc-card-border)'}; border-radius: 6px; cursor: pointer;" class="flasher-stock-pick" data-path="${esc(sf.path)}" data-name="${esc(sf.name)}">
+                    <div>
+                      <div style="font-size: 12px; font-weight: 600; color: #fff;">${esc(sf.name)}</div>
+                      <div style="font-size: 10.5px; color: var(--fc-text-secondary);">${esc(sf.description)}</div>
+                    </div>
+                    <button class="btn btn-ghost btn-sm" style="font-size: 11px; padding: 2px 8px; pointer-events: none;">${app.flasherSelectedFile === sf.path ? 'Wybrany ✓' : 'Wybierz'}</button>
+                  </div>
+                `).join('')}
+              </div>
+            ` : ''}
+
+            <!-- Przycisk własnego pliku -->
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 4px;">
+              <button class="btn btn-secondary btn-sm" id="btn-flasher-browse" ${isFlashing ? 'disabled' : ''}>
+                📁 Wybierz własny plik z dysku (.bin / .ino)…
+              </button>
+              <div style="font-size: 11.5px; color: var(--fc-accent-blue); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px;">
+                ${app.flasherSelectedFileName ? `Wybrano: <strong>${esc(app.flasherSelectedFileName)}</strong>` : 'Nie wybrano pliku'}
+              </div>
+            </div>
+          </div>
+
+          <!-- Krok 3: Port COM & Parametry -->
+          <div class="fc-settings-group" style="padding: 12px; margin: 0;">
+            <div style="font-size: 12.5px; font-weight: 700; color: #fff; margin-bottom: 6px;">3. Port COM Mikrokontrolera</div>
+            <div style="display: flex; gap: 10px; align-items: center;">
+              <select class="fc-select" id="sel-flasher-port" ${isFlashing ? 'disabled' : ''} style="flex: 1;">
+                <option value="">— Wybierz port COM do wgrania —</option>
+                ${app.ports.map((p) => `<option value="${esc(p.path)}" ${p.path === app.flasherSelectedPort ? 'selected' : ''}>${esc(p.path)}${p.manufacturer ? ` · ${esc(p.manufacturer)}` : ''}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+
+          <!-- Live Console Output -->
+          <div>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <span class="fc-micro-label">Konsola operacji flashowania:</span>
+              ${isFlashing ? '<span style="font-size: 11px; color: #fbbf24; font-weight: 600;">⚡ Wgrywanie w toku…</span>' : ''}
+            </div>
+            <div id="flasher-console" style="background: #0d1117; border: 1px solid var(--fc-card-border); border-radius: var(--fc-radius-sm); padding: 10px; height: 160px; overflow-y: auto; font-family: monospace; font-size: 11px; line-height: 1.4; color: #38bdf8; white-space: pre-wrap; word-break: break-all;">
+              ${app.flasherLogs.map(l => esc(l)).join('\n')}
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
+          <button class="btn btn-ghost btn-sm" id="btn-flasher-cancel" ${isFlashing ? 'disabled' : ''}>Zamknij</button>
+          <div style="display: flex; gap: 8px;">
+            ${isFlashing ? `
+              <button class="btn btn-secondary btn-sm" id="btn-flasher-abort" style="color: #ef4444; border-color: rgba(239, 68, 68, 0.4);">⛔ Przerwij</button>
+            ` : `
+              <button class="btn btn-primary btn-sm" id="btn-flasher-start" ${!app.flasherSelectedFile || !app.flasherSelectedPort ? 'disabled' : ''} style="font-weight: 700; padding: 6px 14px;">
+                ⚡ Rozpocznij Wgrywanie (Flash)
+              </button>
+            `}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}

@@ -1,6 +1,7 @@
 import net from 'node:net';
 import https from 'node:https';
 import { EventEmitter } from 'node:events';
+import type { DiscordStatus, DiscordVoiceSettings } from '../shared/types';
 import type Config from './config';
 import { appendLog } from './logger';
 
@@ -43,6 +44,21 @@ export default class DiscordIntegration extends EventEmitter {
   private frameBuf = Buffer.alloc(0);
   /** nonce -> resolver odpowiedzi komendy (z timeoutem w wywołaniu). */
   private readonly pending = new Map<string, (v: { ok: boolean; data?: unknown }) => void>();
+
+  /** Bieżący stan mute z push-zdarzeń Discorda (VOICE_SETTINGS_UPDATE) */
+  private currentMute: boolean | null = null;
+  /** Bieżący stan deaf z push-zdarzeń Discorda (VOICE_SETTINGS_UPDATE) */
+  private currentDeaf: boolean | null = null;
+  /** Czy użytkownik znajduje się obecnie w aktywnym kanale głosowym */
+  private inVoiceCall = false;
+  /** ID aktywnego kanału głosowego (lub null) */
+  private voiceChannelId: string | null = null;
+  /** Aktualnie wybrane urządzenie wejściowe w Discordzie */
+  private currentInputDeviceId: string | null = null;
+  /** Buforowane ostatnie ustawienia głosu */
+  private cachedVoiceSettings: DiscordVoiceSettings | null = null;
+  /** Timestamp ostatniej zmiany zaaplikowanej przez DeskSense (blokada pętli zwrotnej) */
+  private lastApplyAt = 0;
 
   constructor(config: Config) {
     super();
@@ -98,6 +114,11 @@ export default class DiscordIntegration extends EventEmitter {
     this.connected = false;
     this.ready = false;
     this.authenticated = false;
+    this.currentMute = null;
+    this.currentDeaf = null;
+    this.inVoiceCall = false;
+    this.voiceChannelId = null;
+    this.currentInputDeviceId = null;
     this.frameBuf = Buffer.alloc(0);
     this.failAllPending();
     this.emitStatus();
@@ -166,6 +187,11 @@ export default class DiscordIntegration extends EventEmitter {
       this.connected = false;
       this.ready = false;
       this.authenticated = false;
+      this.currentMute = null;
+      this.currentDeaf = null;
+      this.inVoiceCall = false;
+      this.voiceChannelId = null;
+      this.currentInputDeviceId = null;
 
       this.socket = null;
       this.failAllPending();
@@ -194,6 +220,11 @@ export default class DiscordIntegration extends EventEmitter {
       this.connected = false;
       this.ready = false;
       this.authenticated = false;
+      this.currentMute = null;
+      this.currentDeaf = null;
+      this.inVoiceCall = false;
+      this.voiceChannelId = null;
+      this.currentInputDeviceId = null;
       if (this.socket) {
         this.socket.destroy();
         this.socket = null;
@@ -233,6 +264,15 @@ export default class DiscordIntegration extends EventEmitter {
       return;
     }
 
+    // Obsługa zdarzeń push (DISPATCH) z Discorda (np. VOICE_SETTINGS_UPDATE, VOICE_CHANNEL_SELECT)
+    if (payload.cmd === 'DISPATCH') {
+      if (payload.evt === 'VOICE_SETTINGS_UPDATE' && payload.data && typeof payload.data === 'object') {
+        this.handleVoiceSettingsUpdate(payload.data);
+      } else if (payload.evt === 'VOICE_CHANNEL_SELECT' && payload.data && typeof payload.data === 'object') {
+        this.handleVoiceChannelSelect(payload.data);
+      }
+      return;
+    }
 
     // Odpowiedź komendy po nonce
     const nonce = typeof payload.nonce === 'string' ? payload.nonce : undefined;
@@ -258,10 +298,63 @@ export default class DiscordIntegration extends EventEmitter {
     }
   }
 
+  private handleVoiceSettingsUpdate(data: any): void {
+    if (typeof data.mute === 'boolean') {
+      this.currentMute = data.mute;
+    }
+    if (typeof data.deaf === 'boolean') {
+      this.currentDeaf = data.deaf;
+    }
+    if (data.input && typeof data.input.device_id === 'string') {
+      this.currentInputDeviceId = data.input.device_id;
+    }
+    const mode = data.mode;
+    this.cachedVoiceSettings = {
+      thresholdDb: typeof mode?.threshold === 'number' ? Math.round(mode.threshold) : this.cachedVoiceSettings?.thresholdDb,
+      autoThreshold: typeof mode?.auto_threshold === 'boolean' ? mode.auto_threshold : this.cachedVoiceSettings?.autoThreshold,
+      krisp: typeof data.noise_suppression === 'boolean' ? data.noise_suppression : this.cachedVoiceSettings?.krisp,
+      agc: typeof data.automatic_gain_control === 'boolean' ? data.automatic_gain_control : this.cachedVoiceSettings?.agc,
+      echo: typeof data.echo_cancellation === 'boolean' ? data.echo_cancellation : this.cachedVoiceSettings?.echo
+    };
+    this.emit('voiceSettingsUpdate', data);
+    this.emitStatus();
+  }
+
+  private handleVoiceChannelSelect(data: any): void {
+    this.inVoiceCall = Boolean(data.channel_id);
+    this.voiceChannelId = data.channel_id || null;
+    this.emit('voiceChannelSelect', data);
+    this.emitStatus();
+  }
+
+  /**
+   * Subskrybuje zdarzenia RPC Discorda po udanym uwierzytelnieniu sesji.
+   */
+  private async subscribeToEvents(): Promise<void> {
+    if (!this.authenticated || !this.ready || !this.socket || this.socket.destroyed) return;
+    try {
+      const res1 = await this.rpcCommand('SUBSCRIBE', {}, 5000, 'VOICE_SETTINGS_UPDATE');
+      if (res1.ok) {
+        appendLog('DISCORD', 'Zasubskrybowano zdarzenia głosu Discorda (VOICE_SETTINGS_UPDATE) ✓');
+      }
+      const res2 = await this.rpcCommand('SUBSCRIBE', {}, 5000, 'VOICE_CHANNEL_SELECT');
+      if (res2.ok) {
+        appendLog('DISCORD', 'Zasubskrybowano stan kanału głosowego Discorda (VOICE_CHANNEL_SELECT) ✓');
+      }
+    } catch (e) {
+      console.warn('[discord] Błąd subskrypcji zdarzeń:', (e as Error).message);
+    }
+  }
+
   private failAllPending(): void {
-    for (const [nonce, resolve] of this.pending) {
-      resolve({ ok: false });
-      this.pending.delete(nonce);
+    const list = Array.from(this.pending.values());
+    this.pending.clear();
+    for (const resolve of list) {
+      try {
+        resolve({ ok: false });
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -322,87 +415,99 @@ export default class DiscordIntegration extends EventEmitter {
     }
 
     this.authFlowRunning = true;
-    try {
-      const expiresAt = Number(this.config.get('discordTokenExpiresAt')) || 0;
-      const isExpired = expiresAt > 0 && Date.now() >= expiresAt;
-      const expiresSoon = expiresAt > 0 && Date.now() > expiresAt - 24 * 3600 * 1000;
+    this.authFlowPromise = (async () => {
+      try {
+        const expiresAt = Number(this.config.get('discordTokenExpiresAt')) || 0;
+        const isExpired = expiresAt > 0 && Date.now() >= expiresAt;
+        const expiresSoon = expiresAt > 0 && Date.now() > expiresAt - 24 * 3600 * 1000;
 
-      if (expiresAt > 0) {
-        const remainH = Math.round((expiresAt - Date.now()) / 3600000);
-        appendLog('DISCORD', `Auto-auth: access token ${isExpired ? 'WYGASŁ' : `ważny jeszcze ~${remainH} h`}`);
-      } else {
-        appendLog('DISCORD', 'Auto-auth: brak zapisanego czasu wygaśnięcia tokenu — próba AUTHENTICATE');
-      }
-
-      // 1. Jeśli token dostępu istnieje i nie wygasł definitywnie, spróbuj najpierw uwierzytelnić sesję RPC
-      if (accessToken && !isExpired) {
-        const auth = await this.rpcCommand('AUTHENTICATE', { access_token: accessToken }, 10000);
-        if (auth.ok) {
-          this.authenticated = true;
-          const u = (auth.data as { user?: { username?: string; global_name?: string } } | undefined)?.user;
-          this.username = u?.global_name || u?.username || this.username || '';
-          appendLog('DISCORD', `Automatycznie uwierzytelniono sesję OAuth${this.username ? ` jako @${this.username}` : ''} ✓`);
-          this.emit('authenticated');
-          this.emitStatus();
-
-          // Jeśli token wygasa wkrótce (<24h), w tle odśwież go proaktywnie (nie blokując sesji)
-          if (expiresSoon && refreshTokenStr) {
-            void this.proactiveTokenRefresh();
-          }
-          return;
+        if (expiresAt > 0) {
+          const remainH = Math.round((expiresAt - Date.now()) / 3600000);
+          appendLog('DISCORD', `Auto-auth: access token ${isExpired ? 'WYGASŁ' : `ważny jeszcze ~${remainH} h`}`);
+        } else {
+          appendLog('DISCORD', 'Auto-auth: brak zapisanego czasu wygaśnięcia tokenu — próba AUTHENTICATE');
         }
-        appendLog('DISCORD', 'Zapisany access token nie został przyjęty przez sesję RPC — próbuję odświeżyć token (refresh_token)...');
-      }
 
-      // 2. Jeśli brak access tokenu lub nie został przyjęty / wygasł, użyj refresh_token do pobrania nowego
-      if (refreshTokenStr) {
-        const refreshed = await this.refreshToken(refreshTokenStr);
-        if (refreshed.ok && refreshed.accessToken) {
-          this.saveTokens(refreshed.accessToken, refreshed.refreshToken, refreshed.expiresIn);
-          const auth = await this.rpcCommand('AUTHENTICATE', { access_token: refreshed.accessToken }, 10000);
+        // 1. Jeśli token dostępu istnieje i nie wygasł definitywnie, spróbuj najpierw uwierzytelnić sesję RPC
+        if (accessToken && !isExpired) {
+          const auth = await this.rpcCommand('AUTHENTICATE', { access_token: accessToken }, 10000);
           if (auth.ok) {
             this.authenticated = true;
             const u = (auth.data as { user?: { username?: string; global_name?: string } } | undefined)?.user;
             this.username = u?.global_name || u?.username || this.username || '';
-            appendLog('DISCORD', `Pomyślnie odświeżono token OAuth i uwierzytelniono sesję${this.username ? ` (@${this.username})` : ''} ✓`);
+            appendLog('DISCORD', `Automatycznie uwierzytelniono sesję OAuth${this.username ? ` jako @${this.username}` : ''} ✓`);
+            void this.subscribeToEvents();
             this.emit('authenticated');
             this.emitStatus();
-            return;
+
+            // Jeśli token wygasa wkrótce (<24h), w tle odśwież go proaktywnie (nie blokując sesji)
+            if (expiresSoon && refreshTokenStr) {
+              void this.proactiveTokenRefresh();
+            }
+            return { ok: true, user: this.username };
           }
-          appendLog('DISCORD', 'Nowy token nie został przyjęty przez sesję RPC — tokeny zachowane, ponowię przy kolejnym połączeniu.');
-          return;
+          appendLog('DISCORD', 'Zapisany access token nie został przyjęty przez sesję RPC — próbuję odświeżyć token (refresh_token)...');
         }
 
-        // 3. Sprawdź przyczynę błędu odświeżania
-        if (refreshed.rejected) {
-          // Jednoznaczna odmowa (invalid_grant) — np. użytkownik odpiął aplikację w ustawieniach Discorda
-          this.clearTokens();
-          this.emitStatus();
-          appendLog('DISCORD', 'Refresh token został unieważniony przez Discord (invalid_grant) — wymagana ponowna autoryzacja (kliknij "Autoryzuj Discord").');
-        } else {
-          // Błąd sieci/serwera Discord (np. brak połączenia z internetem przy starcie/wybudzeniu PC)
-          // Jeśli stary accessToken istnieje, spróbuj go jako ostatnią deskę ratunku:
-          if (accessToken) {
-            const fallbackAuth = await this.rpcCommand('AUTHENTICATE', { access_token: accessToken }, 10000);
-            if (fallbackAuth.ok) {
+        // 2. Jeśli brak access tokenu lub nie został przyjęty / wygasł, użyj refresh_token do pobrania nowego
+        if (refreshTokenStr) {
+          const refreshed = await this.refreshToken(refreshTokenStr);
+          if (refreshed.ok && refreshed.accessToken) {
+            this.saveTokens(refreshed.accessToken, refreshed.refreshToken, refreshed.expiresIn);
+            const auth = await this.rpcCommand('AUTHENTICATE', { access_token: refreshed.accessToken }, 10000);
+            if (auth.ok) {
               this.authenticated = true;
-              const u = (fallbackAuth.data as { user?: { username?: string; global_name?: string } } | undefined)?.user;
+              const u = (auth.data as { user?: { username?: string; global_name?: string } } | undefined)?.user;
               this.username = u?.global_name || u?.username || this.username || '';
-              appendLog('DISCORD', `Uwierzytelniono sesję RPC istniejącym tokenem w trybie offline/fallback${this.username ? ` (@${this.username})` : ''} ✓`);
+              appendLog('DISCORD', `Pomyślnie odświeżono token OAuth i uwierzytelniono sesję${this.username ? ` (@${this.username})` : ''} ✓`);
+              void this.subscribeToEvents();
               this.emit('authenticated');
               this.emitStatus();
-              return;
+              return { ok: true, user: this.username };
             }
+            appendLog('DISCORD', 'Nowy token nie został przyjęty przez sesję RPC — tokeny zachowane, ponowię przy kolejnym połączeniu.');
+            return { ok: false, error: 'Nowy token odrzucony przez sesję RPC' };
           }
-          appendLog('DISCORD', 'Odświeżanie tokenu nie powiodło się (błąd sieci/serwera Discord) — tokeny zachowane, ponowię próbę.');
+
+          // 3. Sprawdź przyczynę błędu odświeżania
+          if (refreshed.rejected) {
+            // Jednoznaczna odmowa (invalid_grant) — np. użytkownik odpiął aplikację w ustawieniach Discorda
+            this.clearTokens();
+            this.emitStatus();
+            appendLog('DISCORD', 'Refresh token został unieważniony przez Discord (invalid_grant) — wymagana ponowna autoryzacja (kliknij "Autoryzuj Discord").');
+            return { ok: false, error: 'Token unieważniony (invalid_grant)' };
+          } else {
+            // Błąd sieci/serwera Discord (np. brak połączenia z internetem przy starcie/wybudzeniu PC)
+            // Jeśli stary accessToken istnieje, spróbuj go jako ostatnią deskę ratunku:
+            if (accessToken) {
+              const fallbackAuth = await this.rpcCommand('AUTHENTICATE', { access_token: accessToken }, 10000);
+              if (fallbackAuth.ok) {
+                this.authenticated = true;
+                const u = (fallbackAuth.data as { user?: { username?: string; global_name?: string } } | undefined)?.user;
+                this.username = u?.global_name || u?.username || this.username || '';
+                appendLog('DISCORD', `Uwierzytelniono sesję RPC istniejącym tokenem w trybie offline/fallback${this.username ? ` (@${this.username})` : ''} ✓`);
+                void this.subscribeToEvents();
+                this.emit('authenticated');
+                this.emitStatus();
+                return { ok: true, user: this.username };
+              }
+            }
+            appendLog('DISCORD', 'Odświeżanie tokenu nie powiodło się (błąd sieci/serwera Discord) — tokeny zachowane, ponowię próbę.');
+            return { ok: false, error: 'Błąd sieci lub serwera Discord' };
+          }
         }
+        return { ok: false, error: 'Brak tokenów' };
+      } catch (e) {
+        console.warn('[discord] Błąd auto-uwierzytelniania:', (e as Error).message);
+        return { ok: false, error: (e as Error).message };
+      } finally {
+        this.authFlowRunning = false;
+        this.authFlowPromise = null;
+        this.emitStatus();
       }
-    } catch (e) {
-      console.warn('[discord] Błąd auto-uwierzytelniania:', (e as Error).message);
-    } finally {
-      this.authFlowRunning = false;
-      this.emitStatus();
-    }
+    })();
+
+    await this.authFlowPromise;
   }
 
   /**
@@ -451,6 +556,7 @@ export default class DiscordIntegration extends EventEmitter {
             this.authenticated = true;
             const u = (auth.data as { user?: { username?: string; global_name?: string } } | undefined)?.user;
             this.username = u?.global_name || u?.username || this.username || '';
+            void this.subscribeToEvents();
             this.emit('authenticated');
             this.emitStatus();
           }
@@ -563,6 +669,7 @@ export default class DiscordIntegration extends EventEmitter {
           const u = (auth.data as { user?: { username?: string; global_name?: string } } | undefined)?.user;
           this.username = u?.global_name || u?.username || this.username || '';
           appendLog('DISCORD', `Pomyślnie uwierzytelniono OAuth${this.username ? ` jako @${this.username}` : ''} — presety głosu i sterowanie wejściem aktywne ✓`);
+          void this.subscribeToEvents();
           this.emit('authenticated');
           this.emitStatus();
           return { ok: true, user: this.username };
@@ -673,21 +780,29 @@ export default class DiscordIntegration extends EventEmitter {
     }));
   }
 
-  getStatus(): {
-    enabled: boolean;
-    connected: boolean;
-    ready: boolean;
-    authenticated: boolean;
-    user?: string;
-    error?: string;
-  } {
+  getStatus(): DiscordStatus {
     return {
       enabled: this.config.get('discordIntegration') !== false,
       connected: this.connected,
       ready: this.ready,
       authenticated: this.authenticated,
-      user: this.username || undefined
+      user: this.username || undefined,
+      muted: typeof this.currentMute === 'boolean' ? this.currentMute : undefined,
+      deaf: typeof this.currentDeaf === 'boolean' ? this.currentDeaf : undefined,
+      inVoiceCall: this.inVoiceCall,
+      voiceChannelId: this.voiceChannelId,
+      currentInputDeviceId: this.currentInputDeviceId
     };
+  }
+
+  /** Aktualne ID urządzenia wejściowego aktywnego w Discordzie. */
+  getCurrentInputDeviceId(): string | null {
+    return this.currentInputDeviceId;
+  }
+
+  /** Timestamp ostatniej zmiany zaaplikowanej przez aplikację (do ignorowania własnych zdarzeń echo). */
+  getLastApplyAt(): number {
+    return this.lastApplyAt;
   }
 
   private sendHandshake(): void {
@@ -747,6 +862,7 @@ export default class DiscordIntegration extends EventEmitter {
     }
     await this.ensureAuthenticated();
     try {
+      this.lastApplyAt = Date.now();
       const reply = await this.rpcCommand('SET_VOICE_SETTINGS', {
         input: { device_id: 'default' }
       }, 10000);
@@ -767,12 +883,21 @@ export default class DiscordIntegration extends EventEmitter {
   }
 
   /** Wspólny wysyłacz komendy RPC z weryfikacją odpowiedzi po nonce. */
-  private rpcCommand(cmd: string, args: Record<string, unknown>, timeoutMs = 3000): Promise<{ ok: boolean; data?: unknown }> {
+  private rpcCommand(
+    cmd: string,
+    args: Record<string, unknown>,
+    timeoutMs = 3000,
+    evt?: string
+  ): Promise<{ ok: boolean; data?: unknown }> {
     if (!this.connected || !this.ready || !this.socket || this.socket.destroyed) {
       return Promise.resolve({ ok: false });
     }
     const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const payload = JSON.stringify({ cmd, args, nonce });
+    const payloadObj: Record<string, unknown> = { cmd, args, nonce };
+    if (evt) {
+      payloadObj.evt = evt;
+    }
+    const payload = JSON.stringify(payloadObj);
     return new Promise<{ ok: boolean; data?: unknown }>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(nonce);
@@ -831,6 +956,7 @@ export default class DiscordIntegration extends EventEmitter {
       if (typeof opts.echo === 'boolean') args.echo_cancellation = opts.echo;
       if (Object.keys(args).length === 0) return false;
 
+      this.lastApplyAt = Date.now();
       const reply = await this.rpcCommand('SET_VOICE_SETTINGS', args, 10000);
       appendLog(
         'DISCORD',
@@ -848,7 +974,8 @@ export default class DiscordIntegration extends EventEmitter {
   }
 
   /**
-   * Głośność wejścia przez Discorda (pipeline WebRTC). Działa nawet dla urządzeń   * BT, które nie wystawiają IAudioEndpointVolume w OS (E_NOINTERFACE).
+   * Głośność wejścia przez Discorda (pipeline WebRTC). Działa nawet dla urządzeń
+   * BT, które nie wystawiają IAudioEndpointVolume w OS (E_NOINTERFACE).
    * Zakres Discorda: 0-200 (100 = 100%). Fallback dla daemona audio.
    */
   async applyInputVolume(percent: number): Promise<boolean> {
@@ -856,6 +983,7 @@ export default class DiscordIntegration extends EventEmitter {
     if (!this.authenticated) await this.ensureAuthenticated();
     if (!this.authenticated) return false;
     const vol = Math.max(0, Math.min(200, Math.round(percent)));
+    this.lastApplyAt = Date.now();
     const reply = await this.rpcCommand('SET_VOICE_SETTINGS', {
       input: { volume: vol }
     }, 5000);
@@ -870,20 +998,61 @@ export default class DiscordIntegration extends EventEmitter {
     if (!this.config.get('discordIntegration')) return false;
     if (!this.authenticated) await this.ensureAuthenticated();
     if (!this.authenticated) return false;
+    this.lastApplyAt = Date.now();
     const reply = await this.rpcCommand('SET_VOICE_SETTINGS', { mute: muted }, 5000);
+    if (reply.ok) {
+      this.currentMute = muted;
+      this.emitStatus();
+    }
     console.log(`[discord] SET_VOICE_SETTINGS mute=${muted} -> ok=${reply.ok}`);
     return reply.ok;
   }
 
   /** Aktualny stan mute wejścia z Discorda (do toggle przy urządzeniach BT). */
   async getInputMute(): Promise<boolean | null> {
+    if (typeof this.currentMute === 'boolean') return this.currentMute;
     if (!this.config.get('discordIntegration')) return null;
     if (!this.authenticated) await this.ensureAuthenticated();
     if (!this.authenticated) return null;
     const reply = await this.rpcCommand('GET_VOICE_SETTINGS', {}, 5000);
     if (!reply.ok) return null;
     const d = reply.data as { mute?: boolean };
+    if (typeof d.mute === 'boolean') {
+      this.currentMute = d.mute;
+      this.emitStatus();
+    }
     return typeof d.mute === 'boolean' ? d.mute : null;
+  }
+
+  /** Ustawienie wyciszenia dźwięków/ogłuszenia (deafen) w Discordzie. */
+  async setInputDeaf(deafened: boolean): Promise<boolean> {
+    if (!this.config.get('discordIntegration')) return false;
+    if (!this.authenticated) await this.ensureAuthenticated();
+    if (!this.authenticated) return false;
+    this.lastApplyAt = Date.now();
+    const reply = await this.rpcCommand('SET_VOICE_SETTINGS', { deaf: deafened }, 5000);
+    if (reply.ok) {
+      this.currentDeaf = deafened;
+      this.emitStatus();
+    }
+    console.log(`[discord] SET_VOICE_SETTINGS deaf=${deafened} -> ok=${reply.ok}`);
+    return reply.ok;
+  }
+
+  /** Aktualny stan ogłuszenia (deafen) z Discorda. */
+  async getInputDeaf(): Promise<boolean | null> {
+    if (typeof this.currentDeaf === 'boolean') return this.currentDeaf;
+    if (!this.config.get('discordIntegration')) return null;
+    if (!this.authenticated) await this.ensureAuthenticated();
+    if (!this.authenticated) return null;
+    const reply = await this.rpcCommand('GET_VOICE_SETTINGS', {}, 5000);
+    if (!reply.ok) return null;
+    const d = reply.data as { deaf?: boolean };
+    if (typeof d.deaf === 'boolean') {
+      this.currentDeaf = d.deaf;
+      this.emitStatus();
+    }
+    return typeof d.deaf === 'boolean' ? d.deaf : null;
   }
 
   /**
@@ -891,13 +1060,7 @@ export default class DiscordIntegration extends EventEmitter {
    */
   async getVoiceSettings(): Promise<{
     ok: boolean;
-    settings?: {
-      thresholdDb?: number;
-      autoThreshold?: boolean;
-      krisp?: boolean;
-      agc?: boolean;
-      echo?: boolean;
-    };
+    settings?: DiscordVoiceSettings;
     user?: string;
     error?: string;
   }> {
@@ -925,17 +1088,24 @@ export default class DiscordIntegration extends EventEmitter {
       automatic_gain_control?: boolean;
       noise_suppression?: boolean;
       echo_cancellation?: boolean;
+      mute?: boolean;
+      deaf?: boolean;
     };
+    if (typeof d.mute === 'boolean') this.currentMute = d.mute;
+    if (typeof d.deaf === 'boolean') this.currentDeaf = d.deaf;
+    const parsedSettings: DiscordVoiceSettings = {
+      thresholdDb: typeof d.mode?.threshold === 'number' ? Math.round(d.mode.threshold) : undefined,
+      autoThreshold: typeof d.mode?.auto_threshold === 'boolean' ? d.mode.auto_threshold : undefined,
+      krisp: typeof d.noise_suppression === 'boolean' ? d.noise_suppression : undefined,
+      agc: typeof d.automatic_gain_control === 'boolean' ? d.automatic_gain_control : undefined,
+      echo: typeof d.echo_cancellation === 'boolean' ? d.echo_cancellation : undefined
+    };
+    this.cachedVoiceSettings = parsedSettings;
+    this.emitStatus();
     return {
       ok: true,
       user: this.username || undefined,
-      settings: {
-        thresholdDb: typeof d.mode?.threshold === 'number' ? Math.round(d.mode.threshold) : undefined,
-        autoThreshold: typeof d.mode?.auto_threshold === 'boolean' ? d.mode.auto_threshold : undefined,
-        krisp: typeof d.noise_suppression === 'boolean' ? d.noise_suppression : undefined,
-        agc: typeof d.automatic_gain_control === 'boolean' ? d.automatic_gain_control : undefined,
-        echo: typeof d.echo_cancellation === 'boolean' ? d.echo_cancellation : undefined
-      }
+      settings: parsedSettings
     };
   }
 }

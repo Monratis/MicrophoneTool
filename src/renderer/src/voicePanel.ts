@@ -1,7 +1,9 @@
 import { esc } from './ui';
 import type { AppUI } from './app';
 import type { VoiceRule, VoiceModelType, VoiceEngineType, VoiceWhisperModel, VoiceWhisperBackend, VoiceStatus } from './global';
+import { normalizeVoicePhrase } from '../../shared/types';
 import { haDomainBadge } from './integrationsPanels';
+import { formatAcceleratorDisplay } from './hotkeyRecorder';
 
 /** Sprawdza gotowość aktualnie wybranego w formularzu modelu i backendu */
 export function isSelectedVoiceModelReady(ui: AppUI): boolean {
@@ -10,7 +12,7 @@ export function isSelectedVoiceModelReady(ui: AppUI): boolean {
   if (!form || !voiceStatus) return false;
   const engine = (form.voiceEngine || 'whisper') as VoiceEngineType;
   if (engine === 'whisper') {
-    const model = (form.voiceWhisperModel || 'whisper-base') as VoiceWhisperModel;
+    const model = (form.voiceWhisperModel || 'whisper-small-pl') as VoiceWhisperModel;
     const backend = (form.voiceWhisperBackend || 'auto') as VoiceWhisperBackend;
     const isModelDownloaded = Boolean(voiceStatus.installedModels?.whisper?.[model]);
     const resolvedBackend = backend === 'auto'
@@ -31,12 +33,13 @@ export function renderVoiceTab(ui: AppUI): string {
 
   const voiceEnabled = form.voiceEnabled ?? false;
   const voiceEngine = (form.voiceEngine || 'whisper') as VoiceEngineType;
-  const voiceWhisperModel = (form.voiceWhisperModel || 'whisper-base') as VoiceWhisperModel;
+  const voiceWhisperModel = (form.voiceWhisperModel || 'whisper-small-pl') as VoiceWhisperModel;
   const voiceWhisperBackend = (form.voiceWhisperBackend || 'auto') as VoiceWhisperBackend;
   const voiceModel = (form.voiceModel || 'pl-small') as VoiceModelType;
   const voiceRequireWakeWord = form.voiceRequireWakeWord ?? true;
   const voiceOnlyAtDesk = form.voiceOnlyAtDesk ?? true;
   const voiceChime = form.voiceChimeFeedback ?? true;
+  const vocabBias = form.voiceVocabBias !== false;
   const rules = form.voiceRules || [];
   const voiceStatus = ui.snap?.voice;
   const detectedGpu = voiceStatus?.detectedGpu || '';
@@ -98,11 +101,20 @@ export function renderVoiceTab(ui: AppUI): string {
             </span>
           </div>
           <select class="fc-select" id="sel-whisper-model" style="width: 100%">
-            <option value="whisper-base" ${voiceWhisperModel === 'whisper-base' ? 'selected' : ''}>🇵🇱 OpenAI Whisper Base (~148 MB - Zalecany) ${voiceStatus?.installedModels?.whisper?.['whisper-base'] ? '✓ Pobrany' : '⬇️ Wymaga pobrania'}</option>
-            <option value="whisper-tiny" ${voiceWhisperModel === 'whisper-tiny' ? 'selected' : ''}>⚡ OpenAI Whisper Tiny (~77 MB - Najszybszy) ${voiceStatus?.installedModels?.whisper?.['whisper-tiny'] ? '✓ Pobrany' : '⬇️ Wymaga pobrania'}</option>
-            <option value="whisper-small" ${voiceWhisperModel === 'whisper-small' ? 'selected' : ''}>🎓 OpenAI Whisper Small (~460 MB - Studyjna jakość) ${voiceStatus?.installedModels?.whisper?.['whisper-small'] ? '✓ Pobrany' : '⬇️ Wymaga pobrania'}</option>
-            <option value="whisper-large-turbo" ${voiceWhisperModel === 'whisper-large-turbo' ? 'selected' : ''}>🏆 OpenAI Whisper Large v3 Turbo (~1.5 GB - Najlepszy polski, wymaga GPU NVIDIA) ${voiceStatus?.installedModels?.whisper?.['whisper-large-turbo'] ? '✓ Pobrany' : '⬇️ Wymaga pobrania'}</option>
+            <option value="whisper-medium-pl" ${voiceWhisperModel === 'whisper-medium-pl' ? 'selected' : ''}>🇵🇱 🏆 BardsAI Whisper Medium PL (~1.46 GB - Zalecany dla GPU / Najwyższa precyzja PL) ${voiceStatus?.installedModels?.whisper?.['whisper-medium-pl'] ? '✓ Pobrany' : '⬇️ Wymaga pobrania'}</option>
+            <option value="whisper-small-pl" ${voiceWhisperModel === 'whisper-small-pl' ? 'selected' : ''}>🇵🇱 ⚡ BardsAI Whisper Small PL (~465 MB - Zalecany dla CPU / Szybki PL) ${voiceStatus?.installedModels?.whisper?.['whisper-small-pl'] ? '✓ Pobrany' : '⬇️ Wymaga pobrania'}</option>
+            <option value="whisper-base" ${voiceWhisperModel === 'whisper-base' ? 'selected' : ''}>⚡ OpenAI Whisper Base (~148 MB - Szybki lekki) ${voiceStatus?.installedModels?.whisper?.['whisper-base'] ? '✓ Pobrany' : '⬇️ Wymaga pobrania'}</option>
+            <option value="whisper-tiny" ${voiceWhisperModel === 'whisper-tiny' ? 'selected' : ''}>🍃 OpenAI Whisper Tiny (~77 MB - Najszybszy) ${voiceStatus?.installedModels?.whisper?.['whisper-tiny'] ? '✓ Pobrany' : '⬇️ Wymaga pobrania'}</option>
+            <option value="whisper-large-turbo" ${voiceWhisperModel === 'whisper-large-turbo' ? 'selected' : ''}>🚀 OpenAI Whisper Large v3 Turbo (~1.5 GB - Duży model, GPU) ${voiceStatus?.installedModels?.whisper?.['whisper-large-turbo'] ? '✓ Pobrany' : '⬇️ Wymaga pobrania'}</option>
+            <option value="whisper-small" ${voiceWhisperModel === 'whisper-small' ? 'selected' : ''}>🎓 OpenAI Whisper Small (~460 MB - Standardowy ogólny) ${voiceStatus?.installedModels?.whisper?.['whisper-small'] ? '✓ Pobrany' : '⬇️ Wymaga pobrania'}</option>
           </select>
+          ${
+            voiceStatus?.gpuVendor === 'nvidia' && voiceWhisperModel !== 'whisper-medium-pl'
+              ? `<div style="font-size: 10.5px; color: #38bdf8; margin-top: 5px; line-height: 1.3;">
+                  💡 <strong>Wskazówka GPU:</strong> Wykryto kartę NVIDIA — dla bezbłędnego rozpoznawania każdego polskiego słowa zalecany jest model <strong>BardsAI Whisper Medium PL</strong> (błyskawiczna odpowiedź w ~400 ms).
+                </div>`
+              : ''
+          }
 
           <!-- Akceleracja Sprzętowa (GPU / CPU) -->
           <div id="row-whisper-backend" style="margin-top: 10px;">
@@ -169,9 +181,30 @@ export function renderVoiceTab(ui: AppUI): string {
         <div class="fc-field-row" id="row-voice-wake-word" style="display: ${voiceRequireWakeWord ? 'flex' : 'none'};">
           <div>
             <div class="fc-field-label">Słowo wywołujące (Wake Word)</div>
-            <div class="fc-field-desc">Wybudza nasłuch na 4,5 s, np. <em>„OK wycisz mikrofon”</em> lub samo <em>„OK”</em>. Działa również <em>„DeskSense”</em>.</div>
+            <div class="fc-field-desc">Wybudza nasłuch na 4,5 s, np. <em>„DeskSense wycisz mikrofon”</em> lub samo <em>„DeskSense”</em>. Możesz wpisać dowolne własne słowo wywołania (np. <em>Jarvis</em>, <em>Komputer</em>, <em>Biurko</em>).</div>
           </div>
-          <input type="text" class="fc-input" id="inp-voice-wake-word" value="${esc(form.voiceWakeWord || 'ok')}" maxlength="24" style="width: 90px; text-align: center; font-weight: 700; color: #38bdf8; height: 26px;" title="Słowo wywołujące nasłuch" />
+          <input type="text" class="fc-input" id="inp-voice-wake-word" value="${esc(form.voiceWakeWord || 'desksense')}" maxlength="24" style="width: 110px; text-align: center; font-weight: 700; color: #38bdf8; height: 26px;" title="Słowo wywołujące nasłuch (np. DeskSense, Jarvis)" />
+        </div>
+
+        <div class="fc-field-row">
+          <div>
+            <div class="fc-field-label">Bias słownika komend (zalecane)</div>
+            <div class="fc-field-desc">Podpowiada dekoderowi (Whisper prompt / Vosk gramatyka) frazy zdefiniowanych komend, słowo wywołania i synonimy — mniej pomyłek i halucynacji. Wyłączenie przywraca domyślne, ogólne rozpoznawanie mowy.</div>
+          </div>
+          <button class="fc-switch ${vocabBias ? 'active' : ''}" id="sw-voice-vocab-bias" aria-checked="${vocabBias}" role="switch"></button>
+        </div>
+
+        <div class="fc-field-row">
+          <div>
+            <div class="fc-field-label">Globalny przycisk wywołania nasłuchu (Hotkey / Mysz)</div>
+            <div class="fc-field-desc">Wciśnij skrót lub przycisk myszy (np. boczny Mouse4/5, środkowy, F9) z dowolnego programu, aby wywołać nasłuch komendy</div>
+          </div>
+          <div class="fc-hotkey-recorder" id="voice-hotkey-recorder-container">
+            <button type="button" class="fc-hotkey-btn" id="btn-record-voice-hotkey" title="Kliknij, aby nagrać dowolny klawisz lub przycisk myszy">
+              <span class="fc-hotkey-display" id="voice-hotkey-display">${formatAcceleratorDisplay(form.voiceShortcut || 'CommandOrControl+Shift+V')}</span>
+            </button>
+            ${form.voiceShortcut ? `<button type="button" class="btn btn-ghost btn-sm fc-hotkey-clear-btn" id="btn-clear-voice-hotkey" title="Usuń skrót" style="font-size: 11px; padding: 2px 7px; height: 26px;">✕</button>` : ''}
+          </div>
         </div>
 
         <div class="fc-field-row">
@@ -518,6 +551,14 @@ function renderHaPayloadInput(rule: VoiceRule, index: number, ui?: AppUI): strin
 }
 
 function renderVoiceRuleCard(rule: VoiceRule, index: number, wakeWordPrefix: string, ui?: AppUI): string {
+  const norm = normalizeVoicePhrase(rule.phrase || '');
+  const isDuplicate = Boolean(
+    norm &&
+    rule.enabled &&
+    ui?.form?.voiceRules &&
+    ui.form.voiceRules.filter((r) => r.enabled && normalizeVoicePhrase(r.phrase || '') === norm).length > 1
+  );
+
   return `
     <div class="fc-voice-rule-card ${rule.enabled ? '' : 'disabled'}" data-rule-index="${index}">
       <div class="fc-voice-rule-head">
@@ -527,14 +568,18 @@ function renderVoiceRuleCard(rule: VoiceRule, index: number, wakeWordPrefix: str
         </div>
         <div style="display: flex; gap: 4px;">
           <button class="btn btn-ghost btn-sm btn-test-voice-rule" data-index="${index}" title="Przetestuj wykonanie tej akcji">▶ Testuj</button>
+          <button class="btn btn-ghost btn-sm btn-duplicate-voice-rule" data-index="${index}" title="Duplikuj komendę" style="display: inline-flex; align-items: center; gap: 4px;">📋 Duplikuj</button>
           <button class="btn btn-danger btn-sm btn-delete-voice-rule" data-index="${index}" title="Usuń komendę">🗑️</button>
         </div>
       </div>
 
       <div class="fc-voice-rule-grid">
         <div style="flex: 1.2; min-width: 200px;">
-          <label class="fc-micro-label">Fraza wywołująca (co mówisz):</label>
-          <div class="fc-voice-phrase-wrapper">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <label class="fc-micro-label">Fraza wywołująca (co mówisz):</label>
+            ${isDuplicate ? '<span style="color: #ef4444; font-size: 10px; font-weight: 600;">⚠️ Zduplikowana fraza!</span>' : ''}
+          </div>
+          <div class="fc-voice-phrase-wrapper" style="${isDuplicate ? 'border-color: #ef4444 !important; box-shadow: 0 0 0 1px #ef4444;' : ''}">
             <span class="fc-voice-phrase-prefix">${wakeWordPrefix ? `„${esc(wakeWordPrefix)}…”` : '„…'}</span>
             <input type="text" class="fc-input rule-phrase-input" data-index="${index}" value="${esc(rule.phrase)}" placeholder="np. przełącz na słuchawki" />
           </div>
@@ -544,6 +589,8 @@ function renderVoiceRuleCard(rule: VoiceRule, index: number, wakeWordPrefix: str
           <label class="fc-micro-label">Akcja do wykonania:</label>
           <select class="fc-select rule-action-select" data-index="${index}" style="width: 100%">
             <optgroup label="🎙️ DeskSense & Audio">
+              <option value="open_app" ${rule.actionType === 'open_app' ? 'selected' : ''}>Otwórz okno DeskSense (przy kursorze)</option>
+              <option value="show_commands" ${rule.actionType === 'show_commands' ? 'selected' : ''}>Pokaż listę komend głosowych</option>
               <option value="switch_desk" ${rule.actionType === 'switch_desk' ? 'selected' : ''}>Przełącz na mikrofon biurkowy</option>
               <option value="switch_headset" ${rule.actionType === 'switch_headset' ? 'selected' : ''}>Przełącz na słuchawki</option>
               <option value="switch_auto" ${rule.actionType === 'switch_auto' ? 'selected' : ''}>Włącz tryb automatyczny (Radar)</option>
@@ -630,7 +677,7 @@ export function renderVoiceLiveStatus(ui: AppUI): string {
   const form = ui.form;
   const voiceStatus = ui.snap?.voice;
   const voiceEngine = (form?.voiceEngine || 'whisper') as VoiceEngineType;
-  const voiceWhisperModel = (form?.voiceWhisperModel || 'whisper-base') as VoiceWhisperModel;
+  const voiceWhisperModel = (form?.voiceWhisperModel || 'whisper-small-pl') as VoiceWhisperModel;
   const voiceModel = (form?.voiceModel || 'pl-small') as VoiceModelType;
   const isDownloading = voiceStatus?.state === 'downloading' || Boolean(ui.voiceDownloadProgress);
   const isLoading = voiceStatus?.state === 'loading';
@@ -695,7 +742,7 @@ export function renderVoiceDownloadSection(ui: AppUI): string {
   const form = ui.form;
   const voiceStatus = ui.snap?.voice;
   const voiceEngine = (form?.voiceEngine || 'whisper') as VoiceEngineType;
-  const voiceWhisperModel = (form?.voiceWhisperModel || 'whisper-base') as VoiceWhisperModel;
+  const voiceWhisperModel = (form?.voiceWhisperModel || 'whisper-small-pl') as VoiceWhisperModel;
   const voiceWhisperBackend = (form?.voiceWhisperBackend || 'auto') as VoiceWhisperBackend;
   const voiceModel = (form?.voiceModel || 'pl-small') as VoiceModelType;
   const isDownloading = voiceStatus?.state === 'downloading' || Boolean(ui.voiceDownloadProgress);

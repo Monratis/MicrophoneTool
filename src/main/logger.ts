@@ -19,7 +19,13 @@ export function appendLog(category: string, message: string): void {
   if (logBuffer.length > MAX_LOG_LINES) {
     logBuffer.splice(0, 1000);
   }
-  if (sink) sink(entry);
+  if (sink) {
+    try {
+      sink(entry);
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 export function interceptConsole(): void {

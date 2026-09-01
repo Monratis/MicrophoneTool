@@ -73,12 +73,13 @@ export default class ScreenManager extends EventEmitter {
       this.hideScreensaver();
     }
 
-    // 2. Wybudzenie fizyczne monitorów, jeśli zostały uśpione przez DPMS
-    if (this.isDisplaySleeping) {
+    // 2. Wybudzenie fizyczne monitorów (DPMS) przy powrocie do biurka
+    const shouldWake = this.config.get('wakeMonitorsOnDesk') !== false;
+    if (this.isDisplaySleeping || shouldWake) {
+      const wasSleeping = this.isDisplaySleeping;
       this.isDisplaySleeping = false;
-      const shouldWake = this.config.get('wakeMonitorsOnDesk') !== false;
       if (shouldWake) {
-        appendLog('SCREEN', 'Wybudzanie fizyczne monitorów DPMS (powrót użytkownika do biurka)');
+        appendLog('SCREEN', `Wybudzanie fizyczne monitorów DPMS (powrót użytkownika do biurka${wasSleeping ? ' — po uśpieniu DeskSense' : ''})`);
         void this.audio
           .wakeDisplay()
           .then(() => this.emit('displayState', 'wake'))
@@ -140,7 +141,8 @@ export default class ScreenManager extends EventEmitter {
       }
       try {
         const idle = powerMonitor.getSystemIdleTime();
-        if (idle <= 1 || idle < this.lastIdleSec) {
+        if (typeof idle === 'number' && Number.isFinite(idle) && (idle <= 1 || idle < this.lastIdleSec)) {
+          this.hideScreensaver();
           this.emit('userActivity');
         }
         this.lastIdleSec = idle;

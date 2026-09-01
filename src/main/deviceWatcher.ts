@@ -72,9 +72,7 @@ export default class DeviceWatcher {
         this.audioInitialized = true;
         return;
       }
-      if (added.length || removed.length) {
-        this.handlers.devicesChanged(devices, added, removed);
-      }
+      this.handlers.devicesChanged(devices, added, removed);
     } catch {
       /* brak daemona audio / tymczasowy błąd — następny tick */
     }

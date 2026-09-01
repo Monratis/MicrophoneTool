@@ -8,8 +8,18 @@ import AdmZip from 'adm-zip';
 import { appendLog } from './logger';
 import type { AppContext } from './appContext';
 import { resolveBinDir, toggleMuteWithFeedback } from './appContext';
-import { showVoiceOsd } from './voiceOsd';
-import { findBestMatchingRule, normalizeText } from './voiceMatcher';
+import { showVoiceOsd, hideVoiceOsd } from './voiceOsd';
+import { showSettings } from './settingsWindow';
+import {
+  findBestMatchingRule,
+  normalizeText,
+  buildVoiceVocabulary,
+  buildWhisperInitialPrompt,
+  getWakeWordVariations,
+  CONFIRMATION_SYNONYMS,
+  REJECTION_SYNONYMS,
+  stripCorrectionPrefix
+} from './voiceMatcher';
 import type { VoiceRule, VoiceStatus, VoiceModelType, VoiceEngineType, VoiceWhisperModel, VoiceWhisperBackend } from '../shared/types';
 
 export const VOSK_MODELS: Record<string, { id: VoiceModelType; name: string; url: string; folder: string }> = {
@@ -28,9 +38,23 @@ export const VOSK_MODELS: Record<string, { id: VoiceModelType; name: string; url
 };
 
 export const WHISPER_MODELS: Record<string, { id: VoiceWhisperModel; name: string; url: string; file: string; sizeMb: number }> = {
+  'whisper-medium-pl': {
+    id: 'whisper-medium-pl',
+    name: 'BardsAI Whisper Medium PL (~1.46 GB - Zalecany dla GPU / Studyjna precyzja PL)',
+    url: 'https://huggingface.co/knightdave/whisper-polish-ggml-handy/resolve/main/ggml-medium-pl.bin',
+    file: 'ggml-medium-pl.bin',
+    sizeMb: 1463
+  },
+  'whisper-small-pl': {
+    id: 'whisper-small-pl',
+    name: 'BardsAI Whisper Small PL (~465 MB - Zalecany dla CPU / Szybki PL)',
+    url: 'https://huggingface.co/knightdave/whisper-polish-ggml-handy/resolve/main/ggml-small-pl.bin',
+    file: 'ggml-small-pl.bin',
+    sizeMb: 465
+  },
   'whisper-base': {
     id: 'whisper-base',
-    name: 'OpenAI Whisper Base (~148 MB - Zalecany)',
+    name: 'OpenAI Whisper Base (~148 MB - Szybki ogólny)',
     url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
     file: 'ggml-base.bin',
     sizeMb: 148
@@ -42,19 +66,19 @@ export const WHISPER_MODELS: Record<string, { id: VoiceWhisperModel; name: strin
     file: 'ggml-tiny.bin',
     sizeMb: 77
   },
-  'whisper-small': {
-    id: 'whisper-small',
-    name: 'OpenAI Whisper Small (~460 MB - Studyjny)',
-    url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin',
-    file: 'ggml-small.bin',
-    sizeMb: 460
-  },
   'whisper-large-turbo': {
     id: 'whisper-large-turbo',
-    name: 'OpenAI Whisper Large v3 Turbo (~1.5 GB - Najlepszy polski)',
+    name: 'OpenAI Whisper Large v3 Turbo (~1.5 GB - Duży model, GPU)',
     url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin',
     file: 'ggml-large-v3-turbo.bin',
     sizeMb: 1549
+  },
+  'whisper-small': {
+    id: 'whisper-small',
+    name: 'OpenAI Whisper Small (~460 MB - Standardowy ogólny)',
+    url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin',
+    file: 'ggml-small.bin',
+    sizeMb: 460
   }
 };
 
@@ -131,6 +155,8 @@ const VOICE_ACTION_LABELS: Record<string, string> = {
   toggle_mute: 'przełączam wyciszenie mikrofonu',
   mute: 'wyciszam mikrofon',
   unmute: 'odciszam mikrofon',
+  open_app: 'otwieram aplikację',
+  show_commands: 'otwieram listę komend',
   sleep_display: 'usypiam ekrany',
   screensaver: 'włączam wygaszacz',
   snooze: 'wyciszam radar (drzemka)',
@@ -162,8 +188,15 @@ export class VoiceManager {
     engine: 'whisper',
     backend: 'auto',
     modelReady: false,
-    modelType: 'whisper-base'
+    modelType: 'whisper-small-pl'
   };
+
+  /** Oczekujące potwierdzenie intencji użytkownika ("Czy chodziło Ci o [Reguła]?") */
+  private pendingConfirmation: {
+    rule: VoiceRule;
+    spokenPhrase: string;
+    expiresAt: number;
+  } | null = null;
 
   private isIntentionalStop = false;
 
@@ -342,7 +375,7 @@ export class VoiceManager {
     const engine = this.appContext.config.get('voiceEngine') || 'whisper';
     const backend = this.appContext.config.get('voiceWhisperBackend') || 'auto';
     const modelType = engine === 'whisper'
-      ? (this.appContext.config.get('voiceWhisperModel') || 'whisper-base')
+      ? (this.appContext.config.get('voiceWhisperModel') || 'whisper-small-pl')
       : (this.appContext.config.get('voiceModel') || 'pl-small');
 
     this.status.enabled = this.appContext.config.get('voiceEnabled') || false;
@@ -356,6 +389,10 @@ export class VoiceManager {
     this.status.installedModels = this.getInstalledModels();
     this.status.installedBackends = this.getInstalledBackends();
     return { ...this.status };
+  }
+
+  isRunning(): boolean {
+    return Boolean(this.status.running && this.proc);
   }
 
   getInstalledModels(): { whisper: Record<string, boolean>; vosk: Record<string, boolean> } {
@@ -405,7 +442,7 @@ export class VoiceManager {
   isModelReady(engine?: VoiceEngineType, targetModel?: VoiceModelType, targetBackend?: VoiceWhisperBackend): boolean {
     const currentEngine = engine || this.appContext.config.get('voiceEngine') || 'whisper';
     const model = targetModel || (currentEngine === 'whisper'
-      ? (this.appContext.config.get('voiceWhisperModel') || 'whisper-base')
+      ? (this.appContext.config.get('voiceWhisperModel') || 'whisper-small-pl')
       : (this.appContext.config.get('voiceModel') || 'pl-small'));
 
     if (currentEngine === 'whisper') {
@@ -418,10 +455,17 @@ export class VoiceManager {
       if (!fs.existsSync(modelPath)) return false;
       try {
         const stat = fs.statSync(modelPath);
-        return stat.size >= Math.round(info.sizeMb * 0.90 * 1024 * 1024);
+        if (stat.size < Math.round(info.sizeMb * 0.90 * 1024 * 1024)) return false;
       } catch {
         return false;
       }
+
+      // Gdy wymagane jest słowo wywołania, tani spotter Vosk small PL musi być gotowy
+      const requireWake = this.appContext.config.get('voiceRequireWakeWord') ?? true;
+      if (requireWake && !this.isSpotterReady()) {
+        return false;
+      }
+      return true;
     } else {
       for (const dll of this.requiredVoskDlls) {
         if (!fs.existsSync(path.join(this.voskDir, dll))) return false;
@@ -437,6 +481,68 @@ export class VoiceManager {
     }
   }
 
+  /** Czy tani spotter wake-word (libvosk.dll + model Vosk small PL) jest gotowy do użycia */
+  isSpotterReady(): boolean {
+    if (!this.requiredVoskDlls.every((d) => fs.existsSync(path.join(this.voskDir, d)))) return false;
+    const info = VOSK_MODELS['pl-small'];
+    if (!info) return false;
+    const p = path.join(this.voskModelsDir, info.folder);
+    return fs.existsSync(p) && (
+      fs.existsSync(path.join(p, 'am')) ||
+      fs.existsSync(path.join(p, 'final.mdl')) ||
+      fs.existsSync(path.join(p, 'conf'))
+    );
+  }
+
+  /** Pobiera libvosk.dll + zależności (jeśli brak) — współdzielone przez silnik Vosk i spotter */
+  private async downloadVoskLib(): Promise<void> {
+    fs.mkdirSync(this.voskDir, { recursive: true });
+    const hasAllDlls = this.requiredVoskDlls.every((d) => fs.existsSync(path.join(this.voskDir, d)));
+    if (hasAllDlls) return;
+
+    appendLog('VOICE-DL', 'Pobieram biblioteki silnika Vosk (libvosk.dll + zależności)…');
+    const tempZip = path.join(this.voskDir, 'libvosk_temp.zip');
+    await this.downloadFileWithProgress(LIBVOSK_URL, tempZip, 'Biblioteka Vosk');
+    if (this.cancelDownloadFlag) {
+      try { fs.unlinkSync(tempZip); } catch {}
+      throw new Error('Pobieranie anulowane');
+    }
+
+    appendLog('VOICE-DL', 'Rozpakowuję biblioteki DLL Vosk…');
+    const zip = new AdmZip(tempZip);
+    for (const entry of zip.getEntries()) {
+      const lower = entry.entryName.toLowerCase();
+      if (lower.endsWith('.dll')) {
+        const fileName = path.basename(entry.entryName);
+        fs.writeFileSync(path.join(this.voskDir, fileName), entry.getData());
+      }
+    }
+    try { fs.unlinkSync(tempZip); } catch {}
+  }
+
+  /** Pobiera model Vosk (jeśli brak) — współdzielone przez silnik Vosk i spotter */
+  private async downloadVoskModel(modelKey: keyof typeof VOSK_MODELS): Promise<void> {
+    const voskInfo = VOSK_MODELS[modelKey];
+    if (!voskInfo) throw new Error(`Nieznany model Vosk: ${String(modelKey)}`);
+    fs.mkdirSync(this.voskModelsDir, { recursive: true });
+
+    const targetFolder = path.join(this.voskModelsDir, voskInfo.folder);
+    if (fs.existsSync(targetFolder)) return;
+
+    appendLog('VOICE-DL', `Pobieram model mowy ${voskInfo.name}…`);
+    const modelZip = path.join(this.voskModelsDir, `${voskInfo.folder}.zip`);
+    await this.downloadFileWithProgress(voskInfo.url, modelZip, voskInfo.name);
+    if (this.cancelDownloadFlag) {
+      try { fs.unlinkSync(modelZip); } catch {}
+      throw new Error('Pobieranie anulowane');
+    }
+
+    appendLog('VOICE-DL', `Rozpakowuję model ${voskInfo.name}…`);
+    const zip = new AdmZip(modelZip);
+    zip.extractAllTo(this.voskModelsDir, true);
+    try { fs.unlinkSync(modelZip); } catch {}
+  }
+
   async init(): Promise<void> {
     await this.detectGpuHardwareAsync();
     const enabled = this.appContext.config.get('voiceEnabled');
@@ -444,12 +550,15 @@ export class VoiceManager {
     if (enabled) {
       const engine = this.appContext.config.get('voiceEngine') || 'whisper';
       const modelType = engine === 'whisper'
-        ? (this.appContext.config.get('voiceWhisperModel') || 'whisper-base')
+        ? (this.appContext.config.get('voiceWhisperModel') || 'whisper-small-pl')
         : (this.appContext.config.get('voiceModel') || 'pl-small');
       const backend = this.appContext.config.get('voiceWhisperBackend') || 'auto';
 
       if (!this.isModelReady(engine, modelType, backend)) {
         appendLog('VOICE-BOOT', `Włączone sterowanie głosem wymaga pobrania pakietu [${engine}:${modelType}:${backend}] — rozpoczynam pobieranie w tle…`);
+        void this.startDownload(engine, modelType as any, backend as any);
+      } else if (engine === 'whisper' && (this.appContext.config.get('voiceRequireWakeWord') ?? true) && !this.isSpotterReady()) {
+        appendLog('VOICE-BOOT', 'Silnik Whisper gotowy, brakuje taniego spottera wake-word (Vosk small PL) — dosbieram w tle…');
         void this.startDownload(engine, modelType as any, backend as any);
       } else {
         void this.start();
@@ -469,7 +578,7 @@ export class VoiceManager {
 
     const engine = this.appContext.config.get('voiceEngine') || 'whisper';
     const modelType = engine === 'whisper'
-      ? (this.appContext.config.get('voiceWhisperModel') || 'whisper-base')
+      ? (this.appContext.config.get('voiceWhisperModel') || 'whisper-small-pl')
       : (this.appContext.config.get('voiceModel') || 'pl-small');
     const backend = this.appContext.config.get('voiceWhisperBackend') || 'auto';
 
@@ -490,9 +599,21 @@ export class VoiceManager {
       return false;
     }
 
-    // Podążaj za DOMYŚLNYM mikrofonem Windows (WAVE_MAPPER) — DeskSense przełącza go
-    // między biurkiem a słuchawkami; nie przypinaj nasłuchu do jednego urządzenia.
-    const preferredMic = '';
+    // Jednoczesny nasłuch ze wszystkich skonfigurowanych mikrofonów (głównych i zapasowych):
+    const deskMic = (this.appContext.config.get('micDeskName') || '').trim();
+    const deskFallback = (this.appContext.config.get('micDeskFallbackName') || '').trim();
+    const headMic = (this.appContext.config.get('micHeadsetName') || '').trim();
+    const headFallback = (this.appContext.config.get('micHeadsetFallbackName') || '').trim();
+    const isHeadsetPriority = Boolean(
+      this.appContext.controller &&
+      (this.appContext.controller.isUserAtDesk() === false || (this.appContext.controller as any).currentDevice === 'headset')
+    );
+    const deskMics = [deskMic, deskFallback].filter(Boolean);
+    const headMics = [headMic, headFallback].filter(Boolean);
+    const preferredMic = isHeadsetPriority
+      ? [...headMics, ...deskMics].filter((v, i, a) => a.indexOf(v) === i).join('|||')
+      : [...deskMics, ...headMics].filter((v, i, a) => a.indexOf(v) === i).join('|||');
+
     let toolOrDll = engine === 'whisper' ? this.getWhisperCliPath() : this.libvoskDllPath;
     let modeLabel = engine === 'whisper' ? 'CLI (spawn per komenda)' : 'Vosk in-process';
     let spawnCwd: string | undefined;
@@ -514,12 +635,39 @@ export class VoiceManager {
     const idleMin = Math.max(0, Math.min(60, Number(this.appContext.config.get('voiceIdleUnloadMin')) || 0));
     // Silero VAD — ścieżka do modelu (whisper); pusty = bez VAD
     const vadPath = engine === 'whisper' && fs.existsSync(this.whisperVadPath) ? this.whisperVadPath : '';
-    const args = [engine, modelPath, toolOrDll, preferredMic, 'pl', gpuFlag, String(idleMin), vadPath];
+    // Słownik komend jako bias dekodera: whisper=initial_prompt (naturalne zdania PL), vosk=gramatyka JSON (twarda)
+    const vocabBias = this.appContext.config.get('voiceVocabBias') !== false;
+    const rules = this.appContext.config.get('voiceRules') || [];
+    const wakeWord = this.appContext.config.get('voiceWakeWord') || 'ok';
+    const vocab = buildVoiceVocabulary(rules, wakeWord);
+    const whisperPrompt = buildWhisperInitialPrompt(rules, wakeWord);
+    const promptText = vocabBias ? whisperPrompt : '';
+    const grammarJson = vocabBias ? JSON.stringify(vocab) : '';
+    const args = [engine, modelPath, toolOrDll, preferredMic, 'pl', gpuFlag, String(idleMin), vadPath, engine === 'vosk' ? grammarJson : promptText];
+    // Tani spotter wake-word (Vosk small PL) — tylko dla Whispera z wymaganym słowem wywołania.
+    // Odciąża GPU/CPU: Whisper dekoduje wyłącznie komendy wypowiedziane po słowie wywołania.
+    let spotterEnabled = false;
+    if (engine === 'whisper' && (this.appContext.config.get('voiceRequireWakeWord') ?? true)) {
+      if (this.isSpotterReady()) {
+        args.push(this.libvoskDllPath, path.join(this.voskModelsDir, VOSK_MODELS['pl-small'].folder));
+        spotterEnabled = true;
+      } else {
+        appendLog('VOICE-WARN', 'Tani spotter wake-word (Vosk small PL) niedostępny — Whisper uruchomi się na każdej wypowiedzi (bez filtra)');
+        this.appContext.pushEvent('toast', { message: '🎙️ Brak modelu Vosk small — Whisper działa bez taniego filtra wake-word (pobierz w ustawieniach mowy).', error: false });
+      }
+    }
+    appendLog('VOICE-VOCAB', `Słownik komend dla dekodera: ${vocab.length} fraz / prompt Whisper: "${whisperPrompt.substring(0, 120)}..."${vocabBias ? '' : ' (WYŁĄCZONY bias słownika)'}`);
+    appendLog('VOICE-VOCAB', vocabBias ? `${engine === 'vosk' ? 'Gramatyka' : 'Prompt'}: ${engine === 'vosk' ? vocab.join(', ').substring(0, 300) : whisperPrompt.substring(0, 300)}${promptText.length > 300 ? '…' : ''}` : 'Używany domyślny prompt Whisper / bez gramatyki Vosk');
 
-    appendLog('VOICE-START', `Uruchamiam nasłuch (Silnik: ${engine.toUpperCase()}, Model: ${modelType}, Backend: ${resolvedBackend.toUpperCase()} [${this.detectedGpu || 'CPU'}])`);
+    const micSummary = deskMic && headMic
+      ? `Dual-mic jednoczesny (${deskMic} + ${headMic})`
+      : (deskMic || headMic || 'Domyślny mikrofon Windows');
+
+    appendLog('VOICE-START', `Uruchamiam nasłuch (Silnik: ${engine.toUpperCase()}, Model: ${modelType}, Backend: ${resolvedBackend.toUpperCase()} [${this.detectedGpu || 'CPU'}], Źródła: ${micSummary})`);
     appendLog('VOICE-INFO', `Wybór backendu: ${this.backendRationale()}`);
     appendLog('VOICE-INFO', `Tryb silnika: ${modeLabel}`);
     appendLog('VOICE-INFO', `Ścieżka silnika Whisper: ${toolOrDll}`);
+    if (spotterEnabled) appendLog('VOICE-INFO', 'Tani spotter wake-word: Vosk small PL — Whisper dekoduje tylko po słowie wywołania');
 
     try {
       this.proc = spawn(exe, args, {
@@ -555,7 +703,9 @@ export class VoiceManager {
               void this.autoFallbackBackend();
             }
           } catch {
-            appendLog('VOICE-DEBUG', trimmed);
+            if (!trimmed.startsWith('whisper_vad') && !trimmed.startsWith('ggml_') && !trimmed.startsWith('whisper_init')) {
+              appendLog('VOICE-DEBUG', trimmed);
+            }
           }
         }
       });
@@ -637,6 +787,26 @@ export class VoiceManager {
     return this.start();
   }
 
+  /** Informuje działający VoiceListener.exe o zmianie aktywnego profilu mikrofonu */
+  onDeviceSwitched(newDevice: 'desk' | 'headset'): void {
+    const deskMic = (this.appContext.config.get('micDeskName') || '').trim();
+    const deskFallback = (this.appContext.config.get('micDeskFallbackName') || '').trim();
+    const headMic = (this.appContext.config.get('micHeadsetName') || '').trim();
+    const headFallback = (this.appContext.config.get('micHeadsetFallbackName') || '').trim();
+    const deskMics = [deskMic, deskFallback].filter(Boolean);
+    const headMics = [headMic, headFallback].filter(Boolean);
+    const preferredMic = newDevice === 'headset'
+      ? [...headMics, ...deskMics].filter((v, i, a) => a.indexOf(v) === i).join('|||')
+      : [...deskMics, ...headMics].filter((v, i, a) => a.indexOf(v) === i).join('|||');
+    if (!preferredMic) return;
+
+    if (this.proc && this.proc.stdin && !this.proc.stdin.destroyed) {
+      try {
+        this.proc.stdin.write(`device ${preferredMic}\n`);
+      } catch {}
+    }
+  }
+
   /** Czy trwa pobieranie modelu/backendu (nie restartować wtedy silnika) */
   isDownloading(): boolean {
     return this.status.state === 'downloading';
@@ -647,12 +817,23 @@ export class VoiceManager {
     this.preferCpuFallback = false;
   }
 
-  setPreferredDevice(deviceName: string): void {
+  /** Aktualizuje urządzenia wejściowe nasłuchu na żywo (bez restartu modelu) */
+  updateDevices(preferred?: string): void {
+    const deskMic = (this.appContext.config.get('micDeskName') || '').trim();
+    const deskFallback = (this.appContext.config.get('micDeskFallbackName') || '').trim();
+    const headMic = (this.appContext.config.get('micHeadsetName') || '').trim();
+    const headFallback = (this.appContext.config.get('micHeadsetFallbackName') || '').trim();
+    const allMics = [deskMic, deskFallback, headMic, headFallback].filter(Boolean);
+    const dev = preferred !== undefined ? preferred : [...new Set(allMics)].join('|||');
     if (this.proc && this.proc.stdin && !this.proc.stdin.destroyed) {
       try {
-        this.proc.stdin.write(`device ${deviceName}\n`);
+        this.proc.stdin.write(`device ${dev}\n`);
       } catch {}
     }
+  }
+
+  setPreferredDevice(deviceName: string): void {
+    this.updateDevices(deviceName);
   }
 
   /** Zmiana czasu bezczynności przed zwolnieniem modelu (na żywo, bez restartu) */
@@ -662,6 +843,32 @@ export class VoiceManager {
         const m = Math.max(0, Math.min(60, Math.round(minutes) || 0));
         this.proc.stdin.write(`idle ${m}\n`);
       } catch {}
+    }
+  }
+
+  /**
+   * Aktualizuje bias słownika dekodera na żywo (bez restartu silnika) po zmianie
+   * reguł głosowych / słowa wywołania / przełącznika biasu. Whisper: nowy initial_prompt,
+   * Vosk: przebudowa rozpoznawacza z nową gramatyką.
+   */
+  updateVocabulary(): void {
+    const engine = this.status.engine || this.appContext.config.get('voiceEngine') || 'whisper';
+    const vocabBias = this.appContext.config.get('voiceVocabBias') !== false;
+    const rules = this.appContext.config.get('voiceRules') || [];
+    const wakeWord = this.appContext.config.get('voiceWakeWord') || 'ok';
+    const vocab = buildVoiceVocabulary(rules, wakeWord);
+    const whisperPrompt = buildWhisperInitialPrompt(rules, wakeWord);
+    const prompt = engine === 'vosk'
+      ? (vocabBias ? JSON.stringify(vocab) : '')
+      : (vocabBias ? whisperPrompt : '');
+
+    if (this.proc && this.proc.stdin && !this.proc.stdin.destroyed) {
+      try {
+        this.proc.stdin.write(`prompt ${prompt}\n`);
+        appendLog('VOICE-VOCAB', `Zaktualizowano słownik dekodera na żywo (${vocab.length} fraz${vocabBias ? '' : ', bias wyłączony'})`);
+      } catch (err) {
+        appendLog('VOICE-ERR', `Nie udało się zaktualizować słownika: ${(err as Error).message}`);
+      }
     }
   }
 
@@ -735,11 +942,10 @@ export class VoiceManager {
 
       if (parsed.event === 'model_loaded') {
         this.status.modelLoaded = true;
-        this.status.state = 'idle';
         appendLog('VOICE-INFO', 'Model Whisper załadowany do pamięci');
-        showVoiceOsd('Model załadowany — słucham komendy', 'listen', 3000);
-        if (this.appContext.config.get('voiceChimeFeedback')) {
-          this.appContext.pushEvent('voice:playChime', { chimeType: 'wake' });
+        if (!this.isListeningForCommand) {
+          this.status.state = 'idle';
+          showVoiceOsd('Moduł mowy gotowy', 'info', 2200, 'DeskSense · Mowa');
         }
         this.appContext.pushEvent('voice:modelLoaded', {});
         this.emitStatus();
@@ -747,9 +953,11 @@ export class VoiceManager {
       }
 
       if (parsed.event === 'model_loading') {
-        this.status.state = 'loading';
+        if (!this.isListeningForCommand) {
+          this.status.state = 'loading';
+          showVoiceOsd('Ładowanie modelu mowy…', 'loading', 2500, 'DeskSense · Mowa');
+        }
         this.appContext.pushEvent('voice:modelLoading', {});
-        showVoiceOsd('Ładuję model mowy…', 'loading', 3200);
         this.emitStatus();
         return;
       }
@@ -776,6 +984,7 @@ export class VoiceManager {
       }
 
       if (parsed.event === 'partial' && parsed.data && parsed.data.partial) {
+        if (parsed.spotter) return; // spotter wake-word — nie pokazuj częściowych w UI (prywatność/śmieci)
         const partialText = parsed.data.partial.trim();
         this.appContext.pushEvent('voice:partial', {
           text: partialText
@@ -783,13 +992,39 @@ export class VoiceManager {
         return;
       }
 
-      if (parsed.event === 'result' && parsed.data && parsed.data.text) {
-        const rawText = parsed.data.text.trim();
-        if (!rawText) return;
+      if (parsed.event === 'result' && parsed.data) {
+        const rawText = (parsed.data.text || '').trim();
+        const engine = this.appContext.config.get('voiceEngine') || 'whisper';
+        const modelType = engine === 'whisper'
+          ? (this.appContext.config.get('voiceWhisperModel') || 'whisper-small-pl')
+          : (this.appContext.config.get('voiceModel') || 'pl-small');
+        const resolvedBackend = engine === 'whisper' ? this.resolveBackend() : 'native';
         const dur = typeof parsed.data.durationMs === 'number' ? ` [${parsed.data.durationMs}ms]` : '';
         const gpu = parsed.data.gpuInfo ? ` (${parsed.data.gpuInfo})` : '';
-        appendLog('VOICE-RAW', `Whisper output${dur}${gpu}: "${rawText}"`);
-        this.processRecognizedPhrase(rawText);
+        const recognizerLabel = engine === 'whisper'
+          ? `Whisper ${modelType} [${resolvedBackend.toUpperCase()}]`
+          : `Vosk ${modelType}`;
+
+        if (!rawText) {
+          if (this.isListeningForCommand) {
+            appendLog('VOICE-RAW', `${recognizerLabel}${dur}${gpu}: (brak rozpoznanego tekstu / cisza)`);
+          }
+          return;
+        }
+
+        if (parsed.spotter) {
+          // Wynik taniego spottera (Vosk small PL) — wyłącznie wykrywanie wake-word.
+          // Gdy już nasłuchujemy komendy, transkrypcję robi Whisper — pomijamy spotter,
+          // żeby uniknąć podwójnego wykonania tej samej akcji.
+          if (this.isListeningForCommand) return;
+          const spotterLabel = 'Spotter Vosk small PL';
+          appendLog('VOICE-SPOTTER', `[${spotterLabel}] "${rawText}"`);
+          this.processRecognizedPhrase(rawText, spotterLabel);
+          return;
+        }
+
+        appendLog('VOICE-RAW', `${recognizerLabel}${dur}${gpu}: "${rawText}"`);
+        this.processRecognizedPhrase(rawText, recognizerLabel);
       }
 
       if (parsed.event === 'backend_failed') {
@@ -797,21 +1032,43 @@ export class VoiceManager {
         appendLog('VOICE-ERR', `Backend Whisper zawiódł przy inicjalizacji: ${detail}`);
         void this.autoFallbackBackend();
       }
+
+      if (parsed.event === 'grammar_unsupported') {
+        const detail = typeof parsed.detail === 'string' ? parsed.detail : 'Model Vosk nie wspiera gramatyki';
+        appendLog('VOICE-WARN', detail);
+        this.appContext.pushEvent('toast', { message: `🎙️ ${detail}.`, error: false });
+      }
     } catch {
       // Ignorujemy nie-JSON
     }
   }
 
-  private processRecognizedPhrase(text: string): void {
+  private processRecognizedPhrase(text: string, recognizerInfo?: string): void {
     const rawText = text.trim();
     if (!rawText) return;
 
     // Jedna ścieżka normalizacji (interpunkcja + diakrytyki) — wspólna z voiceMatcher
     const normalized = normalizeText(rawText);
 
-    const configuredWake = (this.appContext.config.get('voiceWakeWord') || 'ok').toLowerCase().trim();
+    // Filtr typowych halucynacji ciszy i napisów końcowych modeli Whisper w języku polskim
+    const WHISPER_SILENCE_HALLUCINATIONS = [
+      'dziekuje', 'dziekuje.', 'dziekuje bardzo', 'dziekuje za uwage', 'dziekuje za ogladanie',
+      'dziekuje za wysluchanie', 'dziekuje za obejrzenie', 'dzieki za ogladanie',
+      'subskrybuj', 'subskrybujcie', 'subskrybuj kanal', 'zostaw suba', 'lajkuj', 'zostaw lapke',
+      'napisy', 'napisy stworzone', 'tlumaczenie', 'transkrypcja', 'muzyka', 'brawa', 'oklaski',
+      'do widzenia', 'do zobaczenia', 'milego dnia', 'dobrej nocy',
+      'czesc i czolem', 'dziekuje ze jestescie', 'dziekuje bardzo panstwu', 'dziekuje panstwu'
+    ];
 
-    appendLog('VOICE-INPUT', `Rozpoznano mowę: "${rawText}" (znormalizowano: "${normalized}")`);
+    if (normalized.length <= 1 || WHISPER_SILENCE_HALLUCINATIONS.some((h) => normalized === h || normalized.startsWith(`${h} `) || normalized.endsWith(` ${h}`))) {
+      appendLog('VOICE-FILTER', `Odrzucono halucynację ciszy/napisów Whispera: "${rawText}"`);
+      return;
+    }
+
+    const configuredWake = (this.appContext.config.get('voiceWakeWord') || 'ok').toLowerCase().trim();
+    const sourceTag = recognizerInfo ? `[${recognizerInfo}] ` : '';
+
+    appendLog('VOICE-INPUT', `${sourceTag}Rozpoznano mowę: "${rawText}" (znormalizowano: "${normalized}")`);
     this.status.lastPhrase = rawText;
     this.emitStatus();
 
@@ -820,6 +1077,7 @@ export class VoiceManager {
 
     this.appContext.pushEvent('voice:recognized', {
       text: rawText,
+      engine: recognizerInfo,
       isListening: this.isListeningForCommand,
       isLiveTest: this.isLiveTestActive,
       matchedRule: previewMatch ? {
@@ -833,6 +1091,41 @@ export class VoiceManager {
       return;
     }
 
+    // Obsługa aktywnego pytania o potwierdzenie ("Czy chodziło Ci o [Nazwa]?")
+    if (this.pendingConfirmation && Date.now() <= this.pendingConfirmation.expiresAt) {
+      const candidate = this.pendingConfirmation;
+      const cleanSpoken = stripCorrectionPrefix(normalized);
+
+      // 1. Potwierdzenie: "tak", "no", "jasne", "dokładnie", "potwierdzam", "yep", "yes", "dawaj"
+      const isAffirmative = CONFIRMATION_SYNONYMS.includes(normalized) ||
+        normalized.startsWith('tak ') || normalized.endsWith(' tak') || normalized === 'no';
+
+      if (isAffirmative) {
+        this.pendingConfirmation = null;
+        appendLog('VOICE-CONFIRM', `✅ Użytkownik potwierdził („${rawText}”) zamiar wykonania reguły [${candidate.rule.name}]`);
+        this.executeMatchedRule(candidate.rule, candidate.spokenPhrase, 1.0, 'user_confirmed');
+        return;
+      }
+
+      // 2. Zaprzeczenie: "nie", "nie nie", "anuluj", "błąd", "stop"
+      const isNegative = REJECTION_SYNONYMS.includes(normalized) ||
+        (normalized.startsWith('nie ') && !normalized.includes('chodzilo') && !normalized.includes('mialem'));
+
+      if (isNegative && !normalized.includes('chodzilo') && !normalized.includes('mialem')) {
+        this.pendingConfirmation = null;
+        appendLog('VOICE-CONFIRM', `❌ Użytkownik odrzucił („${rawText}”) propozycję wykonania reguły [${candidate.rule.name}]`);
+        showVoiceOsd('Anulowano — słucham nowej komendy…', 'info', 5500, 'DeskSense · Gotowy');
+        this.resetListeningTimer(5500);
+        return;
+      }
+
+      // 3. Korekta użytkownika (np. "nie, chodziło mi o wycisz mikrofon" lub inna nowa komenda)
+      this.pendingConfirmation = null;
+      appendLog('VOICE-CONFIRM', `🔄 Użytkownik podał nową/skorygowaną komendę: "${cleanSpoken}"`);
+      this.matchAndExecuteRule(cleanSpoken);
+      return;
+    }
+
     const requireWakeWord = this.appContext.config.get('voiceRequireWakeWord') ?? true;
 
     if (!requireWakeWord) {
@@ -841,96 +1134,181 @@ export class VoiceManager {
       return;
     }
 
-    // Obsługa słów wywołania: "OK", "Okej", "OK DeskSense", "DeskSense" i wariantów
-    const defaultOkVariations = [
-      'ok', 'okej', 'okey', 'oke', 'o key', 'oki', 'okiej',
-      'ok desksense', 'okej desksense', 'ok biurko', 'hej ok',
-      'desksense', 'desk sens', 'deksens', 'desk-sense', 'desens', 'dyskusens', 'bezsens', 'bez sens'
-    ];
+    // Obsługa słów wywołania (domyślnych lub zdefiniowanych przez użytkownika)
+    const wakeVariations = getWakeWordVariations(configuredWake);
 
-    const wakeVariations = (configuredWake === 'ok' || configuredWake === 'okej' || configuredWake === 'desksense')
-      ? defaultOkVariations
-      : [configuredWake, ...defaultOkVariations];
+    let remaining = normalized;
+    let hasWakeWord = false;
 
-    const matchedWake = wakeVariations.find((w) => normalized === w || normalized.startsWith(`${w} `));
+    // Usuwaj wielokrotne / powtarzające się słowa wywołania z początku (np. "ok ok", "hej hej", "o ok")
+    while (remaining.length > 0) {
+      let matchedInLoop: string | null = null;
+      let matchedEnd = -1;
 
-    // 1. Sprawdź czy to samo słowo wywołania "OK" / "DeskSense"
-    if (matchedWake && normalized === matchedWake) {
-      this.triggerWakeState();
-      return;
-    }
+      for (const w of wakeVariations) {
+        if (remaining === w) {
+          matchedInLoop = w;
+          matchedEnd = remaining.length;
+          break;
+        }
+        if (remaining.startsWith(`${w} `)) {
+          matchedInLoop = w;
+          matchedEnd = w.length;
+          break;
+        }
+        const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const rx = new RegExp(`^${escaped}(\\s+|$)`);
+        const m = rx.exec(remaining);
+        if (m) {
+          matchedInLoop = w;
+          matchedEnd = m[0].length;
+          break;
+        }
+      }
 
-    // 2. Sprawdź czy fraza zaczyna się od "OK [komenda]" / "DeskSense [komenda]"
-    if (matchedWake && normalized.startsWith(`${matchedWake} `)) {
-      const commandCandidate = normalized.substring(matchedWake.length).trim();
-      if (commandCandidate.length > 0) {
-        this.matchAndExecuteRule(commandCandidate);
-        return;
+      if (matchedInLoop) {
+        hasWakeWord = true;
+        remaining = remaining.substring(matchedEnd).trim();
+      } else {
+        break;
       }
     }
 
-    // Jeśli jesteśmy w 4.5s oknie wybudzenia (słowo wywołania POTWIERDZONE) — tylko wtedy komenda
+    // 1. Wypowiedziano wyłącznie słowo/słowa wywołania (np. "ok", "ok ok", "Jarvis")
+    if (hasWakeWord && remaining.length === 0) {
+      if (!this.isListeningForCommand) {
+        this.triggerWakeState();
+      } else {
+        // Jeśli już nasłuchujemy i padło znowu słowo wywołania, odśwież licznik 5.5s
+        if (this.listeningTimer) clearTimeout(this.listeningTimer);
+        this.listeningTimer = setTimeout(() => {
+          this.isListeningForCommand = false;
+          this.status.state = 'idle';
+          hideVoiceOsd();
+          this.appContext.pushEvent('voice:listening_timeout', {});
+          if (this.proc && this.proc.stdin && !this.proc.stdin.destroyed) {
+            try { this.proc.stdin.write('state idle\n'); } catch {}
+          }
+          this.appContext.radar?.stopVoiceListeningAnimation(false);
+          this.emitStatus();
+        }, 5500);
+      }
+      return;
+    }
+
+    // 2. Wypowiedziano słowo wywołania razem z komendą w jednym ciągu (np. "ok wycisz mikrofon", "ok ok otwórz")
+    if (hasWakeWord && remaining.length > 0) {
+      this.matchAndExecuteRule(remaining);
+      return;
+    }
+
+    // 3. Jesteśmy w aktywnym oknie wybudzenia (po wcześniejszym słowie wywołania lub skrócie klawiszowym)
     if (this.isListeningForCommand) {
       this.matchAndExecuteRule(normalized);
+      return;
+    }
+
+    // 4. Bezpośrednie wywołanie otwarcia aplikacji ("otwórz", "pokaż apkę") lub listy komend ("pokaż listę komend", "lista komend")
+    const directMatch = findBestMatchingRule(normalized, rules);
+    if (
+      directMatch &&
+      directMatch.confidence >= 0.88 &&
+      (directMatch.rule.actionType === 'open_app' || directMatch.rule.actionType === 'show_commands')
+    ) {
+      this.matchAndExecuteRule(normalized);
+      return;
     }
   }
 
-  private triggerWakeState(): void {
-    appendLog('VOICE-WAKE', '💡 Wykryto słowo wywołania (Wake Word) — nasłuchuję komendy przez 4.5s');
+  resetListeningTimer(durationMs: number = 5500): void {
     this.isListeningForCommand = true;
     this.status.state = 'listening';
-
     this.appContext.radar?.startVoiceListeningAnimation();
-    this.appContext.pushEvent('voice:listening', {});
-    showVoiceOsd('Słucham…', 'listen', 4800);
-
-    if (this.proc && this.proc.stdin && !this.proc.stdin.destroyed) {
-      try { this.proc.stdin.write('state listening\n'); } catch {}
-    }
-
-    if (this.appContext.config.get('voiceChimeFeedback')) {
-      this.appContext.pushEvent('voice:playChime', { chimeType: 'wake' });
-    }
-
-    this.emitStatus();
 
     if (this.listeningTimer) clearTimeout(this.listeningTimer);
     this.listeningTimer = setTimeout(() => {
       this.isListeningForCommand = false;
+      this.pendingConfirmation = null;
       this.status.state = 'idle';
+      hideVoiceOsd();
+      this.appContext.pushEvent('voice:listening_timeout', {});
       if (this.proc && this.proc.stdin && !this.proc.stdin.destroyed) {
         try { this.proc.stdin.write('state idle\n'); } catch {}
       }
       this.appContext.radar?.stopVoiceListeningAnimation(false);
       this.emitStatus();
-    }, 4500);
+    }, durationMs);
+
+    if (this.proc && this.proc.stdin && !this.proc.stdin.destroyed) {
+      try { this.proc.stdin.write('state listening\n'); } catch {}
+    }
+    this.emitStatus();
+  }
+
+  triggerWakeState(source: 'wake_word' | 'hotkey' | 'manual' = 'wake_word'): void {
+    const isHotkey = source === 'hotkey';
+    const isManual = source === 'manual';
+    const logMsg = isHotkey
+      ? '⌨️ Wyzwolono nasłuch komendy skrótem klawiszowym (Hotkey) — nasłuchuję przez 5.5s'
+      : isManual
+        ? '🖱️ Wyzwolono nasłuch komendy ręcznie — nasłuchuję przez 5.5s'
+        : '💡 Wykryto słowo wywołania (Wake Word) — nasłuchuję komendy przez 5.5s';
+    appendLog('VOICE-WAKE', logMsg);
+    this.pendingConfirmation = null;
+    this.appContext.pushEvent('voice:listening', { durationMs: 5500, source });
+    showVoiceOsd('Słucham komendy…', 'listen', 5500);
+
+    if (this.appContext.config.get('voiceChimeFeedback')) {
+      this.appContext.pushEvent('voice:playChime', { chimeType: 'wake' });
+    }
+
+    this.resetListeningTimer(5500);
   }
 
   private matchAndExecuteRule(spokenPhrase: string): void {
+    const cleanedPhrase = stripCorrectionPrefix(spokenPhrase);
     const rules = this.appContext.config.get('voiceRules') || [];
-    const match = findBestMatchingRule(spokenPhrase, rules);
+    const match = findBestMatchingRule(cleanedPhrase, rules);
 
     if (!match) {
-      appendLog('VOICE-MISS', `Nie dopasowano żadnej akcji do frazy: "${spokenPhrase}"`);
-      // OSD "nie zrozumiałem" tylko w oknie po słowie wywołania — inaczej spam przy każdej rozmowie
+      appendLog('VOICE-MISS', `Nie dopasowano żadnej akcji do frazy: "${cleanedPhrase}"`);
       if (this.isListeningForCommand) {
-        this.appContext.pushEvent('voice:miss', { text: spokenPhrase });
+        this.appContext.pushEvent('voice:miss', { text: cleanedPhrase });
+        this.resetListeningTimer(5500);
+        showVoiceOsd(`Nie rozpoznano: „${cleanedPhrase}” — powtórz proszę`, 'miss', 5500, 'DeskSense · Słucham ponownie');
         if (this.appContext.config.get('voiceChimeFeedback')) {
           this.appContext.pushEvent('voice:playChime', { chimeType: 'miss' });
         }
-        showVoiceOsd(`Nie zrozumiałem komendy. Usłyszałem: „${spokenPhrase.slice(0, 60)}” — proszę powtórz`, 'miss', 4500);
-      }
-      if (this.isListeningForCommand) {
-        this.isListeningForCommand = false;
-        this.status.state = 'idle';
-        this.appContext.radar?.stopVoiceListeningAnimation(false);
-        this.emitStatus();
       }
       return;
     }
 
-    const matchedRule = match.rule;
-    appendLog('VOICE-MATCH', `🎯 Dopasowano regułę [${matchedRule.name}] (${Math.round(match.confidence * 100)}% pewności via ${match.matchedBy})`);
+    // Jeśli pewność dopasowania jest w strefie niepewności (0.58 .. 0.84), zapytaj użytkownika!
+    if (match.confidence < 0.85 && this.isListeningForCommand) {
+      this.pendingConfirmation = {
+        rule: match.rule,
+        spokenPhrase: cleanedPhrase,
+        expiresAt: Date.now() + 6500
+      };
+      appendLog('VOICE-CONFIRM', `🤔 Niejednoznaczne dopasowanie (${Math.round(match.confidence * 100)}% via ${match.matchedBy}) do [${match.rule.name}] dla: "${cleanedPhrase}" — pytam użytkownika o potwierdzenie`);
+      this.appContext.pushEvent('voice:confirm_prompt', {
+        candidateRule: match.rule.name,
+        spokenPhrase: cleanedPhrase,
+        confidence: Math.round(match.confidence * 100)
+      });
+      this.resetListeningTimer(6500);
+      showVoiceOsd(`Czy chodziło Ci o: „${match.rule.name}”?`, 'listen', 6500, `Usłyszano: „${cleanedPhrase}” · Odpowiedz: Tak / Nie`);
+      if (this.appContext.config.get('voiceChimeFeedback')) {
+        this.appContext.pushEvent('voice:playChime', { chimeType: 'wake' });
+      }
+      return;
+    }
+
+    this.executeMatchedRule(match.rule, cleanedPhrase, match.confidence, match.matchedBy);
+  }
+
+  private executeMatchedRule(matchedRule: VoiceRule, spokenPhrase: string, confidence?: number, matchedBy?: string): void {
+    appendLog('VOICE-MATCH', `🎯 Wykonuję regułę [${matchedRule.name}] (${confidence ? Math.round(confidence * 100) + '% via ' + matchedBy : 'potwierdzono'}) dla mowy: "${spokenPhrase}"`);
 
     // Sprawdź warunek obecności przy biurku
     const onlyAtDesk = this.appContext.config.get('voiceOnlyAtDesk') ?? true;
@@ -942,6 +1320,7 @@ export class VoiceManager {
         showVoiceOsd(`Zablokowano „${matchedRule.name}” — jesteś poza biurkiem`, 'blocked', 3500);
         if (this.listeningTimer) clearTimeout(this.listeningTimer);
         this.isListeningForCommand = false;
+        this.pendingConfirmation = null;
         this.status.state = 'idle';
         this.appContext.radar?.stopVoiceListeningAnimation(false);
         this.emitStatus();
@@ -951,19 +1330,46 @@ export class VoiceManager {
 
     if (this.listeningTimer) clearTimeout(this.listeningTimer);
     this.isListeningForCommand = false;
+    this.pendingConfirmation = null;
     this.status.state = 'idle';
     this.status.lastAction = matchedRule.name;
     this.status.lastTime = Date.now();
     this.appContext.radar?.stopVoiceListeningAnimation(true);
     this.emitStatus();
 
-    appendLog('VOICE-EXEC', `🚀 Wykonuję akcję reguły [${matchedRule.name}] (typ: ${matchedRule.actionType})`);
+    let actionDetail = VOICE_ACTION_LABELS[matchedRule.actionType] || matchedRule.name;
+    if (matchedRule.actionType === 'ha_service' && matchedRule.actionPayload) {
+      try {
+        const parsed = JSON.parse(matchedRule.actionPayload);
+        const entity = parsed.entity_id || parsed.target || matchedRule.actionPayload;
+        const srv = parsed.service || 'akcja';
+        const domain = String(entity).split('.')[0] || '';
+        if (domain === 'automation') {
+          actionDetail = `Home Assistant (Wyzwolenie automatyzacji -> ${entity})`;
+        } else if (domain === 'script') {
+          actionDetail = `Home Assistant (Uruchomienie skryptu -> ${entity})`;
+        } else if (domain === 'scene') {
+          actionDetail = `Home Assistant (Aktywacja sceny -> ${entity})`;
+        } else {
+          actionDetail = `Home Assistant (${srv} -> ${entity})`;
+        }
+      } catch {
+        actionDetail = `Home Assistant (${matchedRule.actionPayload})`;
+      }
+    } else if (matchedRule.actionType === 'run_app' && matchedRule.actionPayload) {
+      const appBase = path.basename(matchedRule.actionPayload);
+      actionDetail = `Uruchomienie: ${appBase}`;
+    }
 
+    appendLog('VOICE-EXEC', `🚀 Zrozumiałem: [${matchedRule.name}] -> Wykonuję: ${actionDetail} (z frazy: "${spokenPhrase}")`);
+
+    const feedbackText = `${matchedRule.name} (${actionDetail})`;
     this.appContext.pushEvent('voice:understood', {
       name: matchedRule.name,
-      actionLabel: VOICE_ACTION_LABELS[matchedRule.actionType] || matchedRule.name
+      phrase: spokenPhrase,
+      actionLabel: feedbackText
     });
-    showVoiceOsd(`Zrozumiałem — ${VOICE_ACTION_LABELS[matchedRule.actionType] || matchedRule.name}`, 'ok', 3200);
+    showVoiceOsd(feedbackText, 'ok', 3600, `Usłyszano: „${spokenPhrase}”`);
 
     if (this.appContext.config.get('voiceChimeFeedback')) {
       this.appContext.pushEvent('voice:playChime', { chimeType: 'action' });
@@ -1010,7 +1416,12 @@ export class VoiceManager {
               ? this.appContext.config.get('micDeskName')
               : this.appContext.config.get('micHeadsetName');
           const res = await this.appContext.controller.setDeviceMute(target || '', true);
-          if (res.ok) this.appContext.radar.updateLed('mute');
+          if (res.ok) {
+            this.appContext.radar.updateLed('mute');
+            this.appContext.pushEvent('toast', { message: 'Mikrofon wyciszony 🔇' });
+            showVoiceOsd('Mikrofon wyciszony', 'mute', 2000);
+          }
+          this.appContext.refreshSnapshot();
           return { ok: res.ok, message: res.ok ? 'Wyciszono mikrofon' : 'Nie udało się wyciszyć mikrofonu' };
         }
 
@@ -1022,8 +1433,21 @@ export class VoiceManager {
           const res = await this.appContext.controller.setDeviceMute(target || '', false);
           if (res.ok) {
             this.appContext.radar.updateLed(this.appContext.controller.currentDevice || 'desk');
+            this.appContext.pushEvent('toast', { message: 'Mikrofon aktywny 🎙️' });
+            showVoiceOsd('Mikrofon aktywny', 'unmute', 2000);
           }
+          this.appContext.refreshSnapshot();
           return { ok: res.ok, message: res.ok ? 'Odciszono mikrofon' : 'Nie udało się odciszyć mikrofonu' };
+        }
+
+        case 'open_app': {
+          showSettings(this.appContext, true);
+          return { ok: true, message: 'Otwarto okno aplikacji przy kursorze' };
+        }
+
+        case 'show_commands': {
+          showSettings(this.appContext, true, 'voice');
+          return { ok: true, message: 'Otwarto listę komend głosowych' };
         }
 
         case 'sleep_display': {
@@ -1098,7 +1522,7 @@ export class VoiceManager {
     const engine = engineOverride || this.appContext.config.get('voiceEngine') || 'whisper';
     const backend = targetBackend || this.appContext.config.get('voiceWhisperBackend') || 'auto';
     const modelType = targetModel || (engine === 'whisper'
-      ? (this.appContext.config.get('voiceWhisperModel') || 'whisper-base')
+      ? (this.appContext.config.get('voiceWhisperModel') || 'whisper-small-pl')
       : (this.appContext.config.get('voiceModel') || 'pl-small'));
 
     if (modelType === 'custom') {
@@ -1182,6 +1606,24 @@ export class VoiceManager {
             this.status.state = 'idle';
             this.emitStatus();
             return { ok: false, message: 'Pobieranie anulowane' };
+          }
+        }
+
+        // 4. Tani spotter wake-word (Vosk small PL) — wymagany, gdy słowo wywołania ma
+        //    odfiltrować drogie dekodowanie Whispera (inaczej Whisper na każdej wypowiedzi).
+        if ((this.appContext.config.get('voiceRequireWakeWord') ?? true) && !this.isSpotterReady()) {
+          appendLog('VOICE-DL', 'Pobieram tani spotter wake-word (Vosk small PL + libvosk.dll)…');
+          try {
+            await this.downloadVoskLib();
+            await this.downloadVoskModel('pl-small');
+          } catch (err) {
+            // Anulowanie rzuca wyjątkiem — przekładamy na czysty stan idle (spójnie z innymi ścieżkami)
+            if (this.cancelDownloadFlag) {
+              this.status.state = 'idle';
+              this.emitStatus();
+              return { ok: false, message: 'Pobieranie anulowane' };
+            }
+            throw err;
           }
         }
 

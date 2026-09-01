@@ -43,6 +43,10 @@ namespace IconGen
                 string icoPath = Path.Combine(outDir, "icon.ico");
                 SaveAsMultiResIcon(masterBmp, icoPath);
                 Console.WriteLine("Saved: " + icoPath);
+
+                string resIco = Path.Combine("resources", "icon.ico");
+                SaveAsMultiResIcon(masterBmp, resIco);
+                Console.WriteLine("Saved: " + resIco);
             }
 
             // 2. Generate System Tray Icons (Crisp 32x32 and 64x64)

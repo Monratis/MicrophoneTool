@@ -6,7 +6,7 @@ import { recordSample } from './diagRecorder';
 import { recordDiagTimelineEvent, isDiagSessionActive } from './diagSession';
 import type Config from './config';
 import type ActivityWatcher from './activityWatcher';
-import type { DeskState, DetectedPerson, RadarTelemetry } from '../shared/types';
+import { getSensorProfile, type DeskState, type DetectedPerson, type RadarTelemetry } from '../shared/types';
 
 const KNOWN_VID_PIDS = [
   { vid: 0x2886, pid: 0x802d },
@@ -373,14 +373,29 @@ export default class RadarListener extends EventEmitter {
       );
       if (mfgMatch) return mfgMatch.path;
 
-      if (ports.length > 0) {
-        console.warn('[radar] brak znanego VID/PID, wybieram port:', ports[0].path);
-        return ports[0].path;
+      const candidate = ports.find((p) => p.path.toUpperCase() !== 'COM1' || Boolean(p.vendorId));
+      if (candidate) {
+        console.warn('[radar] brak znanego VID/PID, wybieram port:', candidate.path);
+        return candidate.path;
       }
     } catch (err) {
       console.error('[radar] enumerate ports error:', (err as Error).message);
     }
     return null;
+  }
+
+  private setSensorModel(modelOrId: string): void {
+    const profile = getSensorProfile(modelOrId);
+    const prevId = this.telemetry.profile?.id;
+    this.telemetry.profile = profile;
+    this.telemetry.sensorFreq = profile.frequency === '24GHz' ? '24GHz' : (profile.frequency === '60GHz' ? '60GHz' : undefined);
+    this.telemetry.deviceInfo = {
+      ...this.telemetry.deviceInfo,
+      sensorModel: profile.name
+    };
+    if (prevId !== profile.id) {
+      appendLog('RADAR', `Załadowano profil sensora: ${profile.name} (${profile.frequency}) · Szablon: ${profile.yamlTemplate}`);
+    }
   }
 
   private onData(chunk: Buffer): void {
@@ -403,15 +418,21 @@ export default class RadarListener extends EventEmitter {
       if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(line)) continue;
 
       // Telemetria sprzętowa sensora (DeskSense Device) — parsowana zanim
-      // trafi do RAW, żeby heartbeat FW/UPTIME/TEMP nie zaśmiecał logu.
+      // trafi do RAW, żeby heartbeat FW/SENSOR/UPTIME/TEMP nie zaśmiecał logu.
       if (line.includes('DeskSense Device')) {
         const fwMatch = line.match(/FW=([^\s,]+)/i);
+        const sensorMatch = line.match(/SENSOR=([^\s,]+)/i);
         const upMatch = line.match(/UPTIME=([0-9]+)s/i);
         const tempMatch = line.match(/TEMP=([0-9.]+)C/i);
         const luxMatch = line.match(/LUX=([0-9.]+)/i);
 
+        if (sensorMatch) {
+          this.setSensorModel(sensorMatch[1]);
+        }
+
         this.telemetry.deviceInfo = {
-          fwVersion: fwMatch ? fwMatch[1] : undefined,
+          fwVersion: fwMatch ? fwMatch[1] : this.telemetry.deviceInfo?.fwVersion,
+          sensorModel: this.telemetry.profile?.name || this.telemetry.deviceInfo?.sensorModel,
           uptimeSec: upMatch ? parseInt(upMatch[1], 10) : undefined,
           chipTempC: tempMatch ? parseFloat(tempMatch[1]) : undefined
         };
@@ -499,11 +520,26 @@ export default class RadarListener extends EventEmitter {
           }
 
           // Dystans: Pomiary > 0 aktualizują filtr dystansu i sprawdzają bramkę odległości.
-          if (entity.includes('distance') || entity.includes('odległość') || entity.includes('dystans') || entity.includes('detection object')) {
+          if (
+            entity.includes('distance') ||
+            entity.includes('odległość') ||
+            entity.includes('dystans') ||
+            entity.includes('detection object') ||
+            entity.includes('still distance') ||
+            entity.includes('moving distance')
+          ) {
             const val = parseFloat(stateVal);
             if (Number.isFinite(val) && val > 0) {
               const distCm = val < 10 && !line.toLowerCase().includes('cm') ? Math.round(val * 100) : Math.round(val);
-              this.updateDistance(distCm);
+              if (entity.includes('moving distance')) {
+                this.telemetry.movingDistanceCm = distCm;
+                this.telemetry.sensorFreq = '24GHz';
+              } else if (entity.includes('still distance')) {
+                this.telemetry.stillDistanceCm = distCm;
+                this.telemetry.sensorFreq = '24GHz';
+              } else {
+                this.updateDistance(distCm);
+              }
             } else if (val === 0) {
               this.updateDistance(0);
             }
@@ -511,6 +547,9 @@ export default class RadarListener extends EventEmitter {
 
           // Tętno: Pomiary biometryczne aktualizują telemetrię (nie wymuszają obecności)
           if (entity.includes('heart') || entity.includes('tętno') || entity.includes('bpm')) {
+            if (!this.telemetry.profile || this.telemetry.profile.id !== 'seeed_mr60bha2_60ghz') {
+              this.setSensorModel('seeed_mr60bha2_60ghz');
+            }
             const bpm = Math.round(parseFloat(stateVal));
             if (bpm >= 30 && bpm <= 240) {
               this.updateHeartRate(bpm);
@@ -521,11 +560,33 @@ export default class RadarListener extends EventEmitter {
 
           // Oddech: Pomiary biometryczne aktualizują telemetrię (nie wymuszają obecności)
           if (entity.includes('breath') || entity.includes('oddech') || entity.includes('respiratory') || entity.includes('rpm')) {
+            if (!this.telemetry.profile || this.telemetry.profile.id !== 'seeed_mr60bha2_60ghz') {
+              this.setSensorModel('seeed_mr60bha2_60ghz');
+            }
             const rpm = Math.round(parseFloat(stateVal));
             if (rpm >= 2 && rpm <= 70) {
               this.updateBreathRate(rpm);
             } else if (rpm === 0) {
               this.updateBreathRate(0);
+            }
+          }
+
+          // Specyficzne encje 24GHz (Moving Target / Still Target)
+          if (entity.includes('moving target') || entity.includes('still target')) {
+            if (!this.telemetry.profile || this.telemetry.profile.id !== 'seeed_24ghz_xiao') {
+              this.setSensorModel('seeed_24ghz_xiao');
+            }
+            const upperState = stateVal.toUpperCase();
+            const isActive = upperState === 'ON' || upperState === 'TRUE' || upperState === '1';
+            if (entity.includes('moving target')) {
+              this.telemetry.movingTarget = isActive;
+            }
+            if (entity.includes('still target')) {
+              this.telemetry.stillTarget = isActive;
+            }
+            if (isActive) {
+              this.handleRawPresence(true);
+              continue;
             }
           }
 
@@ -670,16 +731,18 @@ export default class RadarListener extends EventEmitter {
       this.rawBuffer = this.rawBuffer.subarray(this.rawBuffer.length - 1024);
     }
     while (this.rawBuffer.length >= 7) {
-      // Szukanie początku ramki (0x53 0x59 lub 0x01)
+      // Szukanie początku ramki (0x53 0x59, 0x01 lub 0xF4 0xF3 0xF2 0xF1)
       if (
         this.rawBuffer[0] !== 0x01 &&
-        !(this.rawBuffer[0] === 0x53 && this.rawBuffer.length >= 2 && this.rawBuffer[1] === 0x59)
+        !(this.rawBuffer[0] === 0x53 && this.rawBuffer.length >= 2 && this.rawBuffer[1] === 0x59) &&
+        !(this.rawBuffer[0] === 0xf4 && this.rawBuffer.length >= 4 && this.rawBuffer[1] === 0xf3 && this.rawBuffer[2] === 0xf2 && this.rawBuffer[3] === 0xf1)
       ) {
         let nextIdx = -1;
         for (let i = 1; i < this.rawBuffer.length; i++) {
           if (
             this.rawBuffer[i] === 0x01 ||
-            (this.rawBuffer[i] === 0x53 && i + 1 < this.rawBuffer.length && this.rawBuffer[i + 1] === 0x59)
+            (this.rawBuffer[i] === 0x53 && i + 1 < this.rawBuffer.length && this.rawBuffer[i + 1] === 0x59) ||
+            (this.rawBuffer[i] === 0xf4 && i + 3 < this.rawBuffer.length && this.rawBuffer[i + 1] === 0xf3 && this.rawBuffer[i + 2] === 0xf2 && this.rawBuffer[i + 3] === 0xf1)
           ) {
             nextIdx = i;
             break;
@@ -687,13 +750,57 @@ export default class RadarListener extends EventEmitter {
         }
         if (nextIdx === -1) {
           this.rawBuffer =
-            this.rawBuffer.length > 0 && this.rawBuffer[this.rawBuffer.length - 1] === 0x53
+            this.rawBuffer.length > 0 && (this.rawBuffer[this.rawBuffer.length - 1] === 0x53 || this.rawBuffer[this.rawBuffer.length - 1] === 0xf4)
               ? this.rawBuffer.subarray(this.rawBuffer.length - 1)
               : Buffer.alloc(0);
           return;
         }
         this.rawBuffer = this.rawBuffer.subarray(nextIdx);
         continue;
+      }
+
+      // 0. Obsługa ramki binarnej raportu 24GHz (0xF4 0xF3 0xF2 0xF1)
+      if (
+        this.rawBuffer.length >= 10 &&
+        this.rawBuffer[0] === 0xf4 &&
+        this.rawBuffer[1] === 0xf3 &&
+        this.rawBuffer[2] === 0xf2 &&
+        this.rawBuffer[3] === 0xf1
+      ) {
+        const dataLen = this.rawBuffer[4] | (this.rawBuffer[5] << 8);
+        const total = 4 + 2 + dataLen + 4;
+        if (total > 256) {
+          this.rawBuffer = this.rawBuffer.subarray(4);
+          continue;
+        }
+        if (this.rawBuffer.length < total) return;
+        const tailIdx = 6 + dataLen;
+        if (
+          this.rawBuffer[tailIdx] === 0xf8 &&
+          this.rawBuffer[tailIdx + 1] === 0xf7 &&
+          this.rawBuffer[tailIdx + 2] === 0xf6 &&
+          this.rawBuffer[tailIdx + 3] === 0xf5
+        ) {
+          if (!this.telemetry.deviceInfo?.sensorModel) {
+            this.telemetry.deviceInfo = { ...this.telemetry.deviceInfo, sensorModel: 'Seeed 24GHz for XIAO (101010001)' };
+          }
+          if (dataLen >= 8) {
+            const p = this.rawBuffer.subarray(7, 7 + dataLen - 1);
+            const targetState = p[0];
+            const moveDist = p[1] | (p[2] << 8);
+            const stillDist = p[4] | (p[5] << 8);
+            const detectDist = dataLen >= 9 ? p[7] | (p[8] << 8) : 0;
+            this.handleRawPresence(targetState !== 0x00);
+            const effDist = detectDist > 0 ? detectDist : stillDist > 0 ? stillDist : moveDist;
+            if (effDist > 0) this.updateDistance(effDist);
+            else if (targetState === 0x00) this.updateDistance(0);
+          }
+          this.rawBuffer = this.rawBuffer.subarray(total);
+          continue;
+        } else {
+          this.rawBuffer = this.rawBuffer.subarray(1);
+          continue;
+        }
       }
 
       // 1. Obsługa fabrycznej ramki binarnej Seeed mmWave (0x53 0x59 ...)
@@ -980,7 +1087,7 @@ export default class RadarListener extends EventEmitter {
   }
 
   private updateDistance(distCm: number): void {
-    if (distCm <= 0 || distCm > 200) {
+    if (distCm <= 0 || distCm > 800) {
       this.telemetry.distanceCm = 0;
       this.distanceFilter.reset();
       return;

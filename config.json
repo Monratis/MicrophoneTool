@@ -6,7 +6,9 @@
   "micDeskVolume": -1,
   "micHeadsetVolume": -1,
   "micDeskGateDb": -1,
+  "micDeskAutoThreshold": false,
   "micHeadsetGateDb": -1,
+  "micHeadsetAutoThreshold": false,
   "micDeskKrisp": "default",
   "micHeadsetKrisp": "default",
   "micDeskAgc": "default",
@@ -15,7 +17,7 @@
   "micHeadsetEcho": "default",
   "discordGateFollowMic": true,
   "discordClientId": "1238447097859145859",
-  "discordClientSecret": "xwmeOcXQP496dX5EYgXBFFcNyEUo30Z3",
+  "discordClientSecret": "enc_dpapi:djEwBV1VRrtbVvSs5qOhmAInMhK+Z3V/jrsX7wKsjDLAYKFgfPHWWK8pwQCbsHmlP6JUqUNdjNzNMDXk9sdh",
   "discordRedirectUri": "https://discord.com",
   "discordAccessToken": "",
   "discordRefreshToken": "",
@@ -23,19 +25,8 @@
   "timeoutAwayMs": 1500,
   "timeoutDeskMs": 200,
   "userInputPresenceEnabled": true,
-  "radarDistanceGateEnabled": true,
-  "radarMinDistanceCm": 25,
-  "radarMaxDistanceCm": 110,
-  "radarDeepAwayConfirm": false,
-  "radarDeepAwayMinMs": 600000,
-  "radarDeepAwayConfirmMs": 300,
+  "userInputPresenceHoldSec": 1,
   "petFilterEnabled": true,
-  "radarAutoTuningEnabled": true,
-  "radarAutoTuningSpeed": "balanced",
-  "radarLearnedDistanceCenter": 67,
-  "radarLearnedDistanceVariance": 11,
-  "radarLearnedHeartRate": 83,
-  "radarLearnedBreathRate": 15,
   "switchMicOnAway": true,
   "switchMicOnDesk": true,
   "muteBehaviorOnAway": "none",
@@ -85,12 +76,59 @@
   "sensorLedDeskColor": "#22c55e",
   "sensorLedAwayColor": "#f59e0b",
   "sensorLedMuteColor": "#ef4444",
-  "radarSensitivity": 80,
-  "biometricsEnabled": false,
-  "userHeartRateMin": 55,
-  "userHeartRateMax": 78,
-  "userSeatingDistanceMin": 60,
-  "radarAutoTuningNoiseFloor": 0,
-  "personMismatchAction": "ignore",
-  "autoDownloadTools": true
+  "voiceEnabled": false,
+  "voiceEngine": "whisper",
+  "voiceWhisperModel": "whisper-base",
+  "voiceWhisperBackend": "auto",
+  "voiceModel": "pl-small",
+  "voiceCustomModelPath": "",
+  "voiceWakeWord": "ok",
+  "voiceRequireWakeWord": true,
+  "voiceOnlyAtDesk": true,
+  "voiceChimeFeedback": true,
+  "voiceIdleUnloadMin": 2,
+  "voiceRules": [
+    {
+      "id": "rule_1",
+      "name": "Przełącz na słuchawki",
+      "enabled": true,
+      "phrase": "przełącz na słuchawki",
+      "actionType": "switch_headset"
+    },
+    {
+      "id": "rule_2",
+      "name": "Przełącz na biurko",
+      "enabled": true,
+      "phrase": "przełącz na biurko",
+      "actionType": "switch_desk"
+    },
+    {
+      "id": "rule_3",
+      "name": "Tryb automatyczny",
+      "enabled": true,
+      "phrase": "włącz tryb automatyczny",
+      "actionType": "switch_auto"
+    },
+    {
+      "id": "rule_4",
+      "name": "Wycisz mikrofon",
+      "enabled": true,
+      "phrase": "wycisz mikrofon",
+      "actionType": "mute"
+    },
+    {
+      "id": "rule_5",
+      "name": "Odcisz mikrofon",
+      "enabled": true,
+      "phrase": "odcisz mikrofon",
+      "actionType": "unmute"
+    },
+    {
+      "id": "rule_6",
+      "name": "Zgaś ekrany",
+      "enabled": true,
+      "phrase": "zgaś ekrany",
+      "actionType": "sleep_display"
+    }
+  ]
 }

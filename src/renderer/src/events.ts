@@ -2,13 +2,14 @@
 
 import type { AppUI } from './app';
 import { playChime, playCustomAudioFile, type ChimeStyle, type SettingsTab, type TabType } from './ui';
-import type { Snapshot } from './global';
+import type { Snapshot, VoiceRule } from './global';
 import { isMicActive, triggerOsdHud, updateHeaderAndLiveDOM } from './homeView';
 import { refreshDiscordRpcStatus, refreshSignalrgbEffectList, refreshSignalrgbStatus,
   openHaPickerForRule, closeHaPicker, applyHaCatalog, renderHaPickerChips, renderHaPickerList } from './integrationsPanels';
 import { applyLogFilter, refreshLogConsoleDOM } from './logsAbout';
-import { applyVadResults, closeVadModal, openVadModal, runVadStep1, runVadStep2, toggleDiagSession } from './modals';
+import { applyVadResults, closeVadModal, openVadModal, runVadStep1, runVadStep2, toggleDiagSession, openFlasherModal, closeFlasherModal } from './modals';
 import { renderBackendHint, renderVoiceDownloadSection, isSelectedVoiceModelReady, parseVoiceHaPayload, stringifyVoiceHaPayload } from './voicePanel';
+import { bindHotkeyRecorder } from './hotkeyRecorder';
 
   // ---------- EVENT BINDINGS ----------
 export function bindEvents(app: AppUI) {
@@ -175,6 +176,7 @@ export function bindEvents(app: AppUI) {
               patch.micDeskGateDb = s.thresholdDb;
               app.vuEngine.deskGateDb = s.thresholdDb;
             }
+            if (typeof s.autoThreshold === 'boolean') patch.micDeskAutoThreshold = s.autoThreshold;
             if (typeof s.krisp === 'boolean') patch.micDeskKrisp = s.krisp ? 'on' : 'off';
             if (typeof s.agc === 'boolean') patch.micDeskAgc = s.agc ? 'on' : 'off';
             if (typeof s.echo === 'boolean') patch.micDeskEcho = s.echo ? 'on' : 'off';
@@ -184,6 +186,7 @@ export function bindEvents(app: AppUI) {
               patch.micHeadsetGateDb = s.thresholdDb;
               app.vuEngine.headGateDb = s.thresholdDb;
             }
+            if (typeof s.autoThreshold === 'boolean') patch.micHeadsetAutoThreshold = s.autoThreshold;
             if (typeof s.krisp === 'boolean') patch.micHeadsetKrisp = s.krisp ? 'on' : 'off';
             if (typeof s.agc === 'boolean') patch.micHeadsetAgc = s.agc ? 'on' : 'off';
             if (typeof s.echo === 'boolean') patch.micHeadsetEcho = s.echo ? 'on' : 'off';
@@ -287,6 +290,10 @@ export function bindEvents(app: AppUI) {
     };
 
     byId('sel-mic-desk')?.addEventListener('change', (e) => onDeskMicSelect(e.target as HTMLSelectElement));
+    byId('sel-mic-desk-fallback')?.addEventListener('change', (e) => {
+      const sel = e.target as HTMLSelectElement;
+      app.patchForm({ micDeskFallbackName: sel.value });
+    });
 
     const onHeadsetMicSelect = (sel: HTMLSelectElement) => {
       const name = sel.value;
@@ -296,6 +303,10 @@ export function bindEvents(app: AppUI) {
     };
 
     byId('sel-mic-headset')?.addEventListener('change', (e) => onHeadsetMicSelect(e.target as HTMLSelectElement));
+    byId('sel-mic-headset-fallback')?.addEventListener('change', (e) => {
+      const sel = e.target as HTMLSelectElement;
+      app.patchForm({ micHeadsetFallbackName: sel.value });
+    });
 
     // Desk Voice Filters
     byId('rng-gate-desk')?.addEventListener('input', (e) => {
@@ -486,6 +497,7 @@ export function bindEvents(app: AppUI) {
 
     byId('btn-discord-sync')?.addEventListener('click', async () => {
       const isDesk = isMicActive(app, 'desk');
+      const isAuto = isDesk ? app.form?.micDeskAutoThreshold : app.form?.micHeadsetAutoThreshold;
       const rawGate = isDesk ? app.form?.micDeskGateDb : app.form?.micHeadsetGateDb;
       const gateDb =
         typeof rawGate === 'number' && Number.isFinite(rawGate) && rawGate <= 0 && rawGate >= -100 && rawGate !== -1
@@ -498,7 +510,8 @@ export function bindEvents(app: AppUI) {
 
       app.pushToast('Wysyłam profil głosu do Discorda…');
       const ok = await window.api.discordApplyVoice({
-        gateDb,
+        autoThreshold: isAuto === true,
+        gateDb: isAuto ? undefined : gateDb,
         krisp: tri(krispMode),
         agc: tri(agcMode),
         echo: tri(echoMode)
@@ -951,15 +964,15 @@ export function bindEvents(app: AppUI) {
     });
     byId('inp-timeout-away')?.addEventListener('input', (e) => {
       const v = Number((e.target as HTMLInputElement).value);
-      if (!isNaN(v)) app.patchForm({ timeoutAwayMs: v });
+      if (!isNaN(v) && v >= 200) app.patchForm({ timeoutAwayMs: Math.max(200, Math.min(60000, Math.round(v))) });
     });
     byId('inp-timeout-desk')?.addEventListener('input', (e) => {
       const v = Number((e.target as HTMLInputElement).value);
-      if (!isNaN(v)) app.patchForm({ timeoutDeskMs: v });
+      if (!isNaN(v) && v >= 0) app.patchForm({ timeoutDeskMs: Math.max(0, Math.min(30000, Math.round(v))) });
     });
     byId('inp-input-hold-sec')?.addEventListener('input', (e) => {
       const v = Number((e.target as HTMLInputElement).value);
-      if (!isNaN(v) && v >= 1) app.patchForm({ userInputPresenceHoldSec: v });
+      if (!isNaN(v) && v >= 1) app.patchForm({ userInputPresenceHoldSec: Math.max(1, Math.min(3600, Math.round(v))) });
     });
     byId('sel-radar-smoothing')?.addEventListener('change', (e) => {
       const val = (e.target as HTMLSelectElement).value as 'ultra' | 'balanced' | 'raw';
@@ -1116,6 +1129,22 @@ export function bindEvents(app: AppUI) {
     bindCustomAudio('desk');
     bindCustomAudio('headset');
 
+    // Mute hotkey recorder
+    bindHotkeyRecorder({
+      buttonId: 'btn-record-mute-hotkey',
+      displayId: 'mute-hotkey-display',
+      clearButtonId: 'btn-clear-mute-hotkey',
+      getCurrentShortcut: () => app.form?.globalShortcut || 'CommandOrControl+Shift+M',
+      onSave: (acc) => {
+        app.patchForm({ globalShortcut: acc }, true);
+        app.pushToast(`Zapisano skrót wyciszenia: ${acc} ✓`);
+      },
+      onClear: () => {
+        app.patchForm({ globalShortcut: '' }, true);
+        app.pushToast('Wyłączono skrót wyciszenia');
+      }
+    });
+
     // Logs Filtering & Search
     document.querySelectorAll<HTMLElement>('[data-log-filter]').forEach((chip) => {
       chip.addEventListener('click', (e) => {
@@ -1255,11 +1284,21 @@ export function bindEvents(app: AppUI) {
     });
 
     byId('fc-btn-open-notepad')?.addEventListener('click', async () => {
-      const ok = await window.api.openLogsInNotepad();
-      if (ok) {
-        app.pushToast('Otwarto wszystkie surowe logi w Notatniku 📝');
-      } else {
-        app.pushToast('Nie udało się uruchomić Notatnika', true);
+      try {
+        const fullLogs = await window.api.getLogs();
+        const logs = fullLogs && fullLogs.length > 0 ? fullLogs : app.logs;
+        const visible = applyLogFilter(app, logs || []);
+        const isFiltered = app.logFilter !== 'all' || Boolean(app.logSearch);
+        const ok = isFiltered
+          ? await window.api.openTextInNotepad(visible.join('\r\n'))
+          : await window.api.openLogsInNotepad();
+        if (ok) {
+          app.pushToast(isFiltered ? `Otwarto przefiltrowane logi w Notatniku (${visible.length} linii) 📝` : 'Otwarto wszystkie surowe logi w Notatniku 📝');
+        } else {
+          app.pushToast('Nie udało się uruchomić Notatnika', true);
+        }
+      } catch (err: any) {
+        app.pushToast(`Błąd: ${err.message}`, true);
       }
     });
 
@@ -1267,15 +1306,24 @@ export function bindEvents(app: AppUI) {
       try {
         const fullLogs = await window.api.getLogs();
         const logs = fullLogs && fullLogs.length > 0 ? fullLogs : app.logs;
-        // Kopiujemy to, co widoczne w konsoli (aktywna zakładka + wyszukiwarka)
+        // Kopiujemy dokładnie to, co wybrane w aktywnej zakładce i wyszukiwarce
         const visible = applyLogFilter(app, logs || []);
         if (!visible || visible.length === 0) {
-          app.pushToast('Brak logów do skopiowania dla aktywnego filtru');
+          app.pushToast('Brak logów do skopiowania dla wybranej zakładki / filtru');
           return;
         }
         await window.api.copyToClipboard(visible.join('\r\n'));
-        const scope = app.logFilter === 'all' && !app.logSearch ? 'WSZYSTKIE' : 'widoczne (aktywny filtr)';
-        app.pushToast(`Skopiowano logi RAW — ${scope} (${visible.length} linii) 📋`);
+        const filterNames: Record<string, string> = {
+          all: 'Wszystkie',
+          radar: '📡 Radar & DSP',
+          voice: '🎙️ Mowa & Vosk',
+          haos: '🏠 HAOS',
+          audio: '🎙️ Audio & VU',
+          discord: '🎮 Discord & RGB',
+          error: '⚠️ Błędy'
+        };
+        const currentFilterName = filterNames[app.logFilter] || app.logFilter;
+        app.pushToast(`Skopiowano logi [${currentFilterName}] (${visible.length} linii) 📋`);
       } catch (err: any) {
         app.pushToast(`Błąd kopiowania: ${err.message}`, true);
       }
@@ -1382,6 +1430,61 @@ export function bindEvents(app: AppUI) {
       app.pushToast(ok ? 'Otwarto raport w Notatniku 📝' : 'Nie udało się uruchomić Notatnika', !ok);
     });
 
+    // ---------- Firmware Flasher Events ----------
+    const openFlasher = () => void openFlasherModal(app);
+    byId('btn-open-flasher-modal')?.addEventListener('click', openFlasher);
+    byId('btn-port-open-flasher')?.addEventListener('click', openFlasher);
+    byId('btn-flasher-close')?.addEventListener('click', () => closeFlasherModal(app));
+    byId('btn-flasher-cancel')?.addEventListener('click', () => closeFlasherModal(app));
+
+    byId('btn-flasher-browse')?.addEventListener('click', async () => {
+      const res = await window.api.flasherSelectFile();
+      if (res) {
+        app.flasherSelectedFile = res.filePath;
+        app.flasherSelectedFileName = `${res.fileName} (${(res.sizeBytes / 1024).toFixed(1)} kB)`;
+        app.flasherSelectedFileSize = res.sizeBytes;
+        app.flasherLogs.push(`Wybrano plik: ${res.filePath} (${res.sizeBytes} bajtów)`);
+        app.render();
+      }
+    });
+
+    document.querySelectorAll<HTMLElement>('.flasher-stock-pick').forEach((el) => {
+      el.addEventListener('click', () => {
+        const filePath = el.getAttribute('data-path');
+        const fileName = el.getAttribute('data-name');
+        if (filePath && fileName) {
+          app.flasherSelectedFile = filePath;
+          app.flasherSelectedFileName = fileName;
+          app.flasherLogs.push(`Wybrano wsad szablonu: ${fileName}`);
+          app.render();
+        }
+      });
+    });
+
+    byId('sel-flasher-port')?.addEventListener('change', (e) => {
+      app.flasherSelectedPort = (e.target as HTMLSelectElement).value;
+      app.render();
+    });
+
+    byId('btn-flasher-abort')?.addEventListener('click', () => {
+      void window.api.flasherCancel();
+    });
+
+    byId('btn-flasher-start')?.addEventListener('click', async () => {
+      if (!app.flasherSelectedFile || !app.flasherSelectedPort) {
+        app.pushToast('Wybierz plik wsadu oraz port COM', true);
+        return;
+      }
+      app.flasherLoading = true;
+      app.flasherLogs.push(`Rozpoczynam wgrywanie na port ${app.flasherSelectedPort}...`);
+      app.render();
+
+      await window.api.flasherFlash({
+        port: app.flasherSelectedPort,
+        filePath: app.flasherSelectedFile
+      });
+    });
+
     // Voice Control Events
     bindVoiceEvents(app);
   }
@@ -1459,119 +1562,22 @@ function bindVoiceEvents(app: AppUI): void {
     }
   });
 
-  // Dynamic sections (odświeżane przez voice:status / voice:downloadProgress)
+  // Dynamic sections (odświeżane przez voice:status / voice:downloadProgress / render)
   bindVoiceDynamic(app);
 
-  // Engine select cards
-  byId('btn-engine-whisper')?.addEventListener('click', () => {
-    byId('btn-engine-whisper')?.classList.add('selected');
-    byId('btn-engine-vosk')?.classList.remove('selected');
-    const rowWhisper = byId('row-whisper-model');
-    const rowVosk = byId('row-vosk-model');
-    const customRow = byId('row-vosk-custom-path');
-    if (rowWhisper) rowWhisper.style.display = 'block';
-    if (rowVosk) rowVosk.style.display = 'none';
-    if (customRow) customRow.style.display = 'none';
-    app.patchForm({ voiceEngine: 'whisper' }, false);
-    void app.save();
-    const dlSec = byId('voice-download-section');
-    if (dlSec) {
-      dlSec.innerHTML = renderVoiceDownloadSection(app);
-      bindVoiceDynamic(app);
-    }
-    app.pushToast('Przełączono na silnik: OpenAI Whisper AI 🧠');
-  });
-
-  byId('btn-engine-vosk')?.addEventListener('click', () => {
-    byId('btn-engine-vosk')?.classList.add('selected');
-    byId('btn-engine-whisper')?.classList.remove('selected');
-    const rowWhisper = byId('row-whisper-model');
-    const rowVosk = byId('row-vosk-model');
-    const customRow = byId('row-vosk-custom-path');
-    if (rowWhisper) rowWhisper.style.display = 'none';
-    if (rowVosk) rowVosk.style.display = 'block';
-    if (customRow) customRow.style.display = app.form?.voiceModel === 'custom' ? 'block' : 'none';
-    app.patchForm({ voiceEngine: 'vosk' }, false);
-    void app.save();
-    const dlSec = byId('voice-download-section');
-    if (dlSec) {
-      dlSec.innerHTML = renderVoiceDownloadSection(app);
-      bindVoiceDynamic(app);
-    }
-    app.pushToast('Przełączono na silnik: Vosk Fast 🚀');
-  });
-
-  // Whisper model select
-  byId('sel-whisper-model')?.addEventListener('change', (e) => {
-    const val = (e.target as HTMLSelectElement).value;
-    app.patchForm({ voiceWhisperModel: val as any }, false);
-    void app.save();
-    const dlSec = byId('voice-download-section');
-    if (dlSec) {
-      dlSec.innerHTML = renderVoiceDownloadSection(app);
-      bindVoiceDynamic(app);
-    }
-  });
-
-  // Whisper backend select (GPU / CPU)
-  byId('sel-whisper-backend')?.addEventListener('change', (e) => {
-    const val = (e.target as HTMLSelectElement).value;
-    app.patchForm({ voiceWhisperBackend: val as any }, false);
-    const hintEl = byId('voice-backend-hint');
-    if (hintEl) hintEl.innerHTML = renderBackendHint(val as any, app.snap?.voice);
-    void app.save();
-    const dlSec = byId('voice-download-section');
-    if (dlSec) {
-      dlSec.innerHTML = renderVoiceDownloadSection(app);
-      bindVoiceDynamic(app);
-    }
-  });
-
-  // Usuń pakiet backendu
-  byId('btn-delete-voice-backend')?.addEventListener('click', async () => {
-    const key = app.form?.voiceWhisperBackend || 'auto';
-    if (key === 'auto') return;
-    if (!window.confirm(`Usunąć pakiet backendu „${key}” z dysku?`)) return;
-    const res = await window.api.voiceDeleteAsset('backend', key);
-    app.pushToast(res?.message || (res?.ok ? 'Usunięto backend' : 'Błąd usuwania'), !res?.ok);
-    if (app.currentTab === 'settings' && app.settingsTab === 'voice') app.render();
-  });
-
-  // Idle unload minutes (na żywo — bez restartu silnika)
-  byId('inp-voice-idle-min')?.addEventListener('change', (e) => {
-    const v = Math.max(0, Math.min(60, Number((e.target as HTMLInputElement).value) || 0));
-    (e.target as HTMLInputElement).value = String(v);
-    app.patchForm({ voiceIdleUnloadMin: v }, false);
-  });
-
-  // Vosk Model select
-  byId('sel-voice-model')?.addEventListener('change', (e) => {
-    const val = (e.target as HTMLSelectElement).value;
-    const customRow = byId('row-vosk-custom-path');
-    if (customRow) customRow.style.display = val === 'custom' ? 'block' : 'none';
-    app.patchForm({ voiceModel: val as any }, false);
-    void app.save();
-    const dlSec = byId('voice-download-section');
-    if (dlSec) {
-      dlSec.innerHTML = renderVoiceDownloadSection(app);
-      bindVoiceDynamic(app);
-    }
-  });
-
-  // Custom model path input
-  byId('inp-voice-custom-path')?.addEventListener('change', (e) => {
-    const val = (e.target as HTMLInputElement).value;
-    app.patchForm({ voiceCustomModelPath: val });
-  });
-
-  // Pick custom model folder button
-  byId('btn-pick-custom-model')?.addEventListener('click', async () => {
-    const folder = await window.api.voicePickCustomModel();
-    if (folder) {
-      app.patchForm({ voiceCustomModelPath: folder }, false);
-      const inp = byId('inp-voice-custom-path') as HTMLInputElement | null;
-      if (inp) inp.value = folder;
-      app.pushToast(`Wybrano folder modelu: ${folder}`);
+  // Globalny skrót wywołania mowy (Hotkey recorder)
+  bindHotkeyRecorder({
+    buttonId: 'btn-record-voice-hotkey',
+    displayId: 'voice-hotkey-display',
+    clearButtonId: 'btn-clear-voice-hotkey',
+    getCurrentShortcut: () => app.form?.voiceShortcut || 'CommandOrControl+Shift+V',
+    onSave: (acc) => {
+      app.patchForm({ voiceShortcut: acc }, true);
+      app.pushToast(`Zapisano skrót wywołania mowy: ${acc} ✓`);
+    },
+    onClear: () => {
+      app.patchForm({ voiceShortcut: '' }, true);
+      app.pushToast('Wyłączono skrót wywołania mowy');
     }
   });
 
@@ -1590,6 +1596,15 @@ function bindVoiceEvents(app: AppUI): void {
     byId('sw-voice-chime')?.setAttribute('aria-checked', String(next));
     app.patchForm({ voiceChimeFeedback: next }, false);
     void app.save();
+  });
+
+  byId('sw-voice-vocab-bias')?.addEventListener('click', () => {
+    const next = !(app.form?.voiceVocabBias ?? true);
+    byId('sw-voice-vocab-bias')?.classList.toggle('active', next);
+    byId('sw-voice-vocab-bias')?.setAttribute('aria-checked', String(next));
+    app.patchForm({ voiceVocabBias: next }, false);
+    void app.save();
+    app.pushToast(next ? 'Włączono bias słownika komend 🎯' : 'Wyłączono bias słownika — ogólne rozpoznawanie mowy');
   });
 
   // Add rule button
@@ -1800,6 +1815,29 @@ function bindVoiceEvents(app: AppUI): void {
     });
   });
 
+  document.querySelectorAll<HTMLButtonElement>('.btn-duplicate-voice-rule').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      const idx = Number((e.currentTarget as HTMLElement).getAttribute('data-index'));
+      const rules = [...(app.form?.voiceRules || [])];
+      const sourceRule = rules[idx];
+      if (!sourceRule) return;
+
+      const baseName = sourceRule.name || 'Komenda';
+      const basePhrase = sourceRule.phrase || '';
+      const newRule: VoiceRule = {
+        ...JSON.parse(JSON.stringify(sourceRule)),
+        id: `rule_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name: `${baseName} (kopia)`,
+        phrase: basePhrase ? `${basePhrase} 2` : '',
+        enabled: true
+      };
+
+      rules.splice(idx + 1, 0, newRule);
+      app.patchForm({ voiceRules: rules }, true);
+      app.pushToast(`Zduplikowano komendę: „${sourceRule.name}”. Zmień frazę wywołania przed zapisem.`);
+    });
+  });
+
   document.querySelectorAll<HTMLButtonElement>('.btn-delete-voice-rule').forEach((el) => {
     el.addEventListener('click', (e) => {
       const idx = Number((e.currentTarget as HTMLElement).getAttribute('data-index'));
@@ -1866,8 +1904,9 @@ function bindVoiceEvents(app: AppUI): void {
 
   byId('btn-use-recognized-phrase')?.addEventListener('click', async () => {
     if (!app.voiceLastRecognized) return;
-    const wakeWord = (app.form?.voiceWakeWord || 'ok').trim().toLowerCase();
-    const regex = new RegExp(`^(?:${wakeWord}|ok|okej|okey|desksense|desk-sense)\\s+`, 'i');
+    const wakeWord = (app.form?.voiceWakeWord || 'desksense').trim().toLowerCase();
+    const escapedWake = wakeWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`^(?:${escapedWake}|ok|okej|okey|desksense|desk-sense)\\s+`, 'i');
     let phraseClean = app.voiceLastRecognized.replace(regex, '').trim();
     if (!phraseClean) phraseClean = app.voiceLastRecognized.trim();
     const rules = [...(app.form?.voiceRules || [])];
@@ -1888,6 +1927,122 @@ function bindVoiceEvents(app: AppUI): void {
  *  wywoływane po każdym podmianie innerHTML przez voice:status. */
 export function bindVoiceDynamic(app: AppUI): void {
   const byId = (id: string) => document.getElementById(id);
+
+  // Engine select cards
+  byId('btn-engine-whisper')?.addEventListener('click', () => {
+    byId('btn-engine-whisper')?.classList.add('selected');
+    byId('btn-engine-vosk')?.classList.remove('selected');
+    const rowWhisper = byId('row-whisper-model');
+    const rowVosk = byId('row-vosk-model');
+    const customRow = byId('row-vosk-custom-path');
+    if (rowWhisper) rowWhisper.style.display = 'block';
+    if (rowVosk) rowVosk.style.display = 'none';
+    if (customRow) customRow.style.display = 'none';
+    app.patchForm({ voiceEngine: 'whisper' }, false);
+    void app.save();
+    const dlSec = byId('voice-download-section');
+    if (dlSec) {
+      dlSec.innerHTML = renderVoiceDownloadSection(app);
+      bindVoiceDynamic(app);
+    }
+    app.pushToast('Przełączono na silnik: OpenAI Whisper AI 🧠');
+  });
+
+  byId('btn-engine-vosk')?.addEventListener('click', () => {
+    byId('btn-engine-vosk')?.classList.add('selected');
+    byId('btn-engine-whisper')?.classList.remove('selected');
+    const rowWhisper = byId('row-whisper-model');
+    const rowVosk = byId('row-vosk-model');
+    const customRow = byId('row-vosk-custom-path');
+    if (rowWhisper) rowWhisper.style.display = 'none';
+    if (rowVosk) rowVosk.style.display = 'block';
+    if (customRow) customRow.style.display = app.form?.voiceModel === 'custom' ? 'block' : 'none';
+    app.patchForm({ voiceEngine: 'vosk' }, false);
+    void app.save();
+    const dlSec = byId('voice-download-section');
+    if (dlSec) {
+      dlSec.innerHTML = renderVoiceDownloadSection(app);
+      bindVoiceDynamic(app);
+    }
+    app.pushToast('Przełączono na silnik: Vosk Fast 🚀');
+  });
+
+  // Whisper model select
+  byId('sel-whisper-model')?.addEventListener('change', (e) => {
+    const val = (e.target as HTMLSelectElement).value;
+    app.patchForm({ voiceWhisperModel: val as any }, false);
+    void app.save();
+    const dlSec = byId('voice-download-section');
+    if (dlSec) {
+      dlSec.innerHTML = renderVoiceDownloadSection(app);
+      bindVoiceDynamic(app);
+    }
+  });
+
+  // Whisper backend select (GPU / CPU)
+  byId('sel-whisper-backend')?.addEventListener('change', (e) => {
+    const val = (e.target as HTMLSelectElement).value;
+    app.patchForm({ voiceWhisperBackend: val as any }, false);
+    const hintEl = byId('voice-backend-hint');
+    if (hintEl) hintEl.innerHTML = renderBackendHint(val as any, app.snap?.voice);
+    void app.save();
+    const dlSec = byId('voice-download-section');
+    if (dlSec) {
+      dlSec.innerHTML = renderVoiceDownloadSection(app);
+      bindVoiceDynamic(app);
+    }
+  });
+
+  // Usuń pakiet backendu
+  byId('btn-delete-voice-backend')?.addEventListener('click', async () => {
+    const key = app.form?.voiceWhisperBackend || 'auto';
+    if (key === 'auto') return;
+    if (!window.confirm(`Usunąć pakiet backendu „${key}” z dysku?`)) return;
+    const res = await window.api.voiceDeleteAsset('backend', key);
+    app.pushToast(res?.message || (res?.ok ? 'Usunięto backend' : 'Błąd usuwania'), !res?.ok);
+    if (app.currentTab === 'settings' && app.settingsTab === 'voice') app.render();
+  });
+
+  // Idle unload minutes (na żywo — bez restartu silnika)
+  byId('inp-voice-idle-min')?.addEventListener('change', (e) => {
+    const v = Math.max(0, Math.min(60, Number((e.target as HTMLInputElement).value) || 0));
+    (e.target as HTMLInputElement).value = String(v);
+    app.patchForm({ voiceIdleUnloadMin: v }, false);
+    void app.save();
+  });
+
+  // Vosk Model select
+  byId('sel-voice-model')?.addEventListener('change', (e) => {
+    const val = (e.target as HTMLSelectElement).value;
+    const customRow = byId('row-vosk-custom-path');
+    if (customRow) customRow.style.display = val === 'custom' ? 'block' : 'none';
+    app.patchForm({ voiceModel: val as any }, false);
+    void app.save();
+    const dlSec = byId('voice-download-section');
+    if (dlSec) {
+      dlSec.innerHTML = renderVoiceDownloadSection(app);
+      bindVoiceDynamic(app);
+    }
+  });
+
+  // Custom model path input
+  byId('inp-voice-custom-path')?.addEventListener('change', (e) => {
+    const val = (e.target as HTMLInputElement).value;
+    app.patchForm({ voiceCustomModelPath: val });
+    void app.save();
+  });
+
+  // Pick custom model folder button
+  byId('btn-pick-custom-model')?.addEventListener('click', async () => {
+    const folder = await window.api.voicePickCustomModel();
+    if (folder) {
+      app.patchForm({ voiceCustomModelPath: folder }, false);
+      const inp = byId('inp-voice-custom-path') as HTMLInputElement | null;
+      if (inp) inp.value = folder;
+      app.pushToast(`Wybrano folder modelu: ${folder}`);
+      void app.save();
+    }
+  });
 
   byId('btn-download-voice-model')?.addEventListener('click', async () => {
     const engine = app.form?.voiceEngine || 'whisper';
@@ -1920,7 +2075,7 @@ export function bindVoiceDynamic(app: AppUI): void {
 
   byId('btn-delete-voice-model')?.addEventListener('click', async () => {
     const engine = app.form?.voiceEngine || 'whisper';
-    const key = engine === 'whisper' ? (app.form?.voiceWhisperModel || 'whisper-base') : (app.form?.voiceModel || 'pl-small');
+    const key = engine === 'whisper' ? (app.form?.voiceWhisperModel || 'whisper-small-pl') : (app.form?.voiceModel || 'pl-small');
     if (!window.confirm(`Usunąć pobrany model „${key}” z dysku?`)) return;
     const res = await window.api.voiceDeleteAsset('model', key);
     app.pushToast(res?.message || (res?.ok ? 'Usunięto model' : 'Błąd usuwania'), !res?.ok);

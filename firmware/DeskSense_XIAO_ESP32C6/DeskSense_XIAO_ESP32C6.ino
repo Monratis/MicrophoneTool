@@ -364,7 +364,7 @@ void setup() {
   // przy bootcie wypadnie w OFF po FUSION_GAP_MS bez bio i bez netto ruchu.
   lastBioEvidenceMs = millis();
 
-  Serial.printf("\n[DeskSense OS v%s initialized]\r\n", FIRMWARE_VERSION);
+  Serial.printf("\n[DeskSense OS v%s initialized | SENSOR=MR60BHA2]\r\n", FIRMWARE_VERSION);
 }
 
 void loop() {
@@ -406,14 +406,14 @@ void loop() {
     readAndSendBH1750();
   }
 
-  // 5. Heartbeat telemetrii ukladu co 5 s (apka parsuje FW/UPTIME/TEMP/LUX)
+  // 5. Heartbeat telemetrii ukladu co 5 s (apka parsuje FW/SENSOR/UPTIME/TEMP/LUX)
   if (now - lastDevInfoEmit >= 5000) {
     lastDevInfoEmit = now;
     if (bh1750Available && lastLux >= 0.0f) {
-      Serial.printf("[DeskSense] DeskSense Device FW=%s UPTIME=%lus TEMP=%.1fC LUX=%.1f\r\n",
+      Serial.printf("[DeskSense] DeskSense Device FW=%s SENSOR=MR60BHA2 UPTIME=%lus TEMP=%.1fC LUX=%.1f\r\n",
                     FIRMWARE_VERSION, (unsigned long)(now / 1000UL), temperatureRead(), lastLux);
     } else {
-      Serial.printf("[DeskSense] DeskSense Device FW=%s UPTIME=%lus TEMP=%.1fC\r\n",
+      Serial.printf("[DeskSense] DeskSense Device FW=%s SENSOR=MR60BHA2 UPTIME=%lus TEMP=%.1fC\r\n",
                     FIRMWARE_VERSION, (unsigned long)(now / 1000UL), temperatureRead());
     }
   }

@@ -18,7 +18,7 @@ export class MedianFilter {
   }
 
   push(val: number): number {
-    if (val <= 0) return 0;
+    if (!Number.isFinite(val) || val <= 0) return 0;
     this.buffer.push(val);
     if (this.buffer.length > this.size) {
       this.buffer.shift();
@@ -68,7 +68,7 @@ export class DistanceFilter {
   }
 
   push(valCm: number): number {
-    if (valCm <= 0 || valCm > 800) return 0;
+    if (!Number.isFinite(valCm) || valCm <= 0 || valCm > 800) return 0;
     const m = this.median.push(valCm);
     if (m <= 0) return Math.round(this.output);
     this.ema = this.ema === 0 ? m : this.ema + this.alpha * (m - this.ema);
@@ -111,7 +111,7 @@ export class BiometricFilter {
   }
 
   push(val: number): number {
-    if (val <= 0) return 0;
+    if (!Number.isFinite(val) || val <= 0) return 0;
     const m = this.median.push(val);
     if (m <= 0) return this.output;
     this.ema = this.ema === 0 ? m : this.ema + this.alpha * (m - this.ema);
@@ -135,11 +135,12 @@ export class IlluminanceFilter {
   }
 
   push(valLux: number): number {
-    if (valLux < 0 || valLux > 120000) return 0;
+    if (!Number.isFinite(valLux) || valLux < 0 || valLux > 120000) return 0;
     this.buffer.push(valLux);
     if (this.buffer.length > this.size) {
       this.buffer.shift();
     }
+    if (this.buffer.length === 0) return 0;
     const sum = this.buffer.reduce((acc, v) => acc + v, 0);
     return Math.round((sum / this.buffer.length) * 10) / 10;
   }

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { app, Notification, nativeImage, shell } from 'electron';
+import { app, nativeImage, shell } from 'electron';
 import type { BrowserWindow } from 'electron';
 import type Config from './config';
 import type AppController from './appController';
@@ -13,7 +13,9 @@ import type HomeAssistantIntegration from './haIntegration';
 import type ActivityWatcher from './activityWatcher';
 import type ScreenManager from './screenManager';
 import type { VoiceManager } from './voiceManager';
+import type { FirmwareFlasher } from './firmwareFlasher';
 import type { PushEvent, Snapshot } from '../shared/types';
+import { showVoiceOsd } from './voiceOsd';
 
 /**
  * Wspólny kontekst aplikacji przekazywany modułom (tray / okno / IPC).
@@ -30,6 +32,7 @@ export interface AppContext {
   signalrgb: SignalRGBIntegration | null;
   ha: HomeAssistantIntegration;
   voice?: VoiceManager;
+  flasher: FirmwareFlasher;
 
   appDataDir: string;
   settingsWindow: BrowserWindow | null;
@@ -39,7 +42,6 @@ export interface AppContext {
   refreshSnapshot(): void;
   restartRadar(): Promise<void>;
   showSettings(): void;
-  showWindowsNotification(title: string, body: string): void;
   applyAutoStart(enabled: boolean): void;
 }
 
@@ -167,25 +169,80 @@ export function resolveBinDir(): string {
   return path.join(__dirname, '..', '..', 'bin');
 }
 
-/** Ikona aplikacji: w dev z build/, w paczce z resources/ (extraResources). */
-export function resolveAppIcon(): string {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'resources', 'icon.png');
+/** Ścieżka do pliku ikony (.ico lub .png): w dev z build/ lub resources/, w paczce z resources/. */
+export function resolveAppIconPath(): string {
+  const candidates = [
+    // W paczce (extraResources: resources/ -> resources/icon.ico)
+    path.join(process.resourcesPath, 'resources', 'icon.ico'),
+    path.join(process.resourcesPath, 'icon.ico'),
+    path.join(process.resourcesPath, 'resources', 'icon.png'),
+    path.join(process.resourcesPath, 'icon.png'),
+    // W trybie deweloperskim
+    path.join(__dirname, '..', '..', 'build', 'icon.ico'),
+    path.join(__dirname, '..', '..', 'resources', 'icon.ico'),
+    path.join(__dirname, '..', '..', 'build', 'icon.png'),
+    path.join(__dirname, '..', '..', 'resources', 'icon.png')
+  ];
+
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
   }
-  return path.join(__dirname, '..', '..', 'build', 'icon.png');
+  return path.join(__dirname, '..', '..', 'build', 'icon.ico');
 }
 
-export function resolveWindowIcon(): Electron.NativeImage | null {
-  const iconPath = app.isPackaged
-    ? path.join(process.resourcesPath, 'resources', 'icon.png')
-    : path.join(__dirname, '..', '..', 'build', 'icon.ico');
+/** Ikona aplikacji PNG: w dev z build/, w paczce z resources/ (extraResources). */
+export function resolveAppIcon(): string {
+  if (app.isPackaged) {
+    const resPng = path.join(process.resourcesPath, 'resources', 'icon.png');
+    if (fs.existsSync(resPng)) return resPng;
+    return path.join(process.resourcesPath, 'icon.png');
+  }
+  const buildPng = path.join(__dirname, '..', '..', 'build', 'icon.png');
+  if (fs.existsSync(buildPng)) return buildPng;
+  return path.join(__dirname, '..', '..', 'resources', 'icon.png');
+}
+
+export function resolveWindowIcon(): Electron.NativeImage | string | null {
+  const iconPath = resolveAppIconPath();
   if (fs.existsSync(iconPath)) {
-    return nativeImage.createFromPath(iconPath);
+    // Na Windows przekazanie ścieżki pliku .ico do BrowserWindow / win.setIcon
+    // pozwala Win32 załadować pełną grupę ikon w wielu rozdzielczościach (16-256px).
+    if (process.platform === 'win32' && iconPath.endsWith('.ico')) {
+      return iconPath;
+    }
+    try {
+      const img = nativeImage.createFromPath(iconPath);
+      if (!img.isEmpty()) return img;
+    } catch {
+      /* fallback to path string */
+    }
+    return iconPath;
   }
   return null;
 }
 
-// ---------- autostart ----------
+// ---------- shortcuts & autostart ----------
+
+/**
+ * Bezpieczne tworzenie lub aktualizacja skrótu Windows .lnk.
+ * Electron shell.writeShortcutLink z 'replace' wyrzuca błąd gdy plik nie istnieje,
+ * a 'create' wyrzuca błąd gdy plik już istnieje. Usuwamy stary i tworzymy świeży.
+ */
+export function writeOrUpdateShortcut(shortcutPath: string, details: Electron.ShortcutDetails): boolean {
+  try {
+    if (fs.existsSync(shortcutPath)) {
+      try {
+        fs.unlinkSync(shortcutPath);
+      } catch (_) {
+        return shell.writeShortcutLink(shortcutPath, 'replace', details);
+      }
+    }
+    return shell.writeShortcutLink(shortcutPath, 'create', details);
+  } catch (err) {
+    console.warn(`[shortcut] Nie udało się zapisać skrótu "${shortcutPath}":`, (err as Error).message);
+    return false;
+  }
+}
 
 export function applyAutoStart(enabled: boolean): void {
   try {
@@ -207,23 +264,27 @@ export function applyAutoStart(enabled: boolean): void {
 
     const targetExe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
     const targetDir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(targetExe);
+    const iconPath = resolveAppIconPath();
 
     if (enabled) {
       fs.mkdirSync(startupDir, { recursive: true });
 
       // Tworzymy skrót .lnk w folderze Autostartu Windows z jawnym katalogiem roboczym (cwd).
       // To gwarantuje, że wersja Portable odpala się bezbłędnie niezależnie od ścieżki ze spacjami.
-      shell.writeShortcutLink(startupLnk, 'replace', {
+      writeOrUpdateShortcut(startupLnk, {
         target: targetExe,
+        args: app.isPackaged ? undefined : `"${path.resolve('.')}"`,
         cwd: targetDir,
         appUserModelId: 'com.monratis.desksense',
-        description: 'DeskSense'
+        description: 'DeskSense',
+        icon: iconPath,
+        iconIndex: 0
       });
 
-      // Synchronizujemy również rejestr Windows
+      // Usuwamy ewentualny stary wpis w rejestrze, aby Windows nie odpalał dwóch kopii
       try {
         app.setLoginItemSettings({
-          openAtLogin: true,
+          openAtLogin: false,
           path: targetExe
         });
       } catch (_) {}
@@ -243,39 +304,10 @@ export function applyAutoStart(enabled: boolean): void {
   }
 }
 
-export function createNotification(
-  title: string,
-  body: string,
-  notificationsEnabled: boolean,
-  onClick?: () => void
-): void {
-  if (Notification.isSupported() && notificationsEnabled) {
-    try {
-      const iconPath = resolveAppIcon();
-      const notif = new Notification({
-        title,
-        body,
-        icon: fs.existsSync(iconPath) ? iconPath : undefined,
-        silent: true
-      });
-      if (onClick) {
-        notif.on('click', () => {
-          try {
-            onClick();
-          } catch (_) {}
-        });
-      }
-      notif.show();
-    } catch {
-      /* ignore */
-    }
-  }
-}
-
 /**
- * Wspólny toggle mute z pełnym feedbackiem (dioda sensora, toast, powiadomienie,
- * odświeżenie snapshotu). Używany przez skrót globalny, menu tray i IPC —
- * wcześniej logika była skopiowana w trzech miejscach i tray nie aktualizował LED.
+ * Wspólny toggle mute z pełnym feedbackiem (dioda sensora, toast, odświeżenie snapshotu).
+ * Używany przez skrót globalny, menu tray i IPC — wcześniej logika była skopiowana
+ * w trzech miejscach i tray nie aktualizował LED.
  */
 export async function toggleMuteWithFeedback(ctx: AppContext): Promise<{ ok: boolean; isMuted?: boolean }> {
   const res = await ctx.controller.toggleDeviceMute();
@@ -283,25 +315,23 @@ export async function toggleMuteWithFeedback(ctx: AppContext): Promise<{ ok: boo
     // Dioda sensora reaguje na mute z KAŻDEGO źródła (skrót / tray / UI)
     ctx.radar.updateLed(res.isMuted ? 'mute' : (ctx.controller.currentDevice || 'desk'));
     ctx.pushEvent('toast', { message: res.isMuted ? 'Mikrofon wyciszony 🔇' : 'Mikrofon aktywny 🎙️' });
-    ctx.showWindowsNotification(
-      'DeskSense',
-      res.isMuted ? 'Mikrofon został wyciszony 🔇' : 'Wyciszenie mikrofonu wyłączone 🎙️'
-    );
+    showVoiceOsd(res.isMuted ? 'Mikrofon wyciszony' : 'Mikrofon aktywny', res.isMuted ? 'mute' : 'unmute', 2000);
   } else if (!res.ok) {
     ctx.pushEvent('toast', { error: true, message: 'Nie udało się przełączyć wyciszenia mikrofonu' });
+    showVoiceOsd('Nie udało się przełączyć wyciszenia', 'blocked', 2500);
   }
   ctx.refreshSnapshot();
   return res;
 }
 
 /**
- * Windows bierze ikonę toasta ze skrótu Start Menu powiązanego z App User
- * Model ID. Portable nie ma takiego skrótu → powiadomienia pokazują generyczną
- * ikonę. Tworzymy/odświeżamy go przy każdym starcie (target = aktualna lokalizacja EXE).
+ * Windows bierze ikonę paska zadań i toasta ze skrótu Start Menu powiązanego z App User
+ * Model ID (AUMID: com.monratis.desksense). Tworzymy/odświeżamy go przy starcie
+ * zarówno w trybie packaged jak i deweloperskim, aby pasek zadań zawsze wyświetlał
+ * naszą dedykowaną ikonę DeskSense zamiast domyślnego logo Electrona.
  */
 export function ensureToastShortcut(): void {
   try {
-    if (!app.isPackaged) return; // w dev toast i tak dziedziczy ikonę Electrona
     const programsDir = path.join(
       app.getPath('appData'),
       'Microsoft',
@@ -319,12 +349,16 @@ export function ensureToastShortcut(): void {
 
     const targetExe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
     const targetDir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath);
+    const iconPath = resolveAppIconPath();
 
-    shell.writeShortcutLink(path.join(programsDir, 'DeskSense.lnk'), 'replace', {
+    writeOrUpdateShortcut(path.join(programsDir, 'DeskSense.lnk'), {
       target: targetExe,
+      args: app.isPackaged ? '--show' : `"${path.resolve('.')}" --show`,
       cwd: targetDir,
       appUserModelId: 'com.monratis.desksense',
-      description: 'DeskSense'
+      description: 'DeskSense',
+      icon: iconPath,
+      iconIndex: 0
     });
   } catch (err) {
     console.warn('[main] toast shortcut warning:', (err as Error).message);

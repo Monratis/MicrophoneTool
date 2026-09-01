@@ -12,6 +12,7 @@ import { toggleMuteWithFeedback } from './appContext';
 import { getLogs, clearLogs } from './logger';
 import { startDiagSession, stopDiagSession, isDiagSessionActive, diagSessionStartedAt } from './diagSession';
 import { toggleRecording, startRecording, stopRecording } from './diagRecorder';
+import { shortcutManager, handleVoiceHotkey } from './shortcutManager';
 
 export function registerIpc(ctx: AppContext): void {
   ipcMain.handle('state:get', () => ctx.buildSnapshot());
@@ -41,6 +42,9 @@ export function registerIpc(ctx: AppContext): void {
     const prevHaAutoDesk = ctx.config.get('haAutomationOnDesk');
     const prevHaBtnSnooze = ctx.config.get('haButtonSnoozeEntity');
     const prevHaBtnMute = ctx.config.get('haButtonMuteEntity');
+    const prevVoiceRules = ctx.config.get('voiceRules');
+    const prevVoiceWakeWord = ctx.config.get('voiceWakeWord');
+    const prevVoiceVocabBias = ctx.config.get('voiceVocabBias');
 
     for (const [key, value] of Object.entries(patch || {})) {
       if (key in ctx.config.data) {
@@ -53,6 +57,17 @@ export function registerIpc(ctx: AppContext): void {
         (ctx.config.data as unknown as Record<string, unknown>)[key] = value;
       }
     }
+
+    if (typeof (ctx.config.data as any).timeoutAwayMs === 'number' && (ctx.config.data as any).timeoutAwayMs < 200) {
+      (ctx.config.data as any).timeoutAwayMs = DEFAULTS.timeoutAwayMs;
+    }
+    if (typeof (ctx.config.data as any).timeoutDeskMs === 'number' && (ctx.config.data as any).timeoutDeskMs < 0) {
+      (ctx.config.data as any).timeoutDeskMs = DEFAULTS.timeoutDeskMs;
+    }
+    if (typeof (ctx.config.data as any).userInputPresenceHoldSec === 'number' && (ctx.config.data as any).userInputPresenceHoldSec < 1) {
+      (ctx.config.data as any).userInputPresenceHoldSec = DEFAULTS.userInputPresenceHoldSec;
+    }
+
     if (typeof patch?.autoStart === 'boolean') applyAutoStart(patch.autoStart);
     ctx.config.save();
 
@@ -112,6 +127,14 @@ export function registerIpc(ctx: AppContext): void {
         'voiceIdleUnloadMin' in patch ||
         'voiceRules' in patch);
 
+    const shortcutsNeedUpdate =
+      Boolean(patch) &&
+      ('globalShortcut' in patch || 'voiceShortcut' in patch);
+
+    if (shortcutsNeedUpdate) {
+      shortcutManager.registerAll(ctx);
+    }
+
     if (radarNeedsRestart) {
       void ctx.restartRadar();
     }
@@ -139,10 +162,12 @@ export function registerIpc(ctx: AppContext): void {
         }
       } else if (typeof patch?.voiceIdleUnloadMin === 'number') {
         ctx.voice.setVoiceIdleUnload(patch.voiceIdleUnloadMin);
-      } else if ('voiceEngine' in (patch || {}) || 'voiceWhisperModel' in (patch || {}) || 'voiceWhisperBackend' in (patch || {}) || 'voiceModel' in (patch || {}) || 'voiceCustomModelPath' in (patch || {})) {
+      } else if ('voiceEngine' in (patch || {}) || 'voiceWhisperModel' in (patch || {}) || 'voiceWhisperBackend' in (patch || {}) || 'voiceModel' in (patch || {}) || 'voiceCustomModelPath' in (patch || {}) || 'voiceRequireWakeWord' in (patch || {})) {
+        // voiceRequireWakeWord steruje podpięciem taniego spottera (Vosk) przed Whisperem —
+        // zmiana wymaga restartu, inaczej C# trzyma starą konfigurację gatingu.
         const eng = (patch?.voiceEngine as string) || ctx.config.get('voiceEngine') || 'whisper';
         const mdl = eng === 'whisper'
-          ? (patch?.voiceWhisperModel as string) || ctx.config.get('voiceWhisperModel') || 'whisper-base'
+          ? (patch?.voiceWhisperModel as string) || ctx.config.get('voiceWhisperModel') || 'whisper-small-pl'
           : (patch?.voiceModel as string) || ctx.config.get('voiceModel') || 'pl-small';
         const bck = (patch?.voiceWhisperBackend as string) || ctx.config.get('voiceWhisperBackend') || 'auto';
         // Restart tylko gdy nowa konfiguracja jest gotowa — inaczej nie ubijamy działającego silnika
@@ -150,6 +175,23 @@ export function registerIpc(ctx: AppContext): void {
           void ctx.voice.restart();
         }
       }
+    }
+    const micDevicesChanged =
+      Boolean(patch) &&
+      ('micDeskName' in patch || 'micDeskFallbackName' in patch || 'micHeadsetName' in patch || 'micHeadsetFallbackName' in patch);
+    if (micDevicesChanged && ctx.voice && ctx.voice.isRunning()) {
+      ctx.voice.updateDevices();
+    }
+    // Zmiana reguł głosowych / słowa wywołania / biasu → zaktualizuj słownik dekodera na żywo.
+    // Porównujemy z poprzednimi wartościami — renderer wysyła cały form przy każdym zapisie.
+    const vocabChanged =
+      Boolean(patch) && (
+        ('voiceRules' in patch && JSON.stringify(patch.voiceRules) !== JSON.stringify(prevVoiceRules)) ||
+        ('voiceWakeWord' in patch && patch.voiceWakeWord !== prevVoiceWakeWord) ||
+        ('voiceVocabBias' in patch && patch.voiceVocabBias !== prevVoiceVocabBias)
+      );
+    if (ctx.voice && ctx.voice.isRunning() && vocabChanged) {
+      ctx.voice.updateVocabulary();
     }
     if (!radarNeedsRestart) {
       ctx.refreshSnapshot();
@@ -442,6 +484,10 @@ export function registerIpc(ctx: AppContext): void {
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
   });
+  ipcMain.handle('voice:triggerListening', () => {
+    handleVoiceHotkey(ctx);
+    return true;
+  });
 
   ipcMain.on('window:close', () => {
     const win = getSettingsWindow();
@@ -479,4 +525,12 @@ export function registerIpc(ctx: AppContext): void {
       }
     }
   });
+
+  // ---------- Firmware Flasher IPC (XIAO ESP32-C6) ----------
+  ipcMain.handle('flasher:checkDeps', () => ctx.flasher.checkDependencies());
+  ipcMain.handle('flasher:selectFile', () => ctx.flasher.selectFirmwareFile());
+  ipcMain.handle('flasher:flash', (_e, opts: { port: string; filePath: string; baudRate?: number }) =>
+    ctx.flasher.flash(opts)
+  );
+  ipcMain.handle('flasher:cancel', () => ctx.flasher.cancel());
 }
