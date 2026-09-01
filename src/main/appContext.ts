@@ -334,6 +334,15 @@ export async function toggleMuteWithFeedback(ctx: AppContext): Promise<{ ok: boo
  */
 export function ensureToastShortcut(): void {
   try {
+    const appData = getAppDataDir();
+    const persistentIcon = path.join(appData, 'icon.ico');
+    const sourceIcon = resolveAppIconPath();
+    if (fs.existsSync(sourceIcon)) {
+      try {
+        fs.copyFileSync(sourceIcon, persistentIcon);
+      } catch (_) {}
+    }
+
     const programsDir = path.join(
       app.getPath('appData'),
       'Microsoft',
@@ -351,7 +360,7 @@ export function ensureToastShortcut(): void {
 
     const targetExe = process.execPath;
     const targetDir = path.dirname(process.execPath);
-    const iconPath = resolveAppIconPath();
+    const iconToUse = fs.existsSync(persistentIcon) ? persistentIcon : sourceIcon;
 
     writeOrUpdateShortcut(path.join(programsDir, 'DeskSense.lnk'), {
       target: targetExe,
@@ -359,7 +368,7 @@ export function ensureToastShortcut(): void {
       cwd: targetDir,
       appUserModelId: 'com.monratis.desksense',
       description: 'DeskSense',
-      icon: iconPath,
+      icon: iconToUse,
       iconIndex: 0
     });
   } catch (err) {

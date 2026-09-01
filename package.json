@@ -58,6 +58,14 @@
         "to": "resources"
       },
       {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      },
+      {
         "from": "config.json",
         "to": "config.json"
       }
