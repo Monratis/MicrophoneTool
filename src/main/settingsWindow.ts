@@ -16,7 +16,7 @@ export function createSettingsWindow(ctx: AppContext): void {
   const iconPath = resolveAppIconPath();
   const iconExists = fs.existsSync(iconPath);
 
-  appendLog('ICON', `createSettingsWindow: iconPath="${iconPath}" (exists=${iconExists}), winIconType=${typeof winIcon}, execPath="${process.execPath}"`);
+  appendLog('ICON', `createSettingsWindow: iconPath="${iconPath}" (exists=${iconExists}), nativeImageIsEmpty=${!winIcon || winIcon.isEmpty()}, execPath="${process.execPath}"`);
 
   settingsWindow = new BrowserWindow({
     width: 1140,
@@ -37,6 +37,21 @@ export function createSettingsWindow(ctx: AppContext): void {
       backgroundThrottling: true
     }
   });
+
+  if (process.platform === 'win32' && iconExists) {
+    try {
+      settingsWindow.setAppDetails({
+        appId: 'com.monratis.desksense',
+        appIconPath: iconPath,
+        appIconIndex: 0,
+        relaunchCommand: `"${process.execPath}"`,
+        relaunchDisplayName: 'DeskSense'
+      });
+      appendLog('ICON', `createSettingsWindow: setAppDetails zaaplikowane pomyślnie z appIconPath="${iconPath}"`);
+    } catch (err) {
+      appendLog('ICON', `createSettingsWindow: błąd setAppDetails: ${(err as Error).message}`);
+    }
+  }
 
   settingsWindow.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL) => {
     console.error(`[settingsWindow] did-fail-load: code=${errorCode} desc="${errorDescription}" url="${validatedURL}"`);
@@ -72,12 +87,25 @@ export function createSettingsWindow(ctx: AppContext): void {
   // Ikona na taskbarze przy otwarciu okna
   settingsWindow.on('show', () => {
     const currentIcon = resolveWindowIcon();
-    if (currentIcon && settingsWindow && !settingsWindow.isDestroyed()) {
+    if (currentIcon && !currentIcon.isEmpty() && settingsWindow && !settingsWindow.isDestroyed()) {
       try {
-        settingsWindow.setIcon(currentIcon as any);
-        appendLog('ICON', `settingsWindow on(show): zaaplikowano setIcon (${typeof currentIcon === 'string' ? currentIcon : 'NativeImage'})`);
+        settingsWindow.setIcon(currentIcon);
+        appendLog('ICON', `settingsWindow on(show): zaaplikowano setIcon (NativeImage ${currentIcon.getSize().width}x${currentIcon.getSize().height})`);
       } catch (err) {
         appendLog('ICON', `Błąd setIcon w on(show): ${(err as Error).message}`);
+      }
+    }
+    if (process.platform === 'win32' && fs.existsSync(iconPath) && settingsWindow && !settingsWindow.isDestroyed()) {
+      try {
+        settingsWindow.setAppDetails({
+          appId: 'com.monratis.desksense',
+          appIconPath: iconPath,
+          appIconIndex: 0,
+          relaunchCommand: `"${process.execPath}"`,
+          relaunchDisplayName: 'DeskSense'
+        });
+      } catch (err) {
+        appendLog('ICON', `Błąd setAppDetails w on(show): ${(err as Error).message}`);
       }
     }
     settingsWindow?.webContents.send('push:event', { type: 'window:visibility', visible: true });
@@ -129,8 +157,8 @@ export function showSettings(ctx: AppContext, atCursor = false, initialTab?: str
     }
 
     const currentIcon = resolveWindowIcon();
-    if (currentIcon && !settingsWindow.isDestroyed()) {
-      try { settingsWindow.setIcon(currentIcon as any); } catch (_) {}
+    if (currentIcon && !currentIcon.isEmpty() && !settingsWindow.isDestroyed()) {
+      try { settingsWindow.setIcon(currentIcon); } catch (_) {}
     }
 
     settingsWindow.webContents.send('push:event', { type: 'snapshot', snapshot: ctx.buildSnapshot() });

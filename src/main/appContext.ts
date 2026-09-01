@@ -241,22 +241,17 @@ export function resolveAppIcon(): string {
   return path.join(__dirname, '..', '..', 'build', 'icon.png');
 }
 
-export function resolveWindowIcon(): Electron.NativeImage | string | undefined {
+export function resolveWindowIcon(): Electron.NativeImage | null {
   const iconPath = resolveAppIconPath();
-  const exists = fs.existsSync(iconPath);
-  if (exists) {
-    if (process.platform === 'win32' && iconPath.endsWith('.ico')) {
-      return iconPath;
-    }
+  if (fs.existsSync(iconPath)) {
     try {
       const img = nativeImage.createFromPath(iconPath);
       if (!img.isEmpty()) return img;
     } catch (err) {
-      console.warn('[main] resolveWindowIcon error:', (err as Error).message);
+      appendLog('ICON', `resolveWindowIcon error: ${(err as Error).message}`);
     }
-    return iconPath;
   }
-  return undefined;
+  return null;
 }
 
 // ---------- shortcuts & autostart ----------
