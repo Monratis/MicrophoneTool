@@ -171,6 +171,7 @@ export function resolveBinDir(): string {
 
 /** Ścieżka do pliku ikony (.ico lub .png): w dev z build/ lub resources/, w paczce z resources/. */
 export function resolveAppIconPath(): string {
+  const appPath = typeof app?.getAppPath === 'function' ? app.getAppPath() : process.cwd();
   const candidates = [
     // W paczce (extraResources: resources/ -> resources/icon.ico)
     path.join(process.resourcesPath, 'resources', 'icon.ico'),
@@ -178,6 +179,10 @@ export function resolveAppIconPath(): string {
     path.join(process.resourcesPath, 'resources', 'icon.png'),
     path.join(process.resourcesPath, 'icon.png'),
     // W trybie deweloperskim
+    path.join(appPath, 'build', 'icon.ico'),
+    path.join(appPath, 'resources', 'icon.ico'),
+    path.join(appPath, 'build', 'icon.png'),
+    path.join(appPath, 'resources', 'icon.png'),
     path.join(__dirname, '..', '..', 'build', 'icon.ico'),
     path.join(__dirname, '..', '..', 'resources', 'icon.ico'),
     path.join(__dirname, '..', '..', 'build', 'icon.png'),
@@ -192,14 +197,17 @@ export function resolveAppIconPath(): string {
 
 /** Ikona aplikacji PNG: w dev z build/, w paczce z resources/ (extraResources). */
 export function resolveAppIcon(): string {
+  const appPath = typeof app?.getAppPath === 'function' ? app.getAppPath() : process.cwd();
   if (app.isPackaged) {
     const resPng = path.join(process.resourcesPath, 'resources', 'icon.png');
     if (fs.existsSync(resPng)) return resPng;
     return path.join(process.resourcesPath, 'icon.png');
   }
-  const buildPng = path.join(__dirname, '..', '..', 'build', 'icon.png');
+  const buildPng = path.join(appPath, 'build', 'icon.png');
   if (fs.existsSync(buildPng)) return buildPng;
-  return path.join(__dirname, '..', '..', 'resources', 'icon.png');
+  const resPng = path.join(appPath, 'resources', 'icon.png');
+  if (fs.existsSync(resPng)) return resPng;
+  return path.join(__dirname, '..', '..', 'build', 'icon.png');
 }
 
 export function resolveWindowIcon(): Electron.NativeImage | null {
@@ -341,8 +349,8 @@ export function ensureToastShortcut(): void {
       try { fs.unlinkSync(oldShortcut); } catch (_) {}
     }
 
-    const targetExe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
-    const targetDir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath);
+    const targetExe = process.execPath;
+    const targetDir = path.dirname(process.execPath);
     const iconPath = resolveAppIconPath();
 
     writeOrUpdateShortcut(path.join(programsDir, 'DeskSense.lnk'), {

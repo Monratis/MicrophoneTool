@@ -20,7 +20,6 @@ export function createSettingsWindow(ctx: AppContext): void {
     show: false,
     frame: false,
     resizable: true,
-    skipTaskbar: true,
     backgroundColor: '#1b2028',
     icon: winIcon ?? undefined,
     webPreferences: {
@@ -64,11 +63,8 @@ export function createSettingsWindow(ctx: AppContext): void {
     settingsWindow = null;
     ctx.settingsWindow = null;
   });
-  // Ikona na taskbarze TYLKO gdy okno faktycznie widać; schowane do tray
-  // znika z paska. Zdarzenia show/hide obejmują wszystkie ścieżki
-  // (klik w tray, przycisk ✕, druga instancja).
+  // Ikona na taskbarze przy otwarciu okna
   settingsWindow.on('show', () => {
-    settingsWindow?.setSkipTaskbar(false);
     const currentIcon = resolveWindowIcon();
     if (currentIcon && settingsWindow && !settingsWindow.isDestroyed()) {
       settingsWindow.setIcon(currentIcon);
@@ -76,7 +72,6 @@ export function createSettingsWindow(ctx: AppContext): void {
     settingsWindow?.webContents.send('push:event', { type: 'window:visibility', visible: true });
   });
   settingsWindow.on('hide', () => {
-    settingsWindow?.setSkipTaskbar(true);
     settingsWindow?.webContents.send('push:event', { type: 'window:visibility', visible: false });
   });
   settingsWindow.on('maximize', () => {

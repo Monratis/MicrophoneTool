@@ -169,7 +169,28 @@ if (mode !== 'app') {
   for (const pattern of candidates) {
     const matches = findArtifacts(pattern);
     for (const src of matches) {
-      fs.copyFileSync(path.join(distDir, src), path.join(releasesDir, src));
+      const dest = path.join(releasesDir, src);
+      let success = false;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          if (fs.existsSync(dest)) {
+            try { fs.unlinkSync(dest); } catch (_) {}
+          }
+          fs.copyFileSync(path.join(distDir, src), dest);
+          success = true;
+          break;
+        } catch (err) {
+          if (attempt === 0) {
+            try {
+              execSync(`powershell -NoProfile -Command "Get-Process -Name 'DeskSense*', 'electron*' -ErrorAction SilentlyContinue | Stop-Process -Force"`, { stdio: 'ignore' });
+            } catch (_) {}
+          }
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600);
+        }
+      }
+      if (!success) {
+        fs.copyFileSync(path.join(distDir, src), dest);
+      }
       copied.push(src);
     }
   }
