@@ -478,14 +478,14 @@ namespace IconGen
                     {
                         using (var imgMs = new MemoryStream())
                         {
-                            if (sz == 256)
+                            if (sz >= 64)
                             {
-                                // 256x256 as PNG
+                                // 256, 128, 64 as PNG (modern Windows Vista+ format)
                                 resized.Save(imgMs, ImageFormat.Png);
                             }
                             else
                             {
-                                // Standard Win32 DIB format
+                                // 48, 32, 16 as standard Win32 DIB
                                 WriteDibIcon(resized, imgMs);
                             }
                             rawBuffers[i] = imgMs.ToArray();
@@ -493,8 +493,8 @@ namespace IconGen
                     }
 
                     // ICONDIRENTRY
-                    bw.Write((byte)(sz == 256 ? 0 : sz)); // Width
-                    bw.Write((byte)(sz == 256 ? 0 : sz)); // Height
+                    bw.Write((byte)(sz >= 256 ? 0 : sz)); // Width
+                    bw.Write((byte)(sz >= 256 ? 0 : sz)); // Height
                     bw.Write((byte)0);                    // ColorCount
                     bw.Write((byte)0);                    // Reserved
                     bw.Write((short)1);                   // Color planes
@@ -519,6 +519,9 @@ namespace IconGen
             {
                 int w = bmp.Width;
                 int h = bmp.Height;
+                int andRowBytes = ((w + 31) / 32) * 4;
+                int xorSize = w * h * 4;
+                int andSize = andRowBytes * h;
 
                 // BITMAPINFOHEADER (40 bytes)
                 bw.Write(40);            // biSize
@@ -527,7 +530,7 @@ namespace IconGen
                 bw.Write((short)1);      // biPlanes
                 bw.Write((short)32);     // biBitCount
                 bw.Write(0);             // biCompression: BI_RGB
-                bw.Write(w * h * 4);     // biSizeImage
+                bw.Write(0);             // biSizeImage: 0 for BI_RGB
                 bw.Write(0);             // biXPelsPerMeter
                 bw.Write(0);             // biYPelsPerMeter
                 bw.Write(0);             // biClrUsed
@@ -547,12 +550,21 @@ namespace IconGen
                 }
 
                 // AND mask (1 bit per pixel, bottom-up, DWORD padded)
-                int andRowBytes = ((w + 31) / 32) * 4;
-                byte[] andRow = new byte[andRowBytes];
+                byte[] andMask = new byte[andSize];
                 for (int y = 0; y < h; y++)
                 {
-                    bw.Write(andRow);
+                    int srcY = h - 1 - y; // bottom-up
+                    int rowOffset = y * andRowBytes;
+                    for (int x = 0; x < w; x++)
+                    {
+                        Color c = bmp.GetPixel(x, srcY);
+                        if (c.A < 128)
+                        {
+                            andMask[rowOffset + (x / 8)] |= (byte)(0x80 >> (x % 8));
+                        }
+                    }
                 }
+                bw.Write(andMask);
             }
         }
     }
