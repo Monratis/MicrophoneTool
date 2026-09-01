@@ -1,7 +1,9 @@
 import { BrowserWindow, app } from 'electron';
 import path from 'node:path';
+import fs from 'node:fs';
 import type { AppContext } from './appContext';
-import { resolveWindowIcon } from './appContext';
+import { resolveWindowIcon, resolveAppIconPath } from './appContext';
+import { appendLog } from './logger';
 
 let settingsWindow: BrowserWindow | null = null;
 
@@ -11,6 +13,10 @@ export function getSettingsWindow(): BrowserWindow | null {
 
 export function createSettingsWindow(ctx: AppContext): void {
   const winIcon = resolveWindowIcon();
+  const iconPath = resolveAppIconPath();
+  const iconExists = fs.existsSync(iconPath);
+
+  appendLog('ICON', `createSettingsWindow: iconPath="${iconPath}" (exists=${iconExists}), winIconType=${typeof winIcon}, execPath="${process.execPath}"`);
 
   settingsWindow = new BrowserWindow({
     width: 1140,
@@ -67,7 +73,12 @@ export function createSettingsWindow(ctx: AppContext): void {
   settingsWindow.on('show', () => {
     const currentIcon = resolveWindowIcon();
     if (currentIcon && settingsWindow && !settingsWindow.isDestroyed()) {
-      try { settingsWindow.setIcon(currentIcon as any); } catch (_) {}
+      try {
+        settingsWindow.setIcon(currentIcon as any);
+        appendLog('ICON', `settingsWindow on(show): zaaplikowano setIcon (${typeof currentIcon === 'string' ? currentIcon : 'NativeImage'})`);
+      } catch (err) {
+        appendLog('ICON', `Błąd setIcon w on(show): ${(err as Error).message}`);
+      }
     }
     settingsWindow?.webContents.send('push:event', { type: 'window:visibility', visible: true });
   });

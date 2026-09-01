@@ -16,6 +16,7 @@ import type { VoiceManager } from './voiceManager';
 import type { FirmwareFlasher } from './firmwareFlasher';
 import type { PushEvent, Snapshot } from '../shared/types';
 import { showVoiceOsd } from './voiceOsd';
+import { appendLog } from './logger';
 
 /**
  * Wspólny kontekst aplikacji przekazywany modułom (tray / okno / IPC).
@@ -242,9 +243,8 @@ export function resolveAppIcon(): string {
 
 export function resolveWindowIcon(): Electron.NativeImage | string | undefined {
   const iconPath = resolveAppIconPath();
-  if (fs.existsSync(iconPath)) {
-    // Na Windows przekazanie ścieżki pliku .ico do BrowserWindow
-    // pozwala Win32 załadować pełną grupę ikon HICON we wszystkich rozdzielczościach (16-256px).
+  const exists = fs.existsSync(iconPath);
+  if (exists) {
     if (process.platform === 'win32' && iconPath.endsWith('.ico')) {
       return iconPath;
     }
@@ -376,7 +376,9 @@ export function ensureToastShortcut(): void {
     if (fs.existsSync(sourceIcon)) {
       try {
         fs.copyFileSync(sourceIcon, persistentIcon);
-      } catch (_) {}
+      } catch (err) {
+        appendLog('ICON', `Błąd kopiowania ikony do AppData: ${(err as Error).message}`);
+      }
     }
 
     const programsDir = path.join(
@@ -398,7 +400,7 @@ export function ensureToastShortcut(): void {
     const targetDir = path.dirname(process.execPath);
     const iconToUse = fs.existsSync(persistentIcon) ? persistentIcon : sourceIcon;
 
-    writeOrUpdateShortcut(path.join(programsDir, 'DeskSense.lnk'), {
+    const ok = writeOrUpdateShortcut(path.join(programsDir, 'DeskSense.lnk'), {
       target: targetExe,
       args: app.isPackaged ? '--show' : `"${path.resolve('.')}" --show`,
       cwd: targetDir,
@@ -407,7 +409,9 @@ export function ensureToastShortcut(): void {
       icon: iconToUse,
       iconIndex: 0
     });
+
+    appendLog('ICON', `Rejestracja skrótu AUMID: shortcut="${path.join(programsDir, 'DeskSense.lnk')}", targetExe="${targetExe}", icon="${iconToUse}" (exists: ${fs.existsSync(iconToUse)}), success=${ok}`);
   } catch (err) {
-    console.warn('[main] toast shortcut warning:', (err as Error).message);
+    appendLog('ICON', `Błąd w ensureToastShortcut: ${(err as Error).message}`);
   }
 }

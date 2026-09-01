@@ -159,6 +159,7 @@ function refreshSnapshot(): void {
 // ---------- lifecycle ----------
 
 app.whenReady().then(() => {
+  appendLog('SYSTEM', `DeskSense start: version=${app.getVersion()}, isPackaged=${app.isPackaged}, execPath="${process.execPath}", resourcesPath="${process.resourcesPath}", appDataDir="${appDataDir}"`);
   cleanupStaleUpdateFiles();
   ensureToastShortcut();
   initVoiceOsd();
