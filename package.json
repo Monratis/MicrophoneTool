@@ -82,8 +82,8 @@
     },
     "portable": {
       "artifactName": "${productName} (Portable).exe",
-      "unpackDirName": false,
-      "useZip": true
+      "unpackDirName": "DeskSense",
+      "useZip": false
     },
     "nsis": {
       "artifactName": "${productName} Setup ${version}.exe",

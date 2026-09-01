@@ -202,10 +202,10 @@ export function resolveAppIconPath(): string {
   const appPath = typeof app?.getAppPath === 'function' ? app.getAppPath() : process.cwd();
   const candidates = [
     // W paczce (extraResources: resources/ -> resources/icon.ico)
-    path.join(process.resourcesPath, 'resources', 'icon.ico'),
     path.join(process.resourcesPath, 'icon.ico'),
-    path.join(process.resourcesPath, 'resources', 'icon.png'),
+    path.join(process.resourcesPath, 'resources', 'icon.ico'),
     path.join(process.resourcesPath, 'icon.png'),
+    path.join(process.resourcesPath, 'resources', 'icon.png'),
     // W trybie deweloperskim
     path.join(appPath, 'build', 'icon.ico'),
     path.join(appPath, 'resources', 'icon.ico'),
@@ -220,13 +220,15 @@ export function resolveAppIconPath(): string {
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
   }
-  return path.join(__dirname, '..', '..', 'build', 'icon.ico');
+  return path.join(appPath, 'build', 'icon.ico');
 }
 
 /** Ikona aplikacji PNG: w dev z build/, w paczce z resources/ (extraResources). */
 export function resolveAppIcon(): string {
   const appPath = typeof app?.getAppPath === 'function' ? app.getAppPath() : process.cwd();
   if (app.isPackaged) {
+    const directPng = path.join(process.resourcesPath, 'icon.png');
+    if (fs.existsSync(directPng)) return directPng;
     const resPng = path.join(process.resourcesPath, 'resources', 'icon.png');
     if (fs.existsSync(resPng)) return resPng;
     return path.join(process.resourcesPath, 'icon.png');
@@ -238,17 +240,23 @@ export function resolveAppIcon(): string {
   return path.join(__dirname, '..', '..', 'build', 'icon.png');
 }
 
-export function resolveWindowIcon(): Electron.NativeImage | null {
+export function resolveWindowIcon(): Electron.NativeImage | string | undefined {
   const iconPath = resolveAppIconPath();
   if (fs.existsSync(iconPath)) {
+    // Na Windows przekazanie ścieżki pliku .ico do BrowserWindow
+    // pozwala Win32 załadować pełną grupę ikon HICON we wszystkich rozdzielczościach (16-256px).
+    if (process.platform === 'win32' && iconPath.endsWith('.ico')) {
+      return iconPath;
+    }
     try {
       const img = nativeImage.createFromPath(iconPath);
       if (!img.isEmpty()) return img;
     } catch (err) {
       console.warn('[main] resolveWindowIcon error:', (err as Error).message);
     }
+    return iconPath;
   }
-  return null;
+  return undefined;
 }
 
 // ---------- shortcuts & autostart ----------

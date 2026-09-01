@@ -67,7 +67,7 @@ export function createSettingsWindow(ctx: AppContext): void {
   settingsWindow.on('show', () => {
     const currentIcon = resolveWindowIcon();
     if (currentIcon && settingsWindow && !settingsWindow.isDestroyed()) {
-      settingsWindow.setIcon(currentIcon);
+      try { settingsWindow.setIcon(currentIcon as any); } catch (_) {}
     }
     settingsWindow?.webContents.send('push:event', { type: 'window:visibility', visible: true });
   });
@@ -119,7 +119,7 @@ export function showSettings(ctx: AppContext, atCursor = false, initialTab?: str
 
     const currentIcon = resolveWindowIcon();
     if (currentIcon && !settingsWindow.isDestroyed()) {
-      settingsWindow.setIcon(currentIcon);
+      try { settingsWindow.setIcon(currentIcon as any); } catch (_) {}
     }
 
     settingsWindow.webContents.send('push:event', { type: 'snapshot', snapshot: ctx.buildSnapshot() });
