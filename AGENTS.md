@@ -97,7 +97,7 @@ npm run package:installer         # tylko NSIS
    na GitHub Releases (updater pobiera je stamtąd przez API). Nie commituj ich.
 
 6. **Push protection**: żadnych tokenów/PAT w kodzie. `githubToken` pochodzi z env
-   `GITHUB_TOKEN` lub `%APPDATA%/Audio Switcher/config.json` (niezależny od repo).
+   `GITHUB_TOKEN` lub `%APPDATA%/DeskSense/config.json` (niezależny od repo).
 
 7. **productName** siedzi w `package.json → build.productName` (NIE top-level).
 

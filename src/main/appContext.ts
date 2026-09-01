@@ -47,14 +47,33 @@ export interface AppContext {
 
 // ---------- paths ----------
 
-const APP_DATA_FOLDER = 'Audio Switcher';
+const APP_DATA_FOLDER = 'DeskSense';
 
 export function getAppDataDir(): string {
   const base =
     process.env.APPDATA ||
     (app.isReady() ? app.getPath('appData') : null) ||
     path.join(os.homedir(), 'AppData', 'Roaming');
-  return path.join(base, APP_DATA_FOLDER);
+  const targetDir = path.join(base, APP_DATA_FOLDER);
+
+  // Automatyczna migracja z poprzedniej nazwy folderu (Audio Switcher -> DeskSense)
+  try {
+    const legacyDir = path.join(base, 'Audio Switcher');
+    if (fs.existsSync(legacyDir) && !fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+      for (const file of fs.readdirSync(legacyDir)) {
+        const srcFile = path.join(legacyDir, file);
+        const destFile = path.join(targetDir, file);
+        if (fs.statSync(srcFile).isFile() && !fs.existsSync(destFile)) {
+          fs.copyFileSync(srcFile, destFile);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[appData] migration warning:', (err as Error).message);
+  }
+
+  return targetDir;
 }
 
 /**
@@ -149,8 +168,17 @@ export function resolveConfigPath(appDataDir: string): string {
     if (fs.existsSync(dev)) return dev;
   }
 
-  // W wersji portable / produkcyjnej zawsze dbamy o obecność configu w %APPDATA%/Audio Switcher
+  // W wersji portable / produkcyjnej zawsze dbamy o obecność configu w %APPDATA%/DeskSense
   if (!fs.existsSync(appDataConfig)) {
+    const base = path.dirname(appDataDir);
+    const legacyConfig = path.join(base, 'Audio Switcher', 'config.json');
+    if (fs.existsSync(legacyConfig)) {
+      try {
+        fs.copyFileSync(legacyConfig, appDataConfig);
+        return appDataConfig;
+      } catch (_) {}
+    }
+
     const bundled = app.isPackaged ? path.join(process.resourcesPath, 'config.json') : null;
     if (bundled && fs.existsSync(bundled)) {
       try {

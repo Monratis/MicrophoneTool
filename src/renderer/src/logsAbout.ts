@@ -161,7 +161,7 @@ export function renderAboutTab(app: AppUI): string {
 
               <div class="fc-diag-item">
                 <div class="fc-diag-item-title">
-                  <span>🎙️ Audio Switcher Core</span>
+                  <span>🎙️ DeskSense Audio Core</span>
                   <span class="fc-badge calibrated">Aktywny ✓</span>
                 </div>
                 <div class="fc-diag-item-val">${app.audioDevices.length} mikrofonów Windows</div>
